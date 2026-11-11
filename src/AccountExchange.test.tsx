@@ -77,15 +77,6 @@ const savedState: ViewState = {
   configRevision: "fixture-config-revision",
   currentState: "missing",
   preferences: { codexHome: "/fixture/codex", cliPath: "", theme: "system" },
-  authSource: {
-    provider: "openai",
-    credentialStore: "file",
-    inlineToken: false,
-    envKey: false,
-    commandAuth: false,
-    requiresOpenaiAuth: true,
-    warning: null,
-  },
   error: null,
 };
 

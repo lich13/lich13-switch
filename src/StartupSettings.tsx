@@ -27,7 +27,6 @@ export default function StartupSettings() {
       setState(
         await command("set_startup", {
           enabled,
-          expectedRevision: state.revision,
         }),
       );
     } catch (e) {

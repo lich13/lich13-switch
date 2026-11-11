@@ -36,15 +36,6 @@ export type ViewState = {
     message: string;
     at: number;
   } | null;
-  authSource: {
-    provider: string;
-    credentialStore: string;
-    inlineToken: boolean;
-    envKey: boolean;
-    commandAuth: boolean;
-    requiresOpenaiAuth: boolean;
-    warning: string | null;
-  };
   error: string | null;
   officialMode?: OfficialMode;
 };
@@ -80,10 +71,7 @@ export type AppError = {
 };
 export type UpdateInfo = {
   hasUpdate: boolean;
-  currentVersion: string;
   latestVersion: string | null;
-  releaseUrl: string;
-  asset: { name: string; url: string } | null;
 };
 export const errorOf = (e: unknown): AppError =>
   typeof e === "object" && e !== null && "message" in e
@@ -190,7 +178,6 @@ export type GrokModel = {
   addressSource: string | null;
   credentialAvailable: boolean;
   credentialSource?: string | null;
-  missingEnvironment: string[];
   error: string | null;
 };
 export type CurrentConnection = {
@@ -264,7 +251,6 @@ export type GatewayState = {
 };
 export type StartupState = {
   launchOnBoot: boolean;
-  revision: string;
 };
 
 export type QuotaPlan = {

@@ -58,7 +58,6 @@ function QuickContent({
   const [gateway, setGateway] = useState<GatewayState | null>(null);
   const [prefs, setPrefs] = useState<Preferences>({
     pinned: false,
-    tab: "providers",
   });
   const [visible, setVisible] = useState(preview);
   const [error, setError] = useState("");

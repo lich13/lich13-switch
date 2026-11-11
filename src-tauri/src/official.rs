@@ -626,7 +626,7 @@ fn restore_record(home: &Path, record: &Record) -> Result<()> {
     Ok(())
 }
 
-pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeView> {
+pub fn disable(data: &Path, home: &Path) -> Result<OfficialModeView> {
     let record =
         load(data)?.ok_or_else(|| AppError::new(code::OFFICIAL_MODE, "官方账号模式未启用"))?;
     let path = home.join("config.toml");
@@ -640,7 +640,6 @@ pub fn disable(data: &Path, home: &Path, expected: &str) -> Result<OfficialModeV
         .ok_or_else(|| AppError::new(code::CONFLICT, "Codex 配置不存在，无法恢复"))?;
     let text =
         String::from_utf8(raw).map_err(|_| AppError::new(code::CONFIG, "Codex 配置不是 UTF-8"))?;
-    let _ = expected; // unrelated edits are allowed; managed lines are checked below
     let current_scan = scan(&text)?;
     if matches!(record.stage.as_str(), "disabling" | "enabling")
         && matches_original(&current_scan, &record)
@@ -704,7 +703,7 @@ mod tests {
         assert!(enabled.enabled);
         let managed = fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(managed.contains("# vela:official base_url = 'https://x.test' # keep"));
-        disable(&data, &home, &storage::revision(Some(managed.as_bytes()))).unwrap();
+        disable(&data, &home).unwrap();
         assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), TEXT);
     }
     #[test]
@@ -739,8 +738,7 @@ mod tests {
         changed.push_str("\nuser_note = 'external'\n");
         fs::write(home.join("config.toml"), changed).unwrap();
         assert_eq!(view(&data, &home).state, "enabled");
-        let revision = storage::revision(Some(&fs::read(home.join("config.toml")).unwrap()));
-        disable(&data, &home, &revision).unwrap();
+        disable(&data, &home).unwrap();
         let restored = fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(restored.contains("base_url = 'https://x.test' # keep"));
         assert!(restored.contains("user_note = 'external'"));
@@ -857,7 +855,7 @@ mod tests {
             record.enabled = stage == "disabling";
             save(&data, &record).unwrap();
             fs::write(&cfg_path, TEXT).unwrap();
-            let restored = disable(&data, &home, &before).unwrap();
+            let restored = disable(&data, &home).unwrap();
             assert!(!restored.enabled);
             assert_eq!(restored.state, "disabled");
             assert!(!record_path(&data).exists());

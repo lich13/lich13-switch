@@ -455,8 +455,6 @@ fn preview_and_cancel_leave_config_environment_and_store_untouched() {
     let before_store = optional_bytes(&store_path);
 
     let preview = fixture.valid_preview(None, true);
-    assert!(preview.environment_available);
-    assert!(preview.environment_loaded);
     assert_eq!(optional_bytes(&config_path), before_config);
     assert_eq!(optional_bytes(&environment_path), before_environment);
     assert_eq!(optional_bytes(&store_path), before_store);

@@ -30,7 +30,6 @@ export default function GrokImport({
     try {
       const next = await command("preview_grok_import", {
         selected,
-        useEnvironment: true,
       });
       if (current !== generation.current) {
         if (next.token)

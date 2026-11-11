@@ -7,30 +7,18 @@ use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const QUICK_DEFAULT_HEIGHT: f64 = 720.;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
     pub pinned: bool,
-    pub tab: String,
     #[serde(default)]
     pub hidden_clients: Vec<crate::gateway::ClientId>,
-}
-impl Default for Preferences {
-    fn default() -> Self {
-        Self {
-            pinned: false,
-            tab: "providers".into(),
-            hidden_clients: Vec::new(),
-        }
-    }
 }
 #[derive(Default)]
 struct Lifecycle {
     generation: u64,
     focused: bool,
     showing: bool,
-    anchor: Option<tauri::Rect>,
-    height: f64,
 }
 pub struct Panel {
     path: PathBuf,
@@ -59,10 +47,7 @@ impl Panel {
         Ok(Self {
             path,
             preferences: Mutex::new(preferences),
-            lifecycle: Mutex::new(Lifecycle {
-                height: QUICK_DEFAULT_HEIGHT,
-                ..Default::default()
-            }),
+            lifecycle: Mutex::new(Lifecycle::default()),
         })
     }
     pub fn create(app: &tauri::AppHandle, incognito: bool) -> tauri::Result<()> {
@@ -94,15 +79,13 @@ impl Panel {
             })
             .ok_or_else(|| AppError::new(code::PANEL, "无法定位托盘图标"))?;
         let panel = app.state::<Panel>();
-        let height = {
+        {
             let mut life = panel.lifecycle.lock().unwrap();
             life.generation += 1;
             life.showing = true;
-            life.anchor = Some(anchor);
-            life.height
-        };
+        }
         let result = (|| -> Result<()> {
-            position(&window, anchor, height)?;
+            position(&window, anchor, QUICK_DEFAULT_HEIGHT)?;
             #[cfg(target_os = "macos")]
             app.show()
                 .map_err(|_| AppError::new(code::PANEL, "无法显示快捷面板"))?;
@@ -215,26 +198,19 @@ fn position(window: &tauri::WebviewWindow, anchor: tauri::Rect, height: f64) -> 
 #[tauri::command]
 pub fn get_quick(app: tauri::AppHandle, panel: tauri::State<'_, Panel>) -> serde_json::Value {
     let prefs = panel.preferences.lock().unwrap().clone();
-    serde_json::json!({"pinned": prefs.pinned, "tab": prefs.tab, "hiddenClients": prefs.hidden_clients, "visible": app.get_webview_window("quick").is_some_and(|w| w.is_visible().unwrap_or(false))})
+    serde_json::json!({"pinned": prefs.pinned, "hiddenClients": prefs.hidden_clients, "visible": app.get_webview_window("quick").is_some_and(|w| w.is_visible().unwrap_or(false))})
 }
 #[tauri::command]
 pub fn set_quick(
     app: tauri::AppHandle,
     panel: tauri::State<'_, Panel>,
     pinned: Option<bool>,
-    tab: Option<String>,
     hidden_clients: Option<Vec<crate::gateway::ClientId>>,
 ) -> Result<Preferences> {
     let mut prefs = panel.preferences.lock().unwrap();
     let mut next = prefs.clone();
     if let Some(pinned) = pinned {
         next.pinned = pinned;
-    }
-    if let Some(tab) = tab {
-        if !["providers", "accounts"].contains(&tab.as_str()) {
-            return Err(AppError::new(code::PANEL, "无效快捷页面"));
-        }
-        next.tab = tab;
     }
     if let Some(hidden) = hidden_clients {
         next.hidden_clients = hidden.into_iter().fold(Vec::new(), |mut ids, id| {
@@ -269,26 +245,6 @@ pub fn hide_quick(app: tauri::AppHandle) -> Result<()> {
     }
     if let Some(r) = app.try_state::<std::sync::Arc<crate::Runtime>>() {
         r.mark_window_visible("quick", false);
-    }
-    Ok(())
-}
-#[tauri::command]
-pub fn resize_quick(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    height: f64,
-) -> Result<()> {
-    if window.label() != "quick" || !height.is_finite() {
-        return Err(AppError::new(code::PANEL, "窗口尺寸无效"));
-    }
-    let panel = app.state::<Panel>();
-    let anchor = {
-        let mut life = panel.lifecycle.lock().unwrap();
-        life.height = height.clamp(128., QUICK_DEFAULT_HEIGHT);
-        life.anchor
-    };
-    if let Some(anchor) = anchor {
-        position(&window, anchor, height)?;
     }
     Ok(())
 }
@@ -339,7 +295,6 @@ mod preference_tests {
         let panel = Panel::new(dir.path()).unwrap();
         let prefs = panel.preferences.lock().unwrap();
         assert!(prefs.pinned);
-        assert_eq!(prefs.tab, "accounts");
         assert_eq!(prefs.hidden_clients, [crate::gateway::ClientId::Claude]);
     }
     #[test]

@@ -37,9 +37,9 @@ beforeEach(() => {
           args?.clientId === "claude" ? claudeGatewayDemo : gatewayDemo,
         );
       if (name === "get_quick")
-        return { pinned: false, tab: "providers", visible: true };
+        return { pinned: false, visible: true };
       if (name === "set_quick")
-        return { pinned: false, tab: "providers", ...args };
+        return { pinned: false, ...args };
     },
   );
 });
@@ -47,12 +47,10 @@ afterEach(() => localStorage.clear());
 it("keeps a newer hide event when the initial visibility read resolves late", async () => {
   let finish!: (value: {
     pinned: boolean;
-    tab: string;
     visible: boolean;
   }) => void;
   const initial = new Promise<{
     pinned: boolean;
-    tab: string;
     visible: boolean;
   }>((resolve) => {
     finish = resolve;
@@ -71,7 +69,7 @@ it("keeps a newer hide event when the initial visibility read resolves late", as
     ([name]) => name === "get_clamshell_state",
   ).length;
   await act(async () => {
-    finish({ pinned: false, tab: "providers", visible: true });
+    finish({ pinned: false, visible: true });
     await initial;
   });
   expect(
@@ -152,9 +150,9 @@ it("omits the provider/account tab row, hides wallet placeholder badges, and com
       if (name === "get_gateway" || name === "update_gateway")
         return structuredClone(gateway);
       if (name === "get_quick")
-        return { pinned: false, tab: "providers", visible: true };
+        return { pinned: false, visible: true };
       if (name === "set_quick")
-        return { pinned: false, tab: "providers", ...args };
+        return { pinned: false, ...args };
     },
   );
   render(<QuickPanel />);
@@ -224,14 +222,6 @@ it("uses current revisions for quick actions without initializing the main windo
     "frontend_ready",
     expect.anything(),
   );
-});
-
-it("keeps the fixed tall panel without dynamic resize commands", async () => {
-  render(<QuickPanel />);
-  await screen.findByText("api.example.com");
-  expect(
-    mock.command.mock.calls.some(([name]) => name === "resize_quick"),
-  ).toBe(false);
 });
 
 it("keeps provider naming separate from selection and exposes reset in the quick panel", async () => {
@@ -327,9 +317,9 @@ it("keeps the provider quota beside the name in the quick panel", async () => {
       if (name === "get_gateway" || name === "update_gateway")
         return structuredClone(gateway);
       if (name === "get_quick")
-        return { pinned: false, tab: "providers", visible: true };
+        return { pinned: false, visible: true };
       if (name === "set_quick")
-        return { pinned: false, tab: "providers", ...args };
+        return { pinned: false, ...args };
     },
   );
   render(<QuickPanel />);
@@ -514,7 +504,7 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
   mock.command.mockImplementation(
     (name: string, args: Record<string, unknown> = {}) =>
       name === "get_quick"
-        ? { pinned: false, tab: "providers", visible: true, hiddenClients }
+        ? { pinned: false, visible: true, hiddenClients }
         : original(name, args),
   );
   const user = userEvent.setup();
@@ -524,7 +514,6 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
   act(() =>
     mock.listeners.get("quick-state")?.({
       pinned: false,
-      tab: "providers",
       hiddenClients,
     }),
   );
@@ -543,7 +532,6 @@ it("synchronizes hidden platforms, falls back, and never stops a gateway", async
   act(() =>
     mock.listeners.get("quick-state")?.({
       pinned: false,
-      tab: "providers",
       hiddenClients,
     }),
   );

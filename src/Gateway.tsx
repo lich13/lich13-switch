@@ -267,7 +267,6 @@ function GatewayContent({
     run(async () => {
       const preview = await command("preview_dsh_profile", {
         profile: preferredDshProfile(),
-        protocol: "chat_completions",
       });
       if (!preview.profile || preview.providers?.some((p) => p.error)) {
         setDialog({ kind: "dsh" });
@@ -288,9 +287,7 @@ function GatewayContent({
           }),
         );
       } else {
-        const preview = await command("preview_grok_import", {
-          useEnvironment: true,
-        });
+        const preview = await command("preview_grok_import", {});
         if (!preview.token || preview.error) {
           setDialog({ kind: "grokImport" });
           return;

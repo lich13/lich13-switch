@@ -7,15 +7,13 @@ import StartupSettings from "./StartupSettings";
 const initial = {
   launchOnBoot: false,
   restoreGateway: false,
-  revision: "old",
 };
 beforeEach(() => command.mockReset());
 describe("native startup settings", () => {
-  it("uses the verified system state and versioned updates", async () => {
+  it("uses the verified system state and updates", async () => {
     command.mockResolvedValueOnce(initial).mockResolvedValueOnce({
       ...initial,
       launchOnBoot: true,
-      revision: "verified",
     });
     render(<StartupSettings />);
     expect(screen.queryByLabelText("启动时恢复网关")).not.toBeInTheDocument();
@@ -24,7 +22,6 @@ describe("native startup settings", () => {
     await userEvent.click(box);
     expect(command).toHaveBeenLastCalledWith("set_startup", {
       enabled: true,
-      expectedRevision: "old",
     });
     await waitFor(() => expect(box).toBeChecked());
   });

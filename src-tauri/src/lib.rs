@@ -51,7 +51,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
-use tauri_plugin_dialog::DialogExt;
 
 struct Runtime {
     diagnostics: events::Service,
@@ -727,11 +726,10 @@ async fn use_official_account(
 async fn disable_official_account(
     app: tauri::AppHandle,
     r: tauri::State<'_, Arc<Runtime>>,
-    expected_config_revision: String,
 ) -> Result<ViewState> {
     let _official_guard = r.official_tx.lock().await;
     let home = r.home(gateway::ClientId::Codex)?;
-    official::disable(&r.data, &home, &expected_config_revision)?;
+    official::disable(&r.data, &home)?;
     let next = refresh(&app, &r)?;
     let _ = app.emit("switch-notice", "官方连接已关闭，配置已恢复");
     Ok(next)
@@ -743,31 +741,6 @@ fn import_current(app: tauri::AppHandle, r: tauri::State<'_, Arc<Runtime>>) -> R
     c.import_file(&path, None)?;
     drop(c);
     refresh(&app, &r)
-}
-#[tauri::command]
-async fn import_auth_file(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<Option<ViewState>> {
-    let handle = app.clone();
-    let path = tauri::async_runtime::spawn_blocking(move || {
-        handle
-            .dialog()
-            .file()
-            .add_filter("Codex auth JSON", &["json"])
-            .blocking_pick_file()
-    })
-    .await
-    .map_err(|_| AppError::new(code::DIALOG, "无法打开文件选择器"))?;
-    if let Some(path) = path {
-        let path = path
-            .into_path()
-            .map_err(|_| AppError::new(code::PATH, "请选择本地文件"))?;
-        r.core.lock().unwrap().import_file(&path, None)?;
-        Ok(Some(refresh(&app, &r)?))
-    } else {
-        Ok(None)
-    }
 }
 #[tauri::command]
 fn rename_account(
@@ -945,33 +918,11 @@ async fn get_startup(r: tauri::State<'_, Arc<Runtime>>) -> Result<startup::View>
         .map_err(|_| AppError::new(code::STARTUP, "读取启动设置失败"))?
 }
 #[tauri::command]
-async fn set_startup(
-    r: tauri::State<'_, Arc<Runtime>>,
-    enabled: bool,
-    expected_revision: String,
-) -> Result<startup::View> {
+async fn set_startup(r: tauri::State<'_, Arc<Runtime>>, enabled: bool) -> Result<startup::View> {
     let r = r.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || r.startup.update(enabled, &expected_revision))
+    tauri::async_runtime::spawn_blocking(move || r.startup.update(enabled))
         .await
         .map_err(|_| AppError::new(code::STARTUP, "更新启动设置失败"))?
-}
-#[tauri::command]
-async fn pick_path(app: tauri::AppHandle, kind: String) -> Result<Option<String>> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let p = if kind == "directory" {
-            app.dialog().file().blocking_pick_folder()
-        } else {
-            app.dialog().file().blocking_pick_file()
-        };
-        p.map(|p| {
-            p.into_path()
-                .map(|p| p.to_string_lossy().into())
-                .map_err(|_| AppError::new(code::PATH, "请选择本地路径"))
-        })
-        .transpose()
-    })
-    .await
-    .map_err(|_| AppError::new(code::DIALOG, "无法选择路径"))?
 }
 #[tauri::command]
 fn get_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<login::LoginState> {
@@ -1284,18 +1235,6 @@ fn cancel_gateway_wait(
     r.gateway(client_id).cancel_wait(&request_id)
 }
 #[tauri::command]
-fn get_gateway_listener(r: tauri::State<'_, Arc<Runtime>>) -> Result<gateway::ListenerView> {
-    r.gateway.try_listener_view()
-}
-#[tauri::command]
-fn set_gateway_listener(
-    port: u16,
-    expected_revision: String,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::ListenerView> {
-    r.gateway.set_listener_port(port, &expected_revision)
-}
-#[tauri::command]
 fn get_gateway_models(
     client_id: Option<gateway::ClientId>,
     r: tauri::State<'_, Arc<Runtime>>,
@@ -1346,28 +1285,10 @@ async fn dsh_official_models(
 #[tauri::command]
 fn preview_dsh_profile(
     profile: Option<String>,
-    _protocol: gateway::grok_config::Protocol,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::dsh::Preview> {
     r.dsh
         .preview_dsh(&r.home(gateway::ClientId::Dsh)?, profile.as_deref())
-}
-#[tauri::command]
-async fn attach_dsh_profile(
-    options: gateway::dsh::Options,
-    expected_revision: String,
-    preview_revision: String,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::View> {
-    r.dsh
-        .attach_dsh(
-            &r.home(gateway::ClientId::Dsh)?,
-            options,
-            &expected_revision,
-            Some(&preview_revision),
-        )
-        .await
-        .map_err(|e| r.config_failure(gateway::ClientId::Dsh, e))
 }
 #[tauri::command]
 async fn attach_dsh_profiles(
@@ -1446,14 +1367,10 @@ async fn restore_dsh_file(
 #[tauri::command]
 fn preview_grok_import(
     selected: Option<String>,
-    use_environment: bool,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::GrokImportPreview> {
-    r.grok.preview_grok_import(
-        &r.home(gateway::ClientId::Grok)?,
-        selected.as_deref(),
-        use_environment,
-    )
+    r.grok
+        .preview_grok_import(&r.home(gateway::ClientId::Grok)?, selected.as_deref(), true)
 }
 #[tauri::command]
 fn cancel_grok_import(token: Option<String>, r: tauri::State<'_, Arc<Runtime>>) {
@@ -2158,9 +2075,10 @@ pub fn run() {
             }
         })
         .on_window_event(|w, event| {
+            let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
             if matches!(event, tauri::WindowEvent::Focused(true))
+                || (matches!(event, tauri::WindowEvent::Focused(false)) && !visible)
                 || (matches!(event, tauri::WindowEvent::Resized(_)) && w.is_minimized().unwrap_or(false)) {
-                let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
                 let _ = w.emit(if w.label() == "quick" { "panel-visibility" } else { "app-visibility" }, visible);
                 if visible {
                     sync_window_on_show(w.app_handle(), w.label());
@@ -2265,15 +2183,12 @@ pub fn run() {
             quick::get_quick,
             quick::set_quick,
             quick::hide_quick,
-            quick::resize_quick,
             get_gateway,
             get_gateway_freeze,
             set_gateway_frozen,
             cancel_gateway_wait,
             get_failure_policy_catalog,
             match_failure_policy,
-            get_gateway_listener,
-            set_gateway_listener,
             preview_grok_import,
             get_gateway_models,
             refresh_gateway_models,
@@ -2281,7 +2196,6 @@ pub fn run() {
             edit_model_list,
             dsh_official_models,
             preview_dsh_profile,
-            attach_dsh_profile,
             attach_dsh_profiles,
             read_dsh_file,
             read_previous_dsh_file,
@@ -2308,7 +2222,6 @@ pub fn run() {
             use_official_account,
             disable_official_account,
             import_current,
-            import_auth_file,
             rename_account,
             delete_account,
             read_config,
@@ -2319,7 +2232,6 @@ pub fn run() {
             set_quota_refresh,
             get_startup,
             set_startup,
-            pick_path,
             get_login,
             start_login,
             cancel_login,

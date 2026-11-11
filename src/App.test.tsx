@@ -73,15 +73,6 @@ beforeEach(() => {
     configRevision: "cfg-1",
     currentState: "saved",
     preferences: { codexHome: "/test/.codex", cliPath: "", theme: "dark" },
-    authSource: {
-      provider: "openai",
-      credentialStore: "file",
-      inlineToken: false,
-      envKey: false,
-      commandAuth: false,
-      requiresOpenaiAuth: true,
-      warning: null,
-    },
     error: null,
   };
   doc = {
@@ -144,10 +135,7 @@ beforeEach(() => {
         case "check_for_updates":
           return {
             hasUpdate: false,
-            currentVersion: "0.12.1",
             latestVersion: "0.12.1",
-            releaseUrl: "https://github.com/lich13/vela/releases",
-            asset: null,
           };
         case "notification_permission":
           return { permission: "granted", error: null };

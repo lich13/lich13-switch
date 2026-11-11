@@ -330,9 +330,7 @@ export default function App() {
   const disableOfficial = () =>
     void action(async () => {
       if (!state) return;
-      const s = await command("disable_official_account", {
-        expectedConfigRevision: state.configRevision,
-      });
+      const s = await command("disable_official_account");
       setState(s);
       notify("官方连接已关闭，配置已恢复");
     });

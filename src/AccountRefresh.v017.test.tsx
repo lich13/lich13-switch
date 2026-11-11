@@ -72,15 +72,6 @@ beforeEach(() => {
       cliPath: "",
       theme: "dark",
     },
-    authSource: {
-      provider: "openai",
-      credentialStore: "file",
-      inlineToken: false,
-      envKey: false,
-      commandAuth: false,
-      requiresOpenaiAuth: true,
-      warning: null,
-    },
     error: null,
   };
   mocks.command.mockImplementation(
@@ -419,9 +410,6 @@ describe("targeted account credential refresh", () => {
       ["start_login", expectedRequest(account)],
       ["start_login", expectedRequest(account)],
     ]);
-    expect(
-      mocks.command.mock.calls.some(([name]) => name === "import_auth_file"),
-    ).toBe(false);
     expect(
       mocks.command.mock.calls.some(([name]) => name === "import_current"),
     ).toBe(false);

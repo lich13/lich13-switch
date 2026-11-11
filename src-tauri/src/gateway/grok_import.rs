@@ -45,7 +45,6 @@ pub struct ModelView {
     pub address_source: Option<String>,
     pub credential_available: bool,
     pub credential_source: Option<String>,
-    pub missing_environment: Vec<String>,
     pub error: Option<String>,
 }
 #[derive(Serialize)]
@@ -58,8 +57,6 @@ pub struct Preview {
     pub revision: String,
     pub models: Vec<ModelView>,
     pub selected: String,
-    pub environment_available: bool,
-    pub environment_loaded: bool,
     pub clear_environment: Vec<String>,
     pub error: Option<String>,
 }
@@ -200,11 +197,6 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
                     format!("环境变量：{}", p.credential_names.join(" / "))
                 },
             ),
-            missing_environment: if p.pair.token.is_none() {
-                p.credential_names.clone()
-            } else {
-                Vec::new()
-            },
             error: None,
         },
         Err(e) => ModelView {
@@ -215,7 +207,6 @@ fn model_view(key: String, result: &Result<Profile>) -> ModelView {
             address_source: None,
             credential_available: false,
             credential_source: None,
-            missing_environment: Vec::new(),
             error: Some(e.message.clone()),
         },
     }
@@ -450,9 +441,6 @@ impl Gateway {
             return Err(error("请先停用 Grok 网关并完成配置恢复，再导入"));
         }
         let (_, config) = grok_config::read(home)?;
-        let env_path = home.join(ENV_FILE);
-        let available = std::fs::symlink_metadata(&env_path)
-            .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink());
         let effective =
             super::grok_layers::read_with_environment(home, use_environment, inherited)?;
         let env = effective.environment.clone();
@@ -487,8 +475,6 @@ impl Gateway {
                 .and_then(Item::as_str)
                 .unwrap_or_default()
                 .into(),
-            environment_available: available,
-            environment_loaded: env.is_some(),
             clear_environment: Vec::new(),
             error: None,
         };

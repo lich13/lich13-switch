@@ -131,11 +131,6 @@ async fn old_restore_flags_are_ignored_and_do_not_block_desired_resume() {
             std::fs::write(fixture.data.join("startup.json"), legacy).unwrap();
         }
         let legacy_description = legacy.unwrap_or("<missing startup.json>");
-        let preferences = Service::new(&fixture.data).read().unwrap().0;
-        assert_eq!(
-            serde_json::to_value(preferences).unwrap(),
-            serde_json::json!({})
-        );
 
         fixture.gateway.resume(&fixture.home).await.unwrap();
         let running_view = fixture.gateway.view();
@@ -163,27 +158,13 @@ async fn old_restore_flags_are_ignored_and_do_not_block_desired_resume() {
 
 #[test]
 fn startup_view_and_silent_mode_have_no_restore_gateway_setting() {
-    for legacy in [
-        r#"{"restoreGateway":false}"#,
-        r#"{"restoreGateway":true}"#,
-        "{}",
-    ] {
-        let preferences: Preferences = serde_json::from_str(legacy).unwrap();
-        assert_eq!(
-            serde_json::to_value(preferences).unwrap(),
-            serde_json::json!({})
-        );
-    }
-
     let view = View {
         launch_on_boot: false,
-        revision: "fixture-revision".into(),
     };
     assert_eq!(
         serde_json::to_value(view).unwrap(),
         serde_json::json!({
             "launchOnBoot": false,
-            "revision": "fixture-revision"
         })
     );
     assert!(login_source(&[LOGIN_ARG.into()]));

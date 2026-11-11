@@ -64,7 +64,6 @@ export default function DshProfile({
     setError("");
     void command("preview_dsh_profile", {
       profile,
-      protocol: "chat_completions",
     })
       .then((next) => {
         if (!gone) {

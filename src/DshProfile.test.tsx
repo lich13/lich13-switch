@@ -17,7 +17,7 @@ const state: GatewayState = {
 };
 beforeEach(() => {
   localStorage.clear();
-  mock.command.mockReset().mockImplementation(async (name, args) => {
+  mock.command.mockReset().mockImplementation(async (name) => {
     if (name === "dsh_official_models")
       return {
         models: [
@@ -30,7 +30,7 @@ beforeEach(() => {
       return {
         profiles: ["fixture"],
         profile: "fixture",
-        protocol: args.protocol,
+        protocol: "chat_completions",
         revision: "fixture-preview",
         models: ["fixture-model"],
         attached: false,
@@ -78,7 +78,6 @@ it("defaults to desktop, fixes the protocol and imports all profiles in one acti
   await screen.findByRole("option", { name: "fixture" });
   expect(mock.command).toHaveBeenCalledWith("preview_dsh_profile", {
     profile: "desktop",
-    protocol: "chat_completions",
   });
   expect(screen.queryByLabelText("API 协议")).not.toBeInTheDocument();
   expect(screen.getByLabelText("DSH 配置来源")).toHaveValue("fixture");
@@ -114,7 +113,6 @@ it("defaults to desktop, fixes the protocol and imports all profiles in one acti
 it("preserves manual mode on ordinary sync and enables auto only when connecting", async () => {
   const preview = (await mock.command("preview_dsh_profile", {
     profile: "desktop",
-    protocol: "chat_completions",
   })) as DshPreview;
   mock.command.mockImplementation(async (name, args) => {
     if (name === "attach_dsh_profiles")

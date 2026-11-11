@@ -2,7 +2,6 @@ use crate::errors::code;
 use crate::storage::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use url::Url;
 
 pub const REPOSITORY_URL: &str = "https://github.com/lich13/vela";
 pub const RELEASES_URL: &str = "https://github.com/lich13/vela/releases";
@@ -11,33 +10,14 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct Asset {
-    pub name: String,
-    pub url: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct Info {
     pub has_update: bool,
-    pub current_version: String,
     pub latest_version: Option<String>,
-    pub release_url: String,
-    pub asset: Option<Asset>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ReleaseAsset {
-    name: Option<String>,
-    browser_download_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct Release {
     tag_name: Option<String>,
-    html_url: Option<String>,
-    #[serde(default)]
-    assets: Vec<ReleaseAsset>,
 }
 
 pub fn normalize_version(value: &str) -> String {
@@ -72,74 +52,17 @@ pub fn compare_versions(left: &str, right: &str) -> Ordering {
         .unwrap_or(Ordering::Equal)
 }
 
-fn trusted_github_url(value: Option<&str>, fallback: &str, path_prefix: &str) -> String {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return fallback.to_string();
-    };
-    let Ok(parsed) = Url::parse(value) else {
-        return fallback.to_string();
-    };
-    if parsed.scheme() == "https"
-        && parsed.host_str() == Some("github.com")
-        && parsed.path().starts_with(path_prefix)
-    {
-        value.to_string()
-    } else {
-        fallback.to_string()
-    }
-}
-
-fn select_asset(assets: &[ReleaseAsset], platform: &str) -> Option<Asset> {
-    let preferred = assets.iter().find(|asset| {
-        let name = asset
-            .name
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let url = asset.browser_download_url.as_deref().unwrap_or_default();
-        let valid =
-            !trusted_github_url(Some(url), "", "/lich13/vela/releases/download/").is_empty();
-        if !valid {
-            return false;
-        }
-        match platform {
-            "macos" | "darwin" => name.ends_with(".dmg") && !name.contains("x86_64"),
-            "windows" | "win32" => name.ends_with(".exe") || name.contains("setup"),
-            _ => false,
-        }
-    });
-    let asset = preferred?;
-    let name = asset.name.as_deref()?.trim();
-    let url = trusted_github_url(
-        asset.browser_download_url.as_deref(),
-        "",
-        "/lich13/vela/releases/download/",
-    );
-    (!name.is_empty() && !url.is_empty()).then(|| Asset {
-        name: name.to_string(),
-        url,
-    })
-}
-
-fn build_info(current_version: &str, platform: &str, release: Release) -> Info {
+fn build_info(current_version: &str, release: Release) -> Info {
     let latest_version = release
         .tag_name
         .as_deref()
         .map(normalize_version)
         .filter(|value| !value.is_empty());
-    let release_url = trusted_github_url(
-        release.html_url.as_deref(),
-        RELEASES_URL,
-        "/lich13/vela/releases/",
-    );
     Info {
         has_update: latest_version
             .as_deref()
             .is_some_and(|latest| compare_versions(latest, current_version) == Ordering::Greater),
-        current_version: normalize_version(current_version),
         latest_version,
-        release_url,
-        asset: select_asset(&release.assets, platform),
     }
 }
 
@@ -162,11 +85,7 @@ pub async fn latest() -> Result<Info> {
     let body = response_body(response).await?;
     let release: Release = serde_json::from_slice(&body)
         .map_err(|_| AppError::new(code::UPDATE, "更新信息格式无效"))?;
-    Ok(build_info(
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        release,
-    ))
+    Ok(build_info(env!("CARGO_PKG_VERSION"), release))
 }
 
 async fn response_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
@@ -268,24 +187,5 @@ mod tests {
         assert_eq!(compare_versions("v0.12.1", "0.12.0"), Ordering::Greater);
         assert_eq!(compare_versions("0.12.0-beta.1", "0.12"), Ordering::Equal);
         assert_eq!(compare_versions("0.10", "0.10.0"), Ordering::Equal);
-    }
-
-    #[test]
-    fn rejects_untrusted_release_urls() {
-        assert_eq!(
-            trusted_github_url(
-                Some("https://example.invalid/download"),
-                RELEASES_URL,
-                "/lich13/vela/releases/"
-            ),
-            RELEASES_URL
-        );
-        let assets = vec![ReleaseAsset {
-            name: Some("SHA256SUMS.txt".into()),
-            browser_download_url: Some(
-                "https://github.com/lich13/vela/releases/download/v1.0.0/SHA256SUMS.txt".into(),
-            ),
-        }];
-        assert!(select_asset(&assets, "macos").is_none());
     }
 }

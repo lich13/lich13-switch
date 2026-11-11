@@ -145,23 +145,11 @@ pub struct LoginTarget {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AuthSource {
-    pub provider: String,
-    pub credential_store: String,
-    pub inline_token: bool,
-    pub env_key: bool,
-    pub command_auth: bool,
-    pub requires_openai_auth: bool,
-    pub warning: Option<String>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct ViewState {
     pub accounts: Vec<Account>,
     pub auth_revision: String,
     pub config_revision: String,
     pub current_state: String,
-    pub auth_source: AuthSource,
     pub preferences: Preferences,
     pub error: Option<String>,
     pub auth_sync: Option<AuthSync>,
@@ -187,13 +175,13 @@ pub struct Core {
 }
 struct PolledConfig {
     revision: String,
-    auth_source: AuthSource,
+    inline_token: bool,
 }
 impl PolledConfig {
     fn parse(bytes: Option<Vec<u8>>) -> Self {
         Self {
             revision: storage::revision(bytes.as_deref()),
-            auth_source: source(bytes.as_deref()),
+            inline_token: has_inline_token(bytes.as_deref()),
         }
     }
 }
@@ -496,58 +484,22 @@ pub fn validate_config(text: &str) -> Result<()> {
         }
     })
 }
-fn source(bytes: Option<&[u8]>) -> AuthSource {
-    let text = bytes
+fn has_inline_token(bytes: Option<&[u8]>) -> bool {
+    let Some(d) = bytes
         .and_then(|b| std::str::from_utf8(b).ok())
-        .unwrap_or_default();
-    let parsed = text.parse::<toml::Table>();
-    let d = parsed.as_ref().ok();
+        .and_then(|text| text.parse::<toml::Table>().ok())
+    else {
+        return false;
+    };
     let provider = d
-        .and_then(|d| d.get("model_provider"))
+        .get("model_provider")
         .and_then(toml::Value::as_str)
-        .unwrap_or("openai")
-        .to_string();
-    let store = d
-        .and_then(|d| d.get("cli_auth_credentials_store"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("file")
-        .to_string();
-    let p = d
-        .and_then(|d| d.get("model_providers"))
-        .and_then(|p| p.get(&provider));
-    let inline = p
+        .unwrap_or("openai");
+    d.get("model_providers")
+        .and_then(|p| p.get(provider))
         .and_then(|p| p.get("experimental_bearer_token"))
         .and_then(toml::Value::as_str)
-        .is_some_and(|s| !s.is_empty());
-    let env = p
-        .and_then(|p| p.get("env_key"))
-        .and_then(toml::Value::as_str)
-        .is_some_and(|s| !s.is_empty());
-    let command = p.and_then(|p| p.get("auth")).is_some();
-    let requires = p
-        .and_then(|p| p.get("requires_openai_auth"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(provider == "openai");
-    let warning = if parsed.is_err() {
-        Some("配置语法错误，无法确认认证来源".into())
-    } else if store != "file" {
-        Some("当前配置未使用文件认证；切换 auth.json 可能不会改变 Codex 的登录".into())
-    } else if inline || command || (env && !requires) {
-        Some("当前 provider 另有独立凭据；切换账号不会修改这些配置".into())
-    } else if !requires {
-        Some("当前 provider 不使用 OpenAI 登录；账号切换只更新 auth.json".into())
-    } else {
-        None
-    };
-    AuthSource {
-        provider,
-        credential_store: store,
-        inline_token: inline,
-        env_key: env,
-        command_auth: command,
-        requires_openai_auth: requires,
-        warning,
-    }
+        .is_some_and(|s| !s.is_empty())
 }
 impl Core {
     pub fn new(data_dir: PathBuf, default_home: PathBuf) -> Result<Self> {
@@ -916,8 +868,7 @@ impl Core {
         let polled_config = self
             .config_cache
             .read_user(&self.home().join("config.toml"), PolledConfig::parse)?;
-        let auth_source = polled_config.auth_source.clone();
-        let optional_auth = auth.is_none() && auth_source.inline_token;
+        let optional_auth = auth.is_none() && polled_config.inline_token;
         if optional_auth {
             self.auth_sync = None;
         }
@@ -1076,7 +1027,6 @@ impl Core {
             auth_revision,
             config_revision: polled_config.revision.clone(),
             current_state: status.into(),
-            auth_source,
             preferences: self.preferences(),
             error: None,
             auth_sync: if managed {
@@ -1534,14 +1484,12 @@ mod tests {
     }
     #[test]
     fn source_reports_independent_auth() {
-        let s=source(Some(b"model_provider='custom'\n[model_providers.custom]\nrequires_openai_auth=true\nexperimental_bearer_token='secret'"));
-        assert!(s.inline_token);
-        assert!(s.warning.is_some());
-        assert!(!serde_json::to_string(&s).unwrap().contains("secret"));
-        assert_eq!(
-            source(Some(b"cli_auth_credentials_store='keyring'")).credential_store,
-            "keyring"
-        );
+        assert!(has_inline_token(Some(
+            b"model_provider='custom'\n[model_providers.custom]\nrequires_openai_auth=true\nexperimental_bearer_token='secret'"
+        )));
+        assert!(!has_inline_token(Some(
+            b"cli_auth_credentials_store='keyring'"
+        )));
     }
     #[test]
     fn writes_fail_without_changing_current() {

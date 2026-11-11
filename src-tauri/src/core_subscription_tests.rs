@@ -638,8 +638,6 @@ fn core_state_caches_config_and_updates_credential_metadata_on_rotation_or_delet
     let saved = core.state().unwrap();
     let rev_v1 = saved.accounts[0].credential_revision.clone();
     let cfg_rev_v1 = saved.config_revision.clone();
-    assert_eq!(saved.auth_source.provider, "openai");
-    assert!(!saved.auth_source.inline_token);
     assert_eq!(
         saved.accounts[0]
             .subscription
@@ -651,7 +649,7 @@ fn core_state_caches_config_and_updates_credential_metadata_on_rotation_or_delet
         saved.accounts[0].subscription.as_ref().map(|s| s.stale),
         Some(false)
     );
-    // Steady-state repeat poll hits config_cache and auth_cache (same Arc pointers) and returns identical revision and auth_source.
+    // Steady-state repeat poll hits config_cache and auth_cache (same Arc pointers) and returns identical revision.
     let cfg_arc_v1 = core
         .config_cache
         .read(&home.join("config.toml"), |_| {
@@ -684,7 +682,7 @@ fn core_state_caches_config_and_updates_credential_metadata_on_rotation_or_delet
             .unwrap()
     ));
     assert_eq!(cached_poll.config_revision, cfg_rev_v1);
-    assert_eq!(cached_poll.auth_source, saved.auth_source);
+    assert!(!cfg_arc_v1.inline_token);
 
     // Modifying config.toml on disk invalidates config_cache immediately.
     crate::storage::atomic_write(
@@ -695,12 +693,17 @@ fn core_state_caches_config_and_updates_credential_metadata_on_rotation_or_delet
     .unwrap();
     let updated_cfg = core.state().unwrap();
     assert_ne!(updated_cfg.config_revision, cfg_rev_v1);
-    assert_eq!(updated_cfg.auth_source.provider, "custom");
-    assert!(updated_cfg.auth_source.inline_token);
+    assert!(
+        core.config_cache
+            .read(&home.join("config.toml"), |_| {
+                panic!("expected config_cache hit")
+            })
+            .unwrap()
+            .inline_token
+    );
     std::fs::remove_file(home.join("config.toml")).unwrap();
     let deleted_cfg = core.state().unwrap();
     assert_eq!(deleted_cfg.config_revision, "missing");
-    assert_eq!(deleted_cfg.auth_source.provider, "openai");
 
     // Credential rotation updates revision & plan immediately without retaining duplicate auth cache.
     let auth_v2 = credential_from_claims(

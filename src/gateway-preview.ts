@@ -525,7 +525,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       revision: "preview-dsh-profile",
       models: [],
       attached: dshGatewayDemo.running,
-      protocol: args.protocol,
+      protocol: "chat_completions",
       model: null,
       makeDefault: true,
       current: {
@@ -548,25 +548,22 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       })),
       warning: "默认模型仅影响新会话",
     };
-  if (name === "attach_dsh_profile" || name === "attach_dsh_profiles") {
+  if (name === "attach_dsh_profiles") {
     dshGatewayDemo.running = true;
     dshGatewayDemo.dshProfile = args.options as GatewayState["dshProfile"];
     syncListener();
-    if (name === "attach_dsh_profiles")
-      return {
-        state: structuredClone(dshGatewayDemo),
-        results: (args.all
-          ? ["default", "desktop"]
-          : [dshGatewayDemo.dshProfile?.profile]
-        ).map((profile) => ({ profile, status: "success", error: null })),
-      };
-    return structuredClone(dshGatewayDemo);
+    return {
+      state: structuredClone(dshGatewayDemo),
+      results: (args.all
+        ? ["default", "desktop"]
+        : [dshGatewayDemo.dshProfile?.profile]
+      ).map((profile) => ({ profile, status: "success", error: null })),
+    };
   }
-  if (name === "get_gateway_listener") return gatewayDemo.listener;
   if (name === "cancel_grok_import") return null;
   if (name === "preview_grok_import")
     return {
-      token: args.useEnvironment ? "preview-grok-import" : null,
+      token: "preview-grok-import",
       revision: grokGatewayDemo.revision,
       selected: "fixture-model",
       models: [
@@ -576,26 +573,14 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           protocol: "responses",
           address: "https://example.invalid/v1",
           addressSource: "global",
-          credentialAvailable: !!args.useEnvironment,
-          missingEnvironment: args.useEnvironment ? [] : ["XAI_API_KEY"],
+          credentialAvailable: true,
           error: null,
         },
       ],
-      environmentAvailable: true,
-      environmentLoaded: !!args.useEnvironment,
       clearEnvironment: ["GROK_MODELS_BASE_URL", "XAI_API_KEY"],
-      error: args.useEnvironment
-        ? null
-        : "未读取到 API 凭据；可确认读取 endpoint.env",
+      error: null,
     };
   if (name === "commit_grok_import") return structuredClone(grokGatewayDemo);
-  if (name === "set_gateway_listener") {
-    const port = Number(args.port);
-    if (gatewayDemo.listener!.runningClients.length)
-      throw new Error("请先停用全部客户端网关，再修改共享端口");
-    syncListener(port, true);
-    return gatewayDemo.listener;
-  }
   if (name === "probe_provider_endpoints") {
     const p = s.providers.find((p) => p.id === args.providerId);
     if (!p) throw new Error("供应商不存在");

@@ -77,15 +77,6 @@ export const demo: ViewState = {
     quotaRefreshSeconds: 60,
     systemNotifications: true,
   },
-  authSource: {
-    provider: "openai",
-    credentialStore: "file",
-    inlineToken: false,
-    envKey: false,
-    commandAuth: false,
-    requiresOpenaiAuth: true,
-    warning: null,
-  },
   error: null,
   officialMode: {
     enabled: false,
@@ -163,11 +154,9 @@ let login: LoginState = {
 };
 let startup = {
   launchOnBoot: false,
-  revision: "preview-startup",
 };
 let quick = {
   pinned: false,
-  tab: "providers",
   visible: true,
   hiddenClients:
     previewParams.get("hiddenClients") === "all"
@@ -284,10 +273,7 @@ export async function run(
   if (name === "check_for_updates")
     return {
       hasUpdate: false,
-      currentVersion: "0.12.1",
       latestVersion: "0.12.1",
-      releaseUrl: "https://github.com/lich13/vela/releases",
-      asset: null,
     };
   if (name === "open_github" || name === "open_update_release") return;
   if (usageCommands.includes(name)) return usagePreview(name, args, emit);
@@ -298,7 +284,7 @@ export async function run(
     emit("quick-state", { ...quick });
     return { ...quick };
   }
-  if (name === "resize_quick" || name === "hide_quick") return;
+  if (name === "hide_quick") return;
   if (name === "open_main") {
     location.search = "";
     return;
@@ -319,7 +305,6 @@ export async function run(
     startup = {
       ...startup,
       launchOnBoot: Boolean(args.enabled),
-      revision: crypto.randomUUID(),
     };
     return { ...startup };
   }
@@ -333,14 +318,11 @@ export async function run(
       "update_models_dev",
       "preview_dsh_profile",
       "dsh_official_models",
-      "attach_dsh_profile",
       "attach_dsh_profiles",
       "read_dsh_file",
       "save_dsh_file",
       "read_previous_dsh_file",
       "restore_dsh_file",
-      "get_gateway_listener",
-      "set_gateway_listener",
       "preview_grok_import",
       "cancel_grok_import",
       "commit_grok_import",
@@ -713,8 +695,6 @@ export async function run(
       };
       emit("login-state", login);
       return;
-    case "pick_path":
-    case "import_auth_file":
     case "get_antigravity_vertex_models":
       return { models: [], error: null };
     case "pick_antigravity_credential_file":

@@ -57,7 +57,6 @@ export type DshOfficialCatalog = {
 
 export type QuickPreferences = {
   pinned: boolean;
-  tab: "providers" | "accounts";
   visible?: boolean;
   hiddenClients?: ClientId[];
 };
@@ -377,8 +376,6 @@ export type GrokImportPreview = {
   revision: string;
   models: GrokModel[];
   selected: string;
-  environmentAvailable: boolean;
-  environmentLoaded: boolean;
   clearEnvironment: string[];
   error: string | null;
 };
@@ -520,9 +517,8 @@ export type CommandMap = {
     },
     ViewState
   >;
-  disable_official_account: Call<{ expectedConfigRevision: string }, ViewState>;
+  disable_official_account: Call<None, ViewState>;
   import_current: Call<None, ViewState>;
-  import_auth_file: Call<None, ViewState | null>;
   rename_account: Call<{ id: string; name: string }, ViewState>;
   delete_account: Call<{ id: string }, ViewState>;
   read_antigravity_config: Call<None, ConfigDocument>;
@@ -579,8 +575,7 @@ export type CommandMap = {
     ViewState
   >;
   get_startup: Call<None, StartupState>;
-  set_startup: Call<{ enabled: boolean } & Revision, StartupState>;
-  pick_path: Call<{ kind: string }, string | null>;
+  set_startup: Call<{ enabled: boolean }, StartupState>;
   get_login: Call<None, LoginState>;
   start_login: Call<
     {
@@ -612,13 +607,11 @@ export type CommandMap = {
   set_quick: Call<
     {
       pinned?: boolean;
-      tab?: "providers" | "accounts";
       hiddenClients?: ClientId[];
     },
     QuickPreferences
   >;
   hide_quick: Call<None, void>;
-  resize_quick: Call<{ height: number }, void>;
   get_failure_policy_catalog: Call<
     None,
     import("./failure-policy-types").FailureCategory[]
@@ -631,8 +624,6 @@ export type CommandMap = {
   get_gateway: Call<Client, GatewayState>;
   get_gateway_freeze: Call<None, GatewayFreeze>;
   set_gateway_frozen: Call<{ frozen: boolean }, GatewayFreeze>;
-  get_gateway_listener: Call<None, GatewayListener>;
-  set_gateway_listener: Call<{ port: number } & Revision, GatewayListener>;
   get_gateway_models: Call<Client, GatewayModels>;
   refresh_gateway_models: Call<
     Client & { providerIds?: string[] | null },
@@ -665,18 +656,8 @@ export type CommandMap = {
     { options: DshOptions; all: boolean; previewRevision: string } & Revision,
     DshBatch
   >;
-  preview_dsh_profile: Call<
-    { profile?: string | null; protocol: GrokProtocol },
-    DshPreview
-  >;
-  attach_dsh_profile: Call<
-    { options: DshOptions; previewRevision: string } & Revision,
-    GatewayState
-  >;
-  preview_grok_import: Call<
-    { selected?: string | null; useEnvironment: boolean },
-    GrokImportPreview
-  >;
+  preview_dsh_profile: Call<{ profile?: string | null }, DshPreview>;
+  preview_grok_import: Call<{ selected?: string | null }, GrokImportPreview>;
   commit_grok_import: Call<{ token: string } & Revision, GatewayState>;
   cancel_grok_import: Call<{ token?: string | null }, void>;
   reveal_provider_token: Call<Provider & Revision, string>;
@@ -819,7 +800,7 @@ export type CommandMap = {
   get_claude_usage_stats: Call<{ filter: UsageFilter }, AntigravityUsageStats>;
   get_claude_usage_quota: Call<{ refresh: boolean }, ClaudeUsageQuota>;
   get_usage_logs: Call<{ filter: UsageFilter }, UsagePage>;
-  get_usage_detail: Call<{ id: string; source?: string }, UsageRecord>;
+  get_usage_detail: Call<{ id: string }, UsageRecord>;
   set_usage_settings: Call<{ settings: UsageSettings }, UsageState>;
   sync_usage: Call<{ rebuild?: string }, UsageState>;
   get_pricing: Call<None, PricingView>;

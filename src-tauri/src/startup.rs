@@ -3,7 +3,7 @@ use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 #[cfg(not(target_os = "macos"))]
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
@@ -12,70 +12,31 @@ pub const LOGIN_ARG: &str = "--vela-login-startup";
 pub fn is_login_argument(arg: &str) -> bool {
     arg == LOGIN_ARG
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-struct Preferences {
-    // Login-item state lives in the OS. Advance its edit revision on every save.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation: Option<String>,
-}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct View {
     pub launch_on_boot: bool,
-    pub revision: String,
 }
 pub struct Service {
-    path: PathBuf,
     lock: Mutex<()>,
 }
 impl Service {
-    pub fn new(data: &Path) -> Self {
+    pub fn new(_data: &Path) -> Self {
         Self {
-            path: data.join("startup.json"),
             lock: Mutex::new(()),
         }
     }
-    fn read(&self) -> Result<(Preferences, String)> {
-        let raw = storage::read_optional(&self.path)?;
-        let settings = raw
-            .as_deref()
-            .map(serde_json::from_slice)
-            .transpose()
-            .map_err(|_| AppError::new(code::STARTUP, "启动设置无法读取"))?
-            .unwrap_or_default();
-        Ok((settings, storage::revision(raw.as_deref())))
-    }
     pub fn view(&self) -> Result<View> {
         let _guard = self.lock.lock().unwrap();
-        let (_, revision) = self.read()?;
         Ok(View {
             launch_on_boot: registered()?,
-            revision,
         })
     }
-    pub fn update(&self, enabled: bool, expected: &str) -> Result<View> {
+    pub fn update(&self, enabled: bool) -> Result<View> {
         let _guard = self.lock.lock().unwrap();
-        let (_, revision) = self.read()?;
-        if revision != expected {
-            return Err(AppError::new(
-                code::CONFLICT,
-                "启动设置已变化，请重新打开设置",
-            ));
-        }
-        let previous = registered()?;
         register(enabled)?;
-        let bytes = serde_json::to_vec_pretty(&Preferences {
-            generation: Some(uuid::Uuid::new_v4().to_string()),
-        })
-        .unwrap();
-        if let Err(e) = storage::atomic_write(&self.path, &bytes, Some(expected)) {
-            let _ = register(previous);
-            return Err(e);
-        }
         Ok(View {
             launch_on_boot: enabled,
-            revision: storage::digest(&bytes),
         })
     }
 }
@@ -272,9 +233,6 @@ mod tests {
             bundle_path(Path::new("/Applications/Vela.app/Contents/MacOS/vela")),
             PathBuf::from("/Applications/Vela.app")
         );
-        let _: Preferences = serde_json::from_str("{}").unwrap();
-        let _: Preferences =
-            serde_json::from_str(r#"{"launchToTray":false,"restoreGateway":true}"#).unwrap();
         assert!(login_source(&[LOGIN_ARG.into()]));
         assert!(is_login_event(
             u32::from_be_bytes(*b"oapp"),

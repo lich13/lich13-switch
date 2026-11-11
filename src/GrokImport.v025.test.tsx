@@ -23,24 +23,19 @@ const missingCredentialPreview: GrokImportPreview = {
       address: "https://api.example.invalid/v1",
       addressSource: "modelApi",
       credentialAvailable: false,
-      missingEnvironment: ["XAI_API_KEY"],
       error: null,
     },
   ],
-  environmentAvailable: true,
-  environmentLoaded: false,
   clearEnvironment: ["GROK_MODELS_BASE_URL", "XAI_API_KEY"],
   error: "未读取到 API 凭据；可确认读取 endpoint.env",
 };
 const credentialPreview: GrokImportPreview = {
   ...missingCredentialPreview,
   token: importToken,
-  environmentLoaded: true,
   models: [
     {
       ...missingCredentialPreview.models[0],
       credentialAvailable: true,
-      missingEnvironment: [],
     },
   ],
   error: null,
@@ -48,12 +43,9 @@ const credentialPreview: GrokImportPreview = {
 beforeEach(() => {
   mock.command.mockReset();
   mock.command.mockImplementation(
-    async (name: string, args?: Record<string, unknown>) => {
+    async (name: string) => {
       if (name === "preview_grok_import")
-        return structuredClone({
-          ...missingCredentialPreview,
-          environmentLoaded: !!args?.useEnvironment,
-        });
+        return structuredClone(missingCredentialPreview);
       if (name === "cancel_grok_import") return;
       if (name === "commit_grok_import")
         return structuredClone(grokGatewayDemo);
@@ -71,7 +63,6 @@ it("previews endpoint.env by default and never displays its token", async () => 
   await within(dialog).findByRole("option", { name: "fixture-model" });
   expect(mock.command).toHaveBeenCalledExactlyOnceWith("preview_grok_import", {
     selected: undefined,
-    useEnvironment: true,
   });
   expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
   expect(dialog).not.toHaveTextContent(importToken);
@@ -103,11 +94,9 @@ it("does not allow committing a preview with missing credentials", async () => {
 
 it("imports and connects the resolved configuration with one action", async () => {
   mock.command.mockImplementation(
-    async (name: string, args?: Record<string, unknown>) => {
+    async (name: string) => {
       if (name === "preview_grok_import")
-        return structuredClone(
-          args?.useEnvironment ? credentialPreview : missingCredentialPreview,
-        );
+        return structuredClone(credentialPreview);
       if (name === "commit_grok_import")
         return structuredClone(grokGatewayDemo);
       if (name === "cancel_grok_import") return;
@@ -226,7 +215,6 @@ it("cancels a preview token that arrives after the dialog unmounts", async () =>
   await waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith("preview_grok_import", {
       selected: undefined,
-      useEnvironment: true,
     }),
   );
   unmount();
