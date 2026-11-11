@@ -447,7 +447,7 @@ fn parameters(
 impl Gateway {
     pub fn match_failure_policy(&self, input: Input) -> Result<Match> {
         let rules = self
-            .request_state()?
+            .request_state()
             .store
             .settings
             .custom_failure_rules

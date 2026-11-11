@@ -14,7 +14,7 @@ pub(super) struct TokenEntry {
 pub struct Registry {
     pub mutation: Mutex<()>,
     tokens: RwLock<Arc<Vec<TokenEntry>>>,
-    pub ports: Arc<Mutex<Vec<u16>>>,
+    pub port: Arc<std::sync::atomic::AtomicU16>,
     pub lifecycle: tokio::sync::Mutex<()>,
     pub listener: Listener,
     pub freeze: super::freeze::Gate,
@@ -27,7 +27,7 @@ impl Registry {
         Ok(Self {
             mutation: Mutex::new(()),
             tokens: RwLock::new(Arc::new(Vec::new())),
-            ports: Arc::new(Mutex::new(vec![port])),
+            port: Arc::new(std::sync::atomic::AtomicU16::new(port)),
             lifecycle: tokio::sync::Mutex::new(()),
             listener,
             freeze: super::freeze::Gate::default(),
@@ -112,7 +112,7 @@ impl Registry {
     pub fn update_ports(&self) -> Result<()> {
         // Published as a whole after a listener transaction; never mutate in place.
         let port = self.listener.view()?.port;
-        *self.ports.lock().unwrap() = vec![port];
+        self.port.store(port, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 }

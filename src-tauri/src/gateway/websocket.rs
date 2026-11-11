@@ -16,7 +16,6 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, HeaderMap, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
-use sha1::{Digest, Sha1};
 use std::{collections::HashMap, future::Future, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -416,15 +415,11 @@ pub(super) fn accept(
             "WebSocket 握手无效",
         );
     };
-    let stop = match gateway.request_state() {
-        Ok(state) => state,
-        Err(e) => {
-            return forward::error(StatusCode::SERVICE_UNAVAILABLE, e.code.as_str(), &e.message)
-        }
-    }
-    .shutdown
-    .as_ref()
-    .map(|s| s.subscribe());
+    let stop = gateway
+        .request_state()
+        .shutdown
+        .as_ref()
+        .map(|s| s.subscribe());
     tokio::spawn(async move {
         let _active = active;
         let Ok(socket) = future.await else {
@@ -638,21 +633,6 @@ async fn upstream_native(
                 && unsupported_status(status.as_u16()),
         });
     }
-    let expected = STANDARD.encode(Sha1::digest(
-        format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
-    ));
-    if response
-        .headers()
-        .get(header::SEC_WEBSOCKET_ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        != Some(&expected)
-    {
-        return Err(AttemptFailure {
-            status: Some(response.status().as_u16()),
-            unsupported: true,
-            ..Default::default()
-        });
-    }
     let extensions = response
         .headers()
         .get(header::SEC_WEBSOCKET_EXTENSIONS)
@@ -787,7 +767,6 @@ fn turn_model(
     let previous = v.get("previous_response_id").and_then(|v| v.as_str());
     let remembered = if let Some(id) = previous {
         g.request_state()
-            .map_err(|_| (1011, code::STORE))?
             .affinity
             .get(id)
             .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
@@ -847,12 +826,7 @@ async fn session(
             };
             match outcome {
                 Err((1999, "compaction handoff")) => {
-                    current_cfg = g
-                        .request_state()
-                        .map_err(|_| (1011, code::STORE))?
-                        .store
-                        .settings
-                        .clone();
+                    current_cfg = g.request_state().store.settings.clone();
                     current_ids = g.routing_ids(None);
                     current_routes = current_ids
                         .iter()
@@ -1035,7 +1009,6 @@ async fn session_once(
     request_budget.attach_traffic(&traffic);
     let mut turn_rules = g
         .request_state()
-        .map_err(|_| (1011, code::STORE))?
         .store
         .settings
         .custom_failure_rules
@@ -1048,7 +1021,7 @@ async fn session_once(
             .and_then(|v| v.as_str())
             .map(str::to_owned)
     }) {
-        let s = g.request_state().map_err(|_| (1011, code::STORE))?;
+        let s = g.request_state();
         if let Some((owner, _, _)) = s
             .affinity
             .get(&previous)
@@ -1511,11 +1484,7 @@ async fn session_once(
             attempt_protocol.routing_evidence(first_hints.as_ref());
         }
         attempt_protocol.watch_lifecycle(
-            g.request_state()
-                .map_err(|_| (1011, code::STORE))?
-                .shutdown
-                .as_ref()
-                .map(|s| s.subscribe()),
+            g.request_state().shutdown.as_ref().map(|s| s.subscribe()),
             Some(client.closed.clone()),
         );
         let result = while_connecting(client, async {
@@ -2200,11 +2169,7 @@ async fn session_once(
                 next.routing_evidence(hints.as_ref());
             }
             next.watch_lifecycle(
-                g.request_state()
-                    .map_err(|_| (1011, code::STORE))?
-                    .shutdown
-                    .as_ref()
-                    .map(|s| s.subscribe()),
+                g.request_state().shutdown.as_ref().map(|s| s.subscribe()),
                 Some(client.closed.clone()),
             );
             protocol = Some(next);
@@ -2399,7 +2364,6 @@ async fn session_once(
                 request_budget.attach_traffic(&traffic);
                 turn_rules = g
                     .request_state()
-                    .map_err(|_| (1011, code::STORE))?
                     .store
                     .settings
                     .custom_failure_rules
@@ -2419,7 +2383,7 @@ async fn session_once(
                 let hints = value(&frame)
                     .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
                 let enabled = {
-                    let state = g.request_state().map_err(|_| (1011, code::STORE))?;
+                    let state = g.request_state();
                     state.store.mode == "auto"
                 };
                 if g.client_id() == super::ClientId::Codex
@@ -2794,11 +2758,7 @@ async fn session_once(
                     next_protocol.routing_evidence(hints.as_ref());
                 }
                 next_protocol.watch_lifecycle(
-                    g.request_state()
-                        .map_err(|_| (1011, code::STORE))?
-                        .shutdown
-                        .as_ref()
-                        .map(|s| s.subscribe()),
+                    g.request_state().shutdown.as_ref().map(|s| s.subscribe()),
                     Some(client.closed.clone()),
                 );
                 next_protocol.websocket_status(101);

@@ -373,7 +373,7 @@ impl Gateway {
         fresh: bool,
     ) -> Result<Route> {
         let (provider, urls) = {
-            let s = self.request_state()?;
+            let s = self.request_state();
             let provider = s
                 .store
                 .providers
@@ -402,7 +402,7 @@ impl Gateway {
     }
     pub async fn probe_endpoints(&self, id: &str, force: bool) -> Result<super::View> {
         if !self
-            .request_state()?
+            .request_state()
             .store
             .providers
             .iter()
@@ -422,7 +422,7 @@ impl Gateway {
             .clone();
         let _flight = gate.lock().await;
         let (provider, urls, seconds, port, mut stop) = {
-            let s = self.request_state()?;
+            let s = self.request_state();
             let p = s
                 .store
                 .providers
@@ -448,7 +448,9 @@ impl Gateway {
         let client = Client::builder(TokioExecutor::new())
             .pool_max_idle_per_host(1)
             .retry_canceled_requests(false)
-            .build(Connector::new(PROBE_TIMEOUT, port).with_ports(self.0.registry.ports.clone()));
+            .build(
+                Connector::new(PROBE_TIMEOUT, port).with_shared_port(self.0.registry.port.clone()),
+            );
         let probes = stream::iter(urls.iter().cloned())
             .map(|url| {
                 let client = client.clone();
@@ -478,7 +480,7 @@ impl Gateway {
             rows = probes => rows,
             _ = stopping => return Err(AppError::new(code::GATEWAY_STOPPED, "网关已停止，测速已取消")),
         };
-        let s = self.request_state()?;
+        let s = self.request_state();
         if let Some(current) = s.store.providers.iter().find(|p| p.id == id) {
             if Service::config(current, &Self::endpoint_urls(&s.store, current)) == config {
                 self.0.endpoints.samples.lock().unwrap().insert(
@@ -499,7 +501,7 @@ impl Gateway {
         if self.0.registry.freeze.is_frozen() {
             return None;
         }
-        let s = self.request_state().ok()?;
+        let s = self.request_state();
         if !s.running {
             return None;
         }
@@ -520,7 +522,7 @@ impl Gateway {
             return;
         }
         let ids = {
-            let Ok(s) = self.request_state() else { return };
+            let s = self.request_state();
             if !s.running {
                 return;
             }

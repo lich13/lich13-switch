@@ -105,7 +105,7 @@ impl Session {
                     .retry_canceled_requests(false)
                     .build(
                         Connector::new(Duration::from_secs(300), 0)
-                            .with_ports(registry.ports.clone()),
+                            .with_shared_port(registry.port.clone()),
                     )
             });
         Self {

@@ -199,7 +199,7 @@ impl Gateway {
         self.changed();
     }
     pub(crate) fn union_models(&self, protocol: Option<Protocol>) -> Result<Vec<Model>> {
-        let state = self.request_state()?;
+        let state = self.request_state();
         let (file, _) = self.0.model_list.snapshot();
         let mut models: Vec<Model> = vec![];
         for provider in state
@@ -278,7 +278,7 @@ impl Gateway {
                 model.price = prices.reference(&model.id, model.source.as_deref());
             }
         }
-        let state = self.request_state()?;
+        let state = self.request_state();
         let providers = state
             .store
             .providers
@@ -364,7 +364,7 @@ impl Gateway {
             let result = self.list_models(&id, true).await;
             // Removed providers must not be reintroduced by an in-flight query.
             if self
-                .request_state()?
+                .request_state()
                 .store
                 .providers
                 .iter()
@@ -396,7 +396,7 @@ impl Gateway {
     }
     pub async fn refresh_gateway_models(&self, ids: Option<Vec<String>>) -> Result<View> {
         let selected = {
-            let state = self.request_state()?;
+            let state = self.request_state();
             if ids.as_ref().is_some_and(|ids| {
                 ids.iter()
                     .any(|id| !state.store.providers.iter().any(|p| &p.id == id))
@@ -426,7 +426,7 @@ impl Gateway {
             return Ok(());
         }
         let ids = {
-            let state = self.request_state()?;
+            let state = self.request_state();
             let (file, error) = self.0.model_list.snapshot();
             if error.is_some() {
                 return Ok(());

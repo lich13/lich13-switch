@@ -198,7 +198,7 @@ impl Gateway {
         }
         let codex = (self.client_id() == ClientId::Codex)
             .then(|| {
-                let state = self.request_state().ok()?;
+                let state = self.request_state();
                 CodexIdentity::capture(headers, state.home.as_deref()?)
             })
             .flatten();
@@ -208,7 +208,7 @@ impl Gateway {
         })
     }
     pub(crate) fn test_endpoint(&self, id: &str, endpoint: Option<&str>) -> Result<String> {
-        let state = self.request_state()?;
+        let state = self.request_state();
         let provider = state
             .store
             .providers
@@ -257,7 +257,7 @@ impl Gateway {
     }
     pub(crate) fn test_candidates(&self) -> Result<Vec<Candidate>> {
         Ok(self
-            .request_state()?
+            .request_state()
             .store
             .providers
             .iter()
@@ -269,7 +269,7 @@ impl Gateway {
             .collect())
     }
     pub(crate) fn test_target(&self, id: &str, expected: Option<&str>) -> Result<Target> {
-        let state = self.request_state()?;
+        let state = self.request_state();
         if expected.is_some_and(|expected| {
             self.view_revision(&state)
                 .map_or(true, |rev| rev != expected)
@@ -356,7 +356,7 @@ impl Gateway {
     }
     pub(crate) fn verify_test_version(&self, id: &str, version: &str) -> Result<()> {
         if self
-            .request_state()?
+            .request_state()
             .store
             .providers
             .iter()
@@ -371,7 +371,7 @@ impl Gateway {
         }
     }
     pub(crate) fn dequeue_degraded(&self, id: &str, version: &str) -> Result<()> {
-        let mut state = self.request_state()?;
+        let mut state = self.request_state();
         let mut next = state.store.clone();
         let provider = next
             .providers

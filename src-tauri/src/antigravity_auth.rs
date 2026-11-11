@@ -16,7 +16,6 @@ use std::{
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 type R<'a> = tauri::State<'a, Arc<Runtime>>;
-const VAULT_LIMIT: u64 = 4 * 1024 * 1024;
 const CREDENTIAL_LIMIT: u64 = 256 * 1024;
 static AUTH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 fn err(c: &str, msg: &str) -> AppError {
@@ -439,7 +438,7 @@ fn read_text_optional(path: &Path) -> Result<Option<String>> {
 }
 fn load_vault(paths: &Paths) -> Result<(Vault, String)> {
     storage::private_dir(&paths.data_dir)?;
-    let loaded = storage::read_bounded(&paths.vault_file(), VAULT_LIMIT)?;
+    let loaded = storage::read_optional(&paths.vault_file())?;
     let rev = storage::revision(loaded.as_deref());
     let mut vault = match loaded {
         Some(b) => serde_json::from_slice(&b)
@@ -1243,7 +1242,7 @@ fn push_span(spans: &mut Vec<ActivationSpan>, id: &str, fb_ms: i64) -> bool {
 }
 pub fn provider_timeline(data_dir: &Path, gemini_home: Option<&Path>) -> ProviderTimeline {
     let v_file = data_dir.join("antigravity-accounts.json");
-    let Ok(Some(b)) = storage::read_bounded(&v_file, VAULT_LIMIT) else {
+    let Ok(Some(b)) = storage::read_optional(&v_file) else {
         return ProviderTimeline::default();
     };
     let Ok(vault) = serde_json::from_slice::<Vault>(&b) else {

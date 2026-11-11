@@ -467,9 +467,7 @@ impl Gateway {
 
     pub fn report_diagnostics(&self) {
         let circuits: Vec<_> = {
-            let Ok(state) = self.request_state() else {
-                return;
-            };
+            let state = self.request_state();
             state
                 .circuits
                 .values()
@@ -740,9 +738,13 @@ impl Gateway {
                 return Ok(());
             }
             let (base_url, token) = Self::import_pair(self.0.client, home, &next.connection)?;
-            for port in self.0.registry.ports.lock().unwrap().iter() {
-                model::base_url(&base_url, *port)?;
-            }
+            model::base_url(
+                &base_url,
+                self.0
+                    .registry
+                    .port
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )?;
             next.edit(
                 Edit::SaveProvider {
                     search_only: None,
@@ -754,14 +756,6 @@ impl Gateway {
                 },
                 false,
             )?;
-        }
-        if self.0.client == ClientId::Grok && initial_import {
-            if let Some(provider) = next.providers.last() {
-                next.grok_connections.insert(
-                    provider.id.clone(),
-                    grok_config::profile(&grok_config::read(home)?.1)?.connection,
-                );
-            }
         }
         next.initialized = true;
         s.revision = next.persist(&self.0.data.join("gateway.json"), &s.revision)?;
@@ -891,7 +885,7 @@ impl Gateway {
     }
     fn view_snapshot(&self) -> Result<(View, Option<PathBuf>, Store)> {
         let listener = self.0.registry.listener.view()?;
-        let s = self.request_state()?;
+        let s = self.request_state();
         let (occupied, waiting) = self.0.admission.counts();
         let health = |key: String| s.circuits.get(&key).cloned().unwrap_or_default().health();
         let view = View {
@@ -1142,7 +1136,7 @@ impl Gateway {
         for _ in 0..2 {
             let (mut view, home, store) = self.view_snapshot()?;
             read(self, &mut view, home.as_deref(), &store);
-            let state = self.request_state()?;
+            let state = self.request_state();
             if self.view_revision(&state)? == view.revision {
                 return Ok(view);
             }
@@ -1293,7 +1287,7 @@ impl Gateway {
     }
     pub fn guarded_home(&self) -> bool {
         self.try_view().is_err()
-            || self.request_state().is_ok_and(|state| state.running)
+            || self.request_state().running
             || self.0.data.join("gateway-recovery.json").exists()
             || self.0.data.join("grok-import.json").exists()
             || self.0.data.join("dsh-recovery.json").exists()
@@ -1492,14 +1486,6 @@ impl Gateway {
                     },
                     s.running,
                 )?;
-                if self.0.client == ClientId::Grok {
-                    if let Some(provider) = next.providers.last() {
-                        next.grok_connections.insert(
-                            provider.id.clone(),
-                            grok_config::profile(&grok_config::read(home)?.1)?.connection,
-                        );
-                    }
-                }
             }
             edit => next.edit(edit, s.running)?,
         }
@@ -1519,28 +1505,6 @@ impl Gateway {
                     code::GROK_PROTOCOL,
                     "请先停用 Grok 网关，再切换 API 协议",
                 ));
-            }
-        }
-        let mut ports = self.0.registry.ports.lock().unwrap().clone();
-        ports.push(next.settings.port);
-        for provider in &next.providers {
-            for port in &ports {
-                for url in Self::endpoint_urls(&next, provider) {
-                    model::base_url(&url, *port)?;
-                }
-            }
-        }
-        // A port change must not turn another client's existing upstream into a loop.
-        if next.settings.port != s.store.settings.port {
-            for peer in self.0.registry.gateways() {
-                if !Arc::ptr_eq(&peer, &self.0) {
-                    let peer = peer.inner.lock().unwrap();
-                    for p in &peer.store.providers {
-                        for url in Self::endpoint_urls(&peer.store, p) {
-                            model::base_url(&url, next.settings.port)?;
-                        }
-                    }
-                }
             }
         }
         if let Some(port) = port_change {
@@ -1706,11 +1670,6 @@ impl Gateway {
             }
             let mut next = s.store.clone();
             next.local_token.clone_from(&token);
-            for provider in &next.providers {
-                for url in Self::endpoint_urls(&next, provider) {
-                    model::base_url(&url, listener.port)?;
-                }
-            }
             if let Some(text) = &grok_text {
                 next.grok_resume = Some(grok_config::fingerprint(text)?);
             }
@@ -1987,9 +1946,7 @@ impl Gateway {
         let _ = tokio::task::spawn_blocking(move || gateway.successful_response(&provider)).await;
     }
     fn successful_response(&self, provider: &Provider) {
-        let Ok(mut s) = self.request_state() else {
-            return;
-        };
+        let mut s = self.request_state();
         if !s.running
             || !s
                 .store
@@ -2134,7 +2091,7 @@ impl Gateway {
                     .retry_canceled_requests(false)
                     .build(
                         Connector::new(Duration::from_secs(10), self.try_listener_view()?.port)
-                            .with_ports(self.0.registry.ports.clone()),
+                            .with_shared_port(self.0.registry.port.clone()),
                     ),
             };
             (query, connection)
@@ -2232,8 +2189,8 @@ impl Gateway {
             }
         }
     }
-    fn request_state(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
-        Ok(self.0.inner.lock().unwrap())
+    fn request_state(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.0.inner.lock().unwrap()
     }
     fn routing_ids(&self, pinned: Option<&str>) -> Vec<String> {
         let s = self.0.inner.lock().unwrap();
@@ -2265,7 +2222,7 @@ impl Gateway {
     }
     #[cfg(test)]
     pub(crate) fn successful_user_agent(&self) -> Result<hyper::header::HeaderValue> {
-        self.request_state()?
+        self.request_state()
             .store
             .successful_user_agent
             .as_deref()
@@ -2283,9 +2240,7 @@ impl Gateway {
         if raw.is_empty() || raw.len() > 8192 {
             return;
         }
-        let Ok(mut s) = self.request_state() else {
-            return;
-        };
+        let mut s = self.request_state();
         let codex = identity
             .codex
             .filter(|identity| identity.matches_home(s.home.as_deref()));
@@ -2312,7 +2267,7 @@ impl Gateway {
         }
     }
     fn route(&self, id: &str) -> Option<Route> {
-        let mut s = self.request_state().ok()?;
+        let mut s = self.request_state();
         let mut provider = s.store.providers.iter().find(|p| p.id == id)?.clone();
         let dsh_models = (self.0.client == ClientId::Dsh)
             .then(|| s.store.dsh_models.get(id).cloned().unwrap_or_default());
@@ -2334,7 +2289,7 @@ impl Gateway {
                     .retry_canceled_requests(false)
                     .build(
                         Connector::new(Duration::from_secs(s.store.settings.connect_seconds), port)
-                            .with_ports(self.0.registry.ports.clone()),
+                            .with_shared_port(self.0.registry.port.clone()),
                     )
             })
             .clone();
@@ -2365,9 +2320,7 @@ impl Gateway {
         if id.is_empty() || id.len() > 1024 {
             return;
         }
-        let Ok(mut s) = self.request_state() else {
-            return;
-        };
+        let mut s = self.request_state();
         s.affinity
             .retain(|_, (_, _, at)| at.elapsed() < Duration::from_secs(3600));
         if s.affinity.len() >= 4096 {

@@ -127,6 +127,7 @@ fn headers(
     }
     Ok(())
 }
+#[cfg(test)]
 pub fn profile(text: &str) -> Result<Profile> {
     profile_with_env(text, &|name| std::env::var(name).ok())
 }

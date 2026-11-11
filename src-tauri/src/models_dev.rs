@@ -15,7 +15,6 @@ use std::{
 
 const SOURCE: &str = "https://models.dev/api.json";
 const DOWNLOAD_LIMIT: usize = 16 * 1024 * 1024;
-const CACHE_LIMIT: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Model {
@@ -211,7 +210,7 @@ impl Catalog {
         if state.loaded {
             return;
         }
-        let loaded = storage::read_bounded(&self.path, CACHE_LIMIT).and_then(|bytes| {
+        let loaded = storage::read_optional(&self.path).and_then(|bytes| {
             let index = bytes
                 .as_ref()
                 .map(|bytes| {

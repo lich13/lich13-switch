@@ -247,7 +247,6 @@ pub enum Edit {
         token: String,
         display_name: String,
         protocol: super::provider_protocol::Protocol,
-        model: Option<String>,
     },
     SaveProvider {
         #[serde(default)]
@@ -542,7 +541,6 @@ impl Store {
                 token,
                 display_name,
                 protocol,
-                model,
             } => {
                 let url = base_url(&raw, self.settings.port)?;
                 if self.providers.iter().any(|p| {
@@ -578,9 +576,6 @@ impl Store {
                             ..Default::default()
                         },
                     );
-                    if let Some(model) = model {
-                        let _ = model;
-                    }
                 }
                 self.selected = selected;
             }

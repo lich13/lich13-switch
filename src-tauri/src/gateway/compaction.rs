@@ -50,7 +50,7 @@ pub fn unidentified_candidates(routes: Vec<super::Route>) -> Vec<super::Route> {
 
 pub fn queued(gateway: &super::Gateway) -> storage::Result<Vec<super::model::Provider>> {
     Ok(gateway
-        .request_state()?
+        .request_state()
         .store
         .providers
         .iter()
@@ -1225,7 +1225,7 @@ impl Lease {
         pinned: bool,
     ) -> storage::Result<bool> {
         use crate::{errors::code, storage::AppError};
-        let config = gateway.request_state()?;
+        let config = gateway.request_state();
         let current = config
             .store
             .providers

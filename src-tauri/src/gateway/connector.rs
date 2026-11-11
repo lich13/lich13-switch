@@ -134,27 +134,27 @@ pub struct Connector {
     pub timeout: Duration,
     pub gateway_port: u16,
     tls: TlsConnector,
-    ports: Option<Arc<std::sync::Mutex<Vec<u16>>>>,
+    shared_port: Option<Arc<std::sync::atomic::AtomicU16>>,
 }
 impl Connector {
     pub fn new(timeout: Duration, gateway_port: u16) -> Self {
         Self {
-            ports: None,
+            shared_port: None,
             timeout,
             gateway_port,
             tls: shared_tls(),
         }
     }
-    pub fn with_ports(mut self, ports: Arc<std::sync::Mutex<Vec<u16>>>) -> Self {
-        self.ports = Some(ports);
+    pub fn with_shared_port(mut self, port: Arc<std::sync::atomic::AtomicU16>) -> Self {
+        self.shared_port = Some(port);
         self
     }
     fn is_gateway_port(&self, port: u16) -> bool {
         port == self.gateway_port
             || self
-                .ports
+                .shared_port
                 .as_ref()
-                .is_some_and(|p| p.lock().unwrap().contains(&port))
+                .is_some_and(|p| p.load(std::sync::atomic::Ordering::Relaxed) == port)
     }
     pub async fn connect(&self, uri: Uri) -> Result<Transport, ConnectError> {
         let deadline = tokio::time::Instant::now() + self.timeout;
@@ -291,7 +291,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let connector = Connector::new(Duration::from_secs(1), 0)
-            .with_ports(Arc::new(std::sync::Mutex::new(vec![address.port()])));
+            .with_shared_port(Arc::new(std::sync::atomic::AtomicU16::new(address.port())));
         let uri = format!("http://fixture.example.invalid:{}", address.port())
             .parse()
             .unwrap();

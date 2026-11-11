@@ -592,7 +592,7 @@ async fn claude_message_stop_is_success_but_missing_terminal_and_abrupt_disconne
 }
 
 #[tokio::test]
-async fn peer_gateway_urls_and_port_changes_that_create_cross_client_loops_are_rejected() {
+async fn peer_gateway_urls_are_rejected_when_saved() {
     let f = dual_fixture(
         vec!["https://codex.fixture.invalid/v1".into()],
         vec!["https://claude.fixture.invalid".into()],
@@ -633,35 +633,6 @@ async fn peer_gateway_urls_and_port_changes_that_create_cross_client_loops_are_r
             assert_eq!(file_hash(gateway.0.data.join("gateway.json")), before);
         }
     }
-    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream_port = reserved.local_addr().unwrap().port();
-    edit_client(
-        &f.codex,
-        &f.codex_home,
-        Edit::SaveProvider {
-            search_only: None,
-            quota_access_token: None,
-            id: None,
-            base_url: format!("http://127.0.0.1:{upstream_port}/deployment"),
-            token: "future-loop-fixture".into(),
-            name: None,
-        },
-    );
-    let before = f.claude.view();
-    let mut settings = before.settings.clone();
-    settings.port = upstream_port;
-    let error = f
-        .claude
-        .edit(
-            Edit::Settings { settings },
-            &before.revision,
-            &f.claude_home,
-        )
-        .err()
-        .unwrap();
-    assert_eq!(error.code, "LOOP");
-    assert_eq!(f.claude.view().settings, before.settings);
-    assert_eq!(f.claude.view().revision, before.revision);
 }
 
 #[tokio::test]

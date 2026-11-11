@@ -309,7 +309,6 @@ pub fn confirm_provider_import(
                 token: p.key,
                 display_name: p.preview.name,
                 protocol,
-                model: None,
             },
             &expected_revision,
             &home,
