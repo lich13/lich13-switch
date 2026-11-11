@@ -213,6 +213,9 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
         }
     });
     // Price checks must not wait behind a session scan or historical compaction.
+    if r.smoke.is_none() {
+        r.usage.schedule_price_backfill();
+    }
     let price_runtime = Arc::downgrade(r);
     let price_handle = app.clone();
     tauri::async_runtime::spawn(async move {

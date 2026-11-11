@@ -102,30 +102,17 @@ impl Store {
         }
         let mut connection = db(Connection::open(&path))?;
         storage::protect(&path, false)?;
+        super::maintenance::configure(&connection)?;
+        db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
+        query::register(&connection)?;
         let version: i64 = db(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
         if version > 13 {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
-        if version != 0 && (version < 12 || !storage_v12::ready(&connection)) {
-            drop(connection);
-            let backup = dir.join(format!("usage.sqlite.legacy-v{version}.bak"));
-            std::fs::rename(&path, &backup).map_err(|_| failure("旧版用量数据库备份失败"))?;
-            let _ = storage::protect(&backup, false);
-            for suffix in ["-wal", "-shm"] {
-                let _ = std::fs::remove_file(dir.join(format!("usage.sqlite{suffix}")));
+        if version != 0 {
+            if version < 12 || !storage_v12::ready(&connection)? {
+                return Err(failure("用量数据库版本过旧或未就绪，已保留原文件"));
             }
-            connection = db(Connection::open(&path))?;
-            storage::protect(&path, false)?;
-        }
-        super::maintenance::configure(&connection)?;
-        db(connection.busy_timeout(std::time::Duration::from_secs(3)))?;
-        query::register(&connection)?;
-        if storage_v12::ready(&connection) {
-            storage_v12::protect_encoding(&connection)?;
-            db(connection.execute_batch(
-                "DROP TABLE IF EXISTS v12_links; DROP TABLE IF EXISTS body_shapes;",
-            ))?;
-            storage_v12::refresh_metrics(&connection)?;
             return Ok(Self {
                 connection,
                 overview_cache: Default::default(),
@@ -695,7 +682,7 @@ impl Store {
         let sql = if cursor.daily {
             "SELECT id,body FROM daily WHERE id>?1 AND json_extract(body,'$.totals.unpriced')>0 ORDER BY id LIMIT 128"
         } else {
-            "SELECT cast(r.rid as text),r.rid FROM v12_rows r WHERE r.rid>cast(?1 as integer) AND (EXISTS(SELECT 1 FROM v12_attempts a WHERE a.owner=r.rid AND a.unpriced>0) OR EXISTS(SELECT 1 FROM v12_sessions a WHERE a.owner=r.rid AND a.unpriced>0)) ORDER BY r.rid LIMIT 128"
+            "SELECT cast(r.rid as text),r.rid FROM v12_rows r WHERE r.rid>cast(?1 as integer) AND (EXISTS(SELECT 1 FROM v12_attempts a WHERE a.owner=r.rid AND (a.unpriced>0 OR a.model IN (SELECT id FROM v12_dictionary WHERE lower(cast(value as text)) LIKE '%deepseek/%'))) OR EXISTS(SELECT 1 FROM v12_sessions a WHERE a.owner=r.rid AND a.unpriced>0)) ORDER BY r.rid LIMIT 128"
         };
         let rows = {
             let mut stmt = db(tx.prepare_cached(sql))?;
@@ -722,7 +709,12 @@ impl Store {
                 let mut r: Record = storage_v12::load_record(&tx, rid.unwrap())?;
                 let mut updated = false;
                 for a in &mut r.attempts {
-                    if a.price.is_none() && a.compacted_unpriced.is_none() {
+                    let upgrade_deepseek = a.price.as_ref().is_some_and(|p| {
+                        p.source == "models.dev"
+                            && super::builtin_pricing::canonical(&p.model)
+                                .is_some_and(|m| m.starts_with("deepseek-"))
+                    });
+                    if (a.price.is_none() || upgrade_deepseek) && a.compacted_unpriced.is_none() {
                         a.price = a.calculate_price(pricing);
                         updated |= a.price.is_some();
                     }

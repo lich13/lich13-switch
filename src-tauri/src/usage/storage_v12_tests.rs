@@ -387,26 +387,6 @@ fn diagnostic_templates_are_inserted_only_when_used_and_reused_losslessly() {
 }
 
 #[test]
-fn v12_ready_database_removes_legacy_links_on_open() {
-    let (dir, store) = migrated_empty();
-    let has_links = |store: &Store| {
-        store
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='v12_links')",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap()
-    };
-    assert!(!has_links(&store));
-    store.connection.execute_batch("CREATE TABLE v12_links(owner INTEGER PRIMARY KEY,target BLOB NOT NULL); INSERT INTO v12_links VALUES(1,x'00'); INSERT OR REPLACE INTO metadata VALUES('storage_repack','1');").unwrap();
-    drop(store);
-    let reopened = Store::open(dir.path()).unwrap();
-    assert!(!has_links(&reopened));
-}
-
-#[test]
 fn v12_migration_preserves_raw_and_merged_views_across_restarts() {
     let dir = tempfile::tempdir().unwrap();
     let mut old = Store::open(dir.path()).unwrap();

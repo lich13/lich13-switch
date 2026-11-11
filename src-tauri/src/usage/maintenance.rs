@@ -96,7 +96,6 @@ fn filesystem_probe_queries_database_directory_with_unicode_name() {
 }
 
 const WAL_LIMIT: i64 = 8 * 1024 * 1024;
-const STORAGE_TARGET: i64 = 80 * 1024 * 1024;
 
 pub(super) fn configure(connection: &Connection) -> Result<()> {
     // Effective immediately for a new database. An existing database needs the
@@ -153,13 +152,7 @@ pub(super) fn reclaim(
         }
         let started = Instant::now();
         let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-        let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let vacuum = if pages.saturating_mul(page_size) > STORAGE_TARGET - WAL_LIMIT {
-            "PRAGMA incremental_vacuum(16384)"
-        } else {
-            "PRAGMA incremental_vacuum(4096)"
-        };
-        let mut statement = connection.prepare(vacuum)?;
+        let mut statement = connection.prepare("PRAGMA incremental_vacuum(16384)")?;
         let mut rows = statement.query([])?;
         while rows.next()?.is_some() {
             if started.elapsed() >= Duration::from_millis(250) {

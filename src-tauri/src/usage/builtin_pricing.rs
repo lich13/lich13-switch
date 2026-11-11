@@ -40,8 +40,16 @@ pub fn aliases() -> &'static BTreeMap<String, String> {
             ("gemini-4-argon-cyber", "gemini-4-argon-cyber-permissive"),
             ("deepseek-flash", "deepseek-v4-flash"),
             ("deepseek-v4.1-flash", "deepseek-v4-flash"),
+            ("deepseek-v4.1-pro", "deepseek-v4-pro"),
+            ("deepseek-pro", "deepseek-v4-pro"),
+            ("deepseek-pro-latest", "deepseek-v4-pro"),
+            ("deepseek-v4-pro-ga", "deepseek-v4-pro"),
             ("deepseek-chat", "deepseek-v4-flash"),
             ("deepseek-reasoner", "deepseek-v4-flash"),
+            ("deepseek-v3", "deepseek-v4-flash"),
+            ("deepseek-v3.1", "deepseek-v4-flash"),
+            ("deepseek-v3.2", "deepseek-v4-flash"),
+            ("deepseek-r1", "deepseek-v4-flash"),
             ("k3", "kimi-k3"),
             ("k3-256k", "kimi-k3"),
             ("grok", "grok-4.6"),
@@ -79,6 +87,13 @@ pub fn aliases() -> &'static BTreeMap<String, String> {
             if model.starts_with("gemini-") {
                 aliases.insert(format!("{model}-tiered"), target);
             }
+        }
+        let hyphenated: Vec<_> = aliases
+            .iter()
+            .map(|(alias, model)| (alias.replace('.', "-"), model.clone()))
+            .collect();
+        for (alias, model) in hyphenated {
+            aliases.entry(alias).or_insert(model);
         }
         aliases
     })
@@ -294,6 +309,10 @@ mod tests {
             ("glm-5.3", "0.00184"),
             ("glm-4.7-flash", "0"),
             ("deepseek-v4-pro-0813", "0.000858"),
+            ("deepseek-v4.1-pro", "0.000858"),
+            ("deepseek-v4-1-pro-260813", "0.000858"),
+            ("deepseek-v4-1-flash-261017", "0.00021"),
+            ("deepseek/deepseek-v4.1-flash-1017", "0.00021"),
             ("deepseek-chat", "0.00021"),
             ("k3-256k", "0.0045"),
             ("minimax-m3", "0.00084"),
@@ -378,23 +397,25 @@ mod tests {
             grok.calculate(&tokens(199999, 0), None).unwrap().cost,
             "0.399998"
         );
-        for (at, cost) in [
-            ("2026-10-26T00:59:59Z", "0.00021"),
-            ("2026-10-26T01:00:00Z", "0.00042"),
-            ("2026-10-26T04:00:00Z", "0.00021"),
-            ("2026-10-26T06:00:00Z", "0.00042"),
-            ("2026-10-26T10:00:00Z", "0.00021"),
-            (OFF_PEAK, "0.00021"),
-        ] {
-            let snapshot = quote("deepseek-v4-flash", at)
-                .calculate(&tokens(1000, 100), None)
-                .unwrap();
-            assert_eq!(snapshot.cost, cost, "{at}");
-            assert!(snapshot
-                .basis
-                .unwrap()
-                .get("time_price_multiplier")
-                .is_some());
+        for model in ["deepseek-v4-flash", "deepseek-v4-1-flash-261017"] {
+            for (at, cost) in [
+                ("2026-10-26T00:59:59Z", "0.00021"),
+                ("2026-10-26T01:00:00Z", "0.00042"),
+                ("2026-10-26T04:00:00Z", "0.00021"),
+                ("2026-10-26T06:00:00Z", "0.00042"),
+                ("2026-10-26T10:00:00Z", "0.00021"),
+                (OFF_PEAK, "0.00021"),
+            ] {
+                let snapshot = quote(model, at)
+                    .calculate(&tokens(1000, 100), None)
+                    .unwrap();
+                assert_eq!(snapshot.cost, cost, "{model} {at}");
+                assert!(snapshot
+                    .basis
+                    .unwrap()
+                    .get("time_price_multiplier")
+                    .is_some());
+            }
         }
     }
     #[test]

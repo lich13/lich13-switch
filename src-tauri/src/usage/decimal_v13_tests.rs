@@ -232,15 +232,19 @@ fn ready_v12_snapshots_survive_v13_guard_and_reentry() {
     let before = serde_json::to_value(store.detail(&source.id).unwrap()).unwrap();
     drop(store);
 
-    let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
-    c.pragma_update(None, "user_version", 12).unwrap();
-    drop(c);
     let reopened = Store::open(dir.path()).unwrap();
     assert_eq!(user_version(dir.path()), 13);
     assert_eq!(
         serde_json::to_value(reopened.detail(&source.id).unwrap()).unwrap(),
         before
     );
+    drop(reopened);
+
+    let c = Connection::open(dir.path().join("usage.sqlite")).unwrap();
+    c.pragma_update(None, "user_version", 11).unwrap();
+    drop(c);
+    assert!(Store::open(dir.path()).is_err());
+    assert!(!dir.path().join("usage.sqlite.legacy-v11.bak").exists());
 }
 
 fn has_price_basis(value: &Value) -> bool {

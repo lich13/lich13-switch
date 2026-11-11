@@ -261,24 +261,14 @@ pub(super) fn compact(c: &Connection) -> Result<bool> {
 }
 
 pub(super) fn pending(c: &Connection) -> Result<bool> {
-    for table in [
-        "v12_rows",
-        "v12_archives",
-        "v12_attempt_rows",
-        "v12_session_rows",
-        "v12_original",
-    ] {
-        if db(c.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM {table} WHERE typeof(body)='blob' AND body<>x'00')"
-            ),
-            [],
-            |r| r.get::<_, bool>(0),
-        ))? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let mut stmt = db(c.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM v12_rows WHERE typeof(body)='blob' AND body<>x'00')
+         OR EXISTS(SELECT 1 FROM v12_archives WHERE typeof(body)='blob' AND body<>x'00')
+         OR EXISTS(SELECT 1 FROM v12_attempt_rows WHERE typeof(body)='blob' AND body<>x'00')
+         OR EXISTS(SELECT 1 FROM v12_session_rows WHERE typeof(body)='blob' AND body<>x'00')
+         OR EXISTS(SELECT 1 FROM v12_original WHERE typeof(body)='blob' AND body<>x'00')",
+    ))?;
+    db(stmt.query_row([], |r| r.get::<_, bool>(0)))
 }
 
 pub(super) fn prune(c: &Connection) -> Result<()> {

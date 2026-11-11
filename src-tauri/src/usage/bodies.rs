@@ -77,9 +77,6 @@ pub(super) fn unpack(connection: &Connection, body: &str) -> Result<Value> {
     if let Some(id) = value.get("_usageArchive").and_then(Value::as_i64) {
         return super::storage_v12::load_archive(connection, id);
     }
-    if value.get("_usageCodec").is_some() {
-        return Err(failure("用量记录编码不支持，原记录已保留"));
-    }
     Ok(value)
 }
 

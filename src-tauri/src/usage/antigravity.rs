@@ -83,6 +83,7 @@ fn loopback_client() -> Result<reqwest::Client> {
     let built = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
+        // Antigravity's local language server uses a self-signed loopback certificate; callers only connect to 127.0.0.1 with a CSRF token.
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(20))
         .build()

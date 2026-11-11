@@ -62,13 +62,15 @@ fn db<T>(v: rusqlite::Result<T>) -> Result<T> {
 fn json_error(_: serde_json::Error) -> crate::storage::AppError {
     failure("用量 v12 元数据无效，原数据已保留")
 }
-pub(super) fn ready(c: &Connection) -> bool {
-    c.query_row(
-        "SELECT value='ready' FROM metadata WHERE key='storage_v12'",
-        [],
-        |r| r.get(0),
-    )
-    .unwrap_or(false)
+pub(super) fn ready(c: &Connection) -> Result<bool> {
+    Ok(db(c
+        .query_row(
+            "SELECT value='ready' FROM metadata WHERE key='storage_v12'",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .optional())?
+    .unwrap_or(false))
 }
 fn key(s: &str) -> Vec<u8> {
     if s.len() == 64
@@ -668,21 +670,6 @@ fn shared_value(bytes: &[u8]) -> Option<Value> {
 }
 fn intern_text(c: &Connection, v: Option<&str>) -> Result<Option<i64>> {
     v.map(|v| intern(c, &json!(v))).transpose()
-}
-
-pub(super) fn protect_encoding(c: &Connection) -> Result<()> {
-    // Commit the reader guard before any tag-11 payload can be written, even
-    // when resuming a pending copy or opening an already active v12 layout.
-    let version: i64 = db(c.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
-    if version > 13 {
-        return Err(failure("用量数据库来自更高版本，已保留原文件"));
-    }
-    if version == 13 {
-        return Ok(());
-    }
-    let tx = db(c.unchecked_transaction())?;
-    db(tx.execute_batch("PRAGMA user_version=13;"))?;
-    db(tx.commit())
 }
 
 fn create_tables(c: &Connection) -> Result<()> {
@@ -1402,19 +1389,6 @@ pub(super) fn archive_selected(c: &Connection) -> Result<()> {
         [],
     ))?;
     Ok(())
-}
-pub(super) fn refresh_metrics(c: &Connection) -> Result<()> {
-    let sql: String = db(c.query_row(
-        "SELECT sql FROM sqlite_master WHERE name='usage_metrics'",
-        [],
-        |r| r.get(0),
-    ))?;
-    if sql.contains("coalesce(cache_read,0)") {
-        return Ok(());
-    }
-    let original = metric_select("v12_raw_attempts", 2)
-        + " WHERE EXISTS(SELECT 1 FROM v12_original o WHERE o.owner=r.rid AND o.metrics_changed)";
-    db(c.execute_batch(&format!("DROP VIEW usage_metrics; CREATE VIEW usage_metrics AS {} UNION ALL {} UNION ALL {original} UNION ALL SELECT * FROM usage_daily_metrics;",metric_select("v12_attempts",0),metric_select("v12_sessions",0))))
 }
 pub(super) fn prune(c: &Connection) -> Result<()> {
     db(c.execute("DELETE FROM v12_archives WHERE rid NOT IN (SELECT json_extract(body,'$._usageArchive') FROM daily WHERE json_extract(body,'$._usageArchive') IS NOT NULL)",[]))?;
