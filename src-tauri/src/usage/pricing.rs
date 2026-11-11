@@ -279,8 +279,7 @@ impl Pricing {
             .map(serde_json::from_slice::<Config>)
             .transpose();
         let (config, config_error) = match decoded {
-            Ok(Some(mut c)) => {
-                c.provider_mappings.retain(|r| r.client != "agy");
+            Ok(Some(c)) => {
                 if valid_config(&c).is_ok() {
                     (c, None)
                 } else {

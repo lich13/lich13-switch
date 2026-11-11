@@ -230,8 +230,7 @@ pub fn apply(model: &str, data: &mut Value, at: i64) {
     }
     let factor = match model.as_str() {
         "gpt-5.5" => Some(Decimal::new(25, 1)),
-        "gpt-5.4" | "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna" | "gpt-6.1-sol"
-        | "gpt-6.1-terra" => Some(Decimal::from(2)),
+        "gpt-5.4" | "gpt-6-astra" => Some(Decimal::from(2)),
         _ if premium => Some(Decimal::from(2)),
         _ => None,
     };

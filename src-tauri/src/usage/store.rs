@@ -108,7 +108,7 @@ impl Store {
             return Err(failure("用量数据库来自更高版本，已保留原文件"));
         }
         if version != 0 {
-            if version < 12 || !storage_v12::ready(&connection)? {
+            if version != 13 || !storage_v12::ready(&connection)? {
                 return Err(failure("用量数据库版本过旧或未就绪，已保留原文件"));
             }
             return Ok(Self {
@@ -201,13 +201,6 @@ impl Store {
         let result = f(self);
         let end = db(self.connection.execute_batch("ROLLBACK;"));
         result.and_then(|value| end.map(|()| value))
-    }
-    pub fn needs_repair(&self, source: &str) -> Result<bool> {
-        db(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1 AND value='1')",
-            [format!("repair_{source}")],
-            |r| r.get(0),
-        ))
     }
     pub fn source_counts(&self, source: &str) -> Result<(u64, u64, i64)> {
         let (merged, pending) = db(self.connection.query_row(
@@ -581,7 +574,7 @@ impl Store {
                 };
                 d.totals.add(&t);
                 db(tx.execute("INSERT INTO daily(id,day,body) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body",params![key,day,bodies::encode(tx, &d)?]))?;
-                query::project(tx, 1, &key, &d.example, d.totals.requests, Some(&d.totals))?;
+                query::project(tx, &key, &d.example, d.totals.requests, &d.totals)?;
             }
         }
         drop(rows);
@@ -729,7 +722,7 @@ impl Store {
                     if d.example.cost().is_some() {
                         d.totals.unpriced = 0;
                     }
-                    query::project(&tx, 1, id, &d.example, d.totals.requests, Some(&d.totals))?;
+                    query::project(&tx, id, &d.example, d.totals.requests, &d.totals)?;
                     db(tx.execute(
                         "UPDATE daily SET body=?2 WHERE id=?1",
                         params![id, bodies::encode(&tx, &d)?],
@@ -741,14 +734,8 @@ impl Store {
         if changed {
             query::changed(&tx)?;
         }
-        let done = rows.is_empty() && cursor.daily;
-        if done {
-            db(tx.execute(
-                "DELETE FROM metadata WHERE key='backfill_after_storage'",
-                [],
-            ))?;
-        }
         db(tx.commit())?;
+        let done = rows.is_empty() && cursor.daily;
         if let Some((last, _, _)) = rows.last() {
             cursor.after = last.clone();
         } else {
@@ -794,6 +781,7 @@ impl Store {
         }
         Ok(changed)
     }
+    #[cfg(test)]
     pub fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
@@ -867,7 +855,7 @@ impl Store {
             }
             for (_, body) in &rows {
                 let r = storage_v12::decode_stage(body)?;
-                if matches!(source, "claude" | "antigravity") || !archived || r.started_at >= cutoff
+                if source == "claude" || !archived || r.started_at >= cutoff
                 {
                     insert(&tx, &r)?;
                 }
@@ -884,10 +872,6 @@ impl Store {
         db(tx.execute("INSERT INTO metadata VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=cast(value AS INTEGER)+1",[format!("source_generation_{source}")]))?;
         db(tx.execute("DELETE FROM source_stage WHERE source=?1", [source]))?;
         db(tx.execute("DELETE FROM source_stage_cursors WHERE source=?1", [source]))?;
-        db(tx.execute(
-            "DELETE FROM metadata WHERE key=?1",
-            [format!("repair_{source}")],
-        ))?;
         db(tx.execute(
             "INSERT OR REPLACE INTO metadata VALUES(?1,?2)",
             params![

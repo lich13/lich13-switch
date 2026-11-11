@@ -700,7 +700,6 @@ pub enum RoutingDecision {
     NewThread,
     ExistingThread,
     ModelDetourOwnerPreserved,
-    AwaitingCompaction,
     CompactionWindowMismatch,
     CursorPinned,
     NoEligibleReceiver,

@@ -272,11 +272,6 @@ fn write_csv(spool: &Spool, request: &Request, w: &mut impl Write) -> Result<Exp
         if !request.contains(&r) {
             continue;
         }
-        if r.attempts.iter().any(|a| a.repeat_count > 1) {
-            return Err(failure(
-                "所选时间段含旧版合并的重试明细，无法恢复完整尝试；未导出、未清理",
-            ));
-        }
         result.requests += 1;
         for (index, a) in r.attempts.iter().enumerate() {
             let p = a.price.as_ref();
@@ -772,21 +767,6 @@ mod tests {
         assert!(service.read(|s| s.detail("changed")).is_err());
         assert!(service.read(|s| s.detail("in-progress")).is_err());
         assert!(service.read(|s| s.detail("new")).is_err());
-    }
-    #[test]
-    fn compacted_legacy_attempts_are_an_explicit_gap() {
-        let dir = tempfile::tempdir().unwrap();
-        let spool = Spool::new(dir.path()).unwrap();
-        let mut r = row("legacy-retries", "claude", BASE);
-        r.attempts[0].repeat_count = 3;
-        append(&spool.connection, &r, 1, None).unwrap();
-        let destination = dir.path().join("bill.csv");
-        std::fs::write(&destination, "existing-bill").unwrap();
-        assert!(save_csv(&spool, &request(), &destination).is_err());
-        assert_eq!(
-            std::fs::read_to_string(&destination).unwrap(),
-            "existing-bill"
-        );
     }
     #[test]
     fn csv_escapes_formulas_unknowns_and_newlines() {

@@ -1230,10 +1230,7 @@ impl Api {
                 .await
             {
                 Ok(()) => report.files += 1,
-                Err(error) => {
-                    if store.requires_complete_history() {
-                        return Err(error);
-                    }
+                Err(_) => {
                     report.errors += 1;
                 }
             }
@@ -1284,8 +1281,7 @@ impl Api {
             .filter(|s| !s.is_empty())
             .or_else(|| summary["localModifiedStamp"].as_str())
             .unwrap_or("");
-        if !store.requires_complete_history() && !modified.is_empty() && cursor.modified == modified
-        {
+        if !modified.is_empty() && cursor.modified == modified {
             if metadata_changed {
                 let saved = serde_json::to_string(&cursor)
                     .map_err(|_| failure("Antigravity 同步位置无效"))?;
@@ -1301,11 +1297,7 @@ impl Api {
         let mut failed_steps = BTreeSet::new();
         let mut wrote_any = false;
         let mut fallback_loaded = false;
-        let mut offset = if store.requires_complete_history() {
-            0
-        } else {
-            cursor.count.saturating_sub(1)
-        };
+        let mut offset = cursor.count.saturating_sub(1);
         let mut stable = offset;
         loop {
             let meta_req =
@@ -1404,10 +1396,7 @@ impl Api {
                         .collect();
                     let parsed = match record(id, entry, &steps, offset) {
                         Ok(parsed) => parsed,
-                        Err(error) => {
-                            if store.requires_complete_history() {
-                                return Err(error);
-                            }
+                        Err(_) => {
                             failed_steps.extend(indices);
                             for s in &failed_steps {
                                 cursor.covered.remove(s);
@@ -1464,9 +1453,6 @@ impl Api {
                             failed_steps.extend(indices);
                             for s in &failed_steps {
                                 cursor.covered.remove(s);
-                            }
-                            if store.requires_complete_history() {
-                                return Err(failure("Antigravity 历史用量尚未完整，请稍后重试"));
                             }
                             report.errors += 1;
                         } else {
@@ -1573,12 +1559,7 @@ pub(super) fn scan_file_list(
         })
         .unwrap_or_default();
     for path in files {
-        if let Err(error) = scan_file(
-            store, brain, path, pricing, settings, report, repair, &timeline,
-        ) {
-            if store.requires_complete_history() {
-                return Err(error);
-            }
+        if scan_file(store, brain, path, pricing, settings, report, repair, &timeline).is_err() {
             report.errors += 1;
         }
     }
@@ -1824,10 +1805,7 @@ fn scan_file(
         match parsed {
             Ok(Some(row)) => rows.push(row),
             Ok(None) => {}
-            Err(error) => {
-                if store.requires_complete_history() {
-                    return Err(error);
-                }
+            Err(_) => {
                 gap = true;
                 report.errors += 1;
             }

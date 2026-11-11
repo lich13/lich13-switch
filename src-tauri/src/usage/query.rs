@@ -102,17 +102,10 @@ pub(super) fn metrics_schema(c: &Connection, table: &str) -> Result<()> {
       PRIMARY KEY(kind,owner,ordinal)) WITHOUT ROWID;")))
 }
 
-pub fn project(
-    c: &Connection,
-    kind: i64,
-    owner: &str,
-    r: &Record,
-    count: u64,
-    historical: Option<&Totals>,
-) -> Result<()> {
-    if kind != 1 {
-        return Ok(());
-    }
+/// Project one daily rollup. Its stored totals are authoritative for the
+/// final attempt; earlier attempts contribute tokens and cost only.
+pub fn project(c: &Connection, owner: &str, r: &Record, count: u64, totals: &Totals) -> Result<()> {
+    let kind = 1i64;
     let table = "usage_daily_metrics";
     db(c.execute(
         &format!("DELETE FROM {table} WHERE kind=?1 AND owner=?2"),
@@ -123,53 +116,26 @@ pub fn project(
         let final_record = i + 1 == r.attempts.len();
         let known = final_record && r.known_success().is_some();
         let success = final_record && r.known_success() == Some(true);
-        let duration = if final_record {
-            historical.map_or(a.measured_duration_ms().unwrap_or(0) * count, |t| {
-                t.duration_ms
-            })
+        let (duration, measured, generation) = if final_record {
+            (
+                totals.duration_ms,
+                totals.measured_outputs,
+                totals.generation_ms,
+            )
         } else {
-            0
-        };
-        let generation = a.measured_generation_ms();
-        let measured = if final_record {
-            historical.map_or(generation.and(a.tokens.output).unwrap_or(0) * count, |t| {
-                t.measured_outputs
-            })
-        } else {
-            0
-        };
-        let generation = if final_record {
-            historical.map_or(generation.unwrap_or(0) * count, |t| t.generation_ms)
-        } else {
-            0
+            (0, 0, 0)
         };
         let (first_token_sum, first_token_samples) = if final_record {
-            historical.map_or_else(
-                || {
-                    r.measured_first_token_ms()
-                        .map_or((0, 0), |ms| (ms.saturating_mul(count), count))
-                },
-                |t| (t.first_token_sum_ms, t.first_token_samples),
-            )
+            (totals.first_token_sum_ms, totals.first_token_samples)
         } else {
             (0, 0)
         };
         let tokens = &a.tokens;
-        let (cache_read, cache_input) = historical.map_or_else(
-            || {
-                tokens
-                    .cache_sample()
-                    .map(|(r, i)| (r.saturating_mul(count), i.saturating_mul(count)))
-                    .unwrap_or_default()
-            },
-            |t| {
-                if final_record {
-                    (t.cache_read_eligible, t.cache_input_eligible)
-                } else {
-                    (0, 0)
-                }
-            },
-        );
+        let (cache_read, cache_input) = if final_record {
+            (totals.cache_read_eligible, totals.cache_input_eligible)
+        } else {
+            (0, 0)
+        };
         let mul = |n: Option<u64>| n.map(|n| n.saturating_mul(count).min(i64::MAX as u64) as i64);
         let cost = (a
             .price

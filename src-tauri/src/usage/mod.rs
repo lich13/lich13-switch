@@ -561,7 +561,7 @@ impl Service {
                 let outcome = (|| {
                     let root = root?;
                     let reader = store::Store::reader(&self.0.directory)?;
-                    let repair = rebuild.is_some() || reader.needs_repair(&client)?;
+                    let repair = rebuild.is_some();
                     let mut sink = SessionStore {
                         service: self.clone(),
                         reader,
@@ -671,9 +671,6 @@ impl sessions::Repository for SessionStore {
     }
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
         self.service.query(|db| db.write_batch(rows, cursor))
-    }
-    fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
-        self.service.query(|db| db.remove_superseded(ids))
     }
     fn write_batch_with_superseded(
         &mut self,

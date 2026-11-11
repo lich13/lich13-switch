@@ -587,46 +587,6 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
         store.dashboard(&Filter::default()).unwrap().totals.requests,
         2
     );
-    struct Complete<'a>(&'a mut Store);
-    impl Repository for Complete<'_> {
-        fn requires_complete_history(&self) -> bool {
-            true
-        }
-        fn cursor(&self, id: &str) -> Result<Option<String>> {
-            self.0.cursor(id)
-        }
-        fn generation(&self, source: &str) -> Result<u64> {
-            self.0.source_generation(source)
-        }
-        fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
-            self.0.write_batch(rows, cursor)
-        }
-        fn begin_rebuild(&mut self, source: &str) -> Result<()> {
-            self.0.begin_rebuild(source)
-        }
-        fn stage_rebuild(
-            &mut self,
-            source: &str,
-            rows: &[Record],
-            cursor: Option<(&str, &str)>,
-        ) -> Result<()> {
-            self.0.stage_rebuild(source, rows, cursor)
-        }
-        fn finish_rebuild(&mut self, source: &str) -> Result<()> {
-            self.0.finish_rebuild(source)
-        }
-    }
-    assert!(collect_home(
-        &f.api,
-        &mut Complete(&mut store),
-        dir.path(),
-        &pricing,
-        &Settings::default(),
-        &mut Report::default(),
-        false
-    )
-    .await
-    .is_err());
     assert_eq!(
         store.dashboard(&Filter::default()).unwrap().totals.requests,
         2

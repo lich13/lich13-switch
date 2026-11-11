@@ -1,6 +1,8 @@
 //! Codex high-water/replay and Claude message-ID merging, adapted from CC Switch.
 //! Source files are read-only. Only counters, hashed IDs and cursors survive parsing.
-use super::{model::*, pricing::Pricing, store::Store};
+use super::{model::*, pricing::Pricing};
+#[cfg(test)]
+use super::store::Store;
 use crate::storage::{self, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,7 +32,6 @@ struct Cursor {
     lanes: BTreeMap<String, String>,
     replay: bool,
     boundary: Option<i64>,
-    last_output: Option<i64>,
     usage_end: Option<i64>,
     last_usage_at: Option<i64>,
     chain: BTreeMap<String, (Option<String>, i64)>,
@@ -243,27 +244,18 @@ pub trait Repository {
     ) -> Result<()> {
         Ok(())
     }
-    fn requires_complete_history(&self) -> bool {
-        false
-    }
     fn data_dir(&self) -> Option<&Path> {
         None
     }
     fn cursor(&self, id: &str) -> Result<Option<String>>;
     fn generation(&self, source: &str) -> Result<u64>;
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()>;
-    fn remove_superseded(&mut self, _ids: &[String]) -> Result<()> {
-        Ok(())
-    }
     fn write_batch_with_superseded(
         &mut self,
         rows: &[Record],
         superseded_ids: &[String],
         cursor: Option<(&str, &str)>,
-    ) -> Result<()> {
-        self.remove_superseded(superseded_ids)?;
-        self.write_batch(rows, cursor)
-    }
+    ) -> Result<()>;
     fn begin_rebuild(&mut self, source: &str) -> Result<()>;
     fn stage_rebuild(
         &mut self,
@@ -274,6 +266,7 @@ pub trait Repository {
     fn finish_rebuild(&mut self, source: &str) -> Result<()>;
     fn progress(&mut self, _report: &Report) {}
 }
+#[cfg(test)]
 impl Repository for Store {
     fn save_antigravity_quota(
         &mut self,
@@ -293,9 +286,6 @@ impl Repository for Store {
     }
     fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
         Store::write_batch(self, rows, cursor)
-    }
-    fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
-        Store::remove_superseded(self, ids)
     }
     fn write_batch_with_superseded(
         &mut self,
@@ -407,7 +397,7 @@ pub fn sync(
             .as_deref()
             .and_then(|s| serde_json::from_str::<Cursor>(s).ok())
             .filter(|c| c.generation == generation);
-        if !rebuild && !store.requires_complete_history() {
+        if !rebuild {
             if let (Ok(st), Some(c)) = (std::fs::metadata(&path), saved.as_ref()) {
                 let modified = file_modified(&st);
                 if c.complete
@@ -655,7 +645,6 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &[String]) -> Option<Record
     if typ == "response_item" {
         match p["role"].as_str() {
             Some("user") => c.boundary = Some(at),
-            Some("assistant") => c.last_output = Some(at),
             _ => {}
         }
         return None;
@@ -669,7 +658,6 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &[String]) -> Option<Record
     }
     if matches!(p["type"].as_str(), Some("task_started" | "turn_aborted")) {
         c.boundary = Some(at);
-        c.last_output = None;
         c.usage_end = None;
         c.signature = None;
         c.lanes.clear();
@@ -760,7 +748,6 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &[String]) -> Option<Record
     let id = safe_id(&format!("codex:{session}:{at}:{sig}"));
     let end = c.usage_end.take().filter(|t| *t <= at).unwrap_or(at);
     let start = c.boundary.replace(at);
-    c.last_output = None;
     let mut record = base(
         "codex",
         id,
