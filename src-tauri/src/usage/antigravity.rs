@@ -1559,7 +1559,11 @@ pub(super) fn scan_file_list(
         })
         .unwrap_or_default();
     for path in files {
-        if scan_file(store, brain, path, pricing, settings, report, repair, &timeline).is_err() {
+        if scan_file(
+            store, brain, path, pricing, settings, report, repair, &timeline,
+        )
+        .is_err()
+        {
             report.errors += 1;
         }
     }

@@ -445,46 +445,41 @@ pub struct Lease {
 impl Registry {
     pub fn new(path: PathBuf) -> Arc<Self> {
         let mut state = State::default();
-        match storage::read_optional(&path) {
-            Ok(Some(raw)) => {
-                match serde_json::from_slice::<HashMap<String, Entry>>(&raw) {
-                    Ok(entries)
-                        if entries.len() <= MAX_THREADS
-                            && entries.iter().all(|(key, e)| {
-                                digest_valid(key)
-                                    && !e.provider.is_empty()
-                                    && e.provider.len() <= 256
-                                    && !e.provider.chars().any(char::is_control)
-                                    && e.boundary.as_deref().is_none_or(digest_valid)
-                                    && e.consumed_boundary.as_deref().is_none_or(digest_valid)
-                            }) =>
-                    {
-                        state.entries = entries
-                            .into_iter()
-                            .filter(|(_, e)| now().saturating_sub(e.updated) < RETENTION_MS)
-                            .map(|(key, mut e)| {
-                                // Older records cannot prove that a window is still fresh.
-                                // An interrupted claim cannot be replayed after restart.
-                                if !e.boundary_fresh || e.claim.take().is_some() {
-                                    e.consumed_boundary = e.boundary.take().or(e.consumed_boundary);
-                                    e.boundary_fresh = false;
-                                }
-                                (key, e)
-                            })
-                            .collect();
-                        state.sequence = state
-                            .entries
-                            .values()
-                            .map(|e| e.boundary_sequence.max(e.epoch))
-                            .max()
-                            .unwrap_or(0);
-                    }
-                    // A rebuildable seven-day cache: an unreadable file restarts
-                    // empty and is replaced by the next save.
-                    _ => {}
+        // A rebuildable seven-day cache: an unreadable or implausible file
+        // restarts empty and is replaced by the next save.
+        if let Ok(Some(raw)) = storage::read_optional(&path) {
+            if let Ok(entries) = serde_json::from_slice::<HashMap<String, Entry>>(&raw) {
+                if entries.len() <= MAX_THREADS
+                    && entries.iter().all(|(key, e)| {
+                        digest_valid(key)
+                            && !e.provider.is_empty()
+                            && e.provider.len() <= 256
+                            && !e.provider.chars().any(char::is_control)
+                            && e.boundary.as_deref().is_none_or(digest_valid)
+                            && e.consumed_boundary.as_deref().is_none_or(digest_valid)
+                    })
+                {
+                    state.entries = entries
+                        .into_iter()
+                        .filter(|(_, e)| now().saturating_sub(e.updated) < RETENTION_MS)
+                        .map(|(key, mut e)| {
+                            // Older records cannot prove that a window is still fresh.
+                            // An interrupted claim cannot be replayed after restart.
+                            if !e.boundary_fresh || e.claim.take().is_some() {
+                                e.consumed_boundary = e.boundary.take().or(e.consumed_boundary);
+                                e.boundary_fresh = false;
+                            }
+                            (key, e)
+                        })
+                        .collect();
+                    state.sequence = state
+                        .entries
+                        .values()
+                        .map(|e| e.boundary_sequence.max(e.epoch))
+                        .max()
+                        .unwrap_or(0);
                 }
             }
-            _ => {}
         }
         let (persist, changes) = std::sync::mpsc::sync_channel(1);
         let registry = Arc::new(Self {

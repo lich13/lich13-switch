@@ -1,8 +1,8 @@
 //! Codex high-water/replay and Claude message-ID merging, adapted from CC Switch.
 //! Source files are read-only. Only counters, hashed IDs and cursors survive parsing.
-use super::{model::*, pricing::Pricing};
 #[cfg(test)]
 use super::store::Store;
+use super::{model::*, pricing::Pricing};
 use crate::storage::{self, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -643,9 +643,8 @@ fn codex(v: &Value, c: &mut Cursor, at: i64, prefix: &[String]) -> Option<Record
         return None;
     }
     if typ == "response_item" {
-        match p["role"].as_str() {
-            Some("user") => c.boundary = Some(at),
-            _ => {}
+        if p["role"].as_str() == Some("user") {
+            c.boundary = Some(at);
         }
         return None;
     }

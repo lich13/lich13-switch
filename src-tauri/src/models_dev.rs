@@ -539,27 +539,11 @@ async fn download(source: &str) -> Result<Index> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    use std::io::Read;
-    let reader = std::io::Cursor::new(&bytes);
-    let decoded: Box<dyn Read> = match encoding.as_str() {
-        "identity" | "" => Box::new(reader),
-        "gzip" => Box::new(flate2::read::GzDecoder::new(reader)),
-        "br" => Box::new(brotli::Decompressor::new(reader, 4096)),
-        "deflate" => Box::new(flate2::read::ZlibDecoder::new(reader)),
-        "zstd" => Box::new(
-            zstd::stream::read::Decoder::new(reader)
-                .map_err(|_| failure("models.dev 压缩响应无效"))?,
-        ),
-        _ => return Err(failure("models.dev 压缩格式不支持")),
-    };
-    let mut plain = Vec::new();
-    decoded
-        .take((DOWNLOAD_LIMIT + 1) as u64)
-        .read_to_end(&mut plain)
-        .map_err(|_| failure("models.dev 压缩响应无效"))?;
-    if plain.len() > DOWNLOAD_LIMIT {
-        return Err(failure("models.dev 解压后超过 16 MiB"));
+    // The request asks for an identity body; anything else is not decoded.
+    if !matches!(encoding.as_str(), "identity" | "") {
+        return Err(failure("models.dev 压缩格式不支持"));
     }
+    let plain = bytes;
     crop(serde_json::from_slice(&plain).map_err(|_| failure("models.dev 没有返回有效 JSON"))?)
 }
 

@@ -115,32 +115,16 @@ fn bundle_path(executable: &Path) -> PathBuf {
 #[cfg(not(target_os = "macos"))]
 fn auto_launch() -> Result<AutoLaunch> {
     let executable = std::env::current_exe().map_err(storage::io_error)?;
-    let path = if cfg!(target_os = "macos") {
-        bundle_path(&executable)
-    } else {
-        executable
-    };
-    if cfg!(target_os = "macos") && path.extension().is_none_or(|e| e != "app") {
-        return Err(AppError::new(
-            code::STARTUP,
-            "请在安装后的 Vela.app 中设置开机启动",
-        ));
-    }
-    let path = path
+    let path = executable
         .to_str()
         .ok_or_else(|| AppError::new(code::STARTUP, "安装路径无法读取"))?;
-    // auto-launch's macOS AppleScript backend quotes these strings directly.
-    if path.contains(['"', '\n', '\r']) || (cfg!(target_os = "macos") && path.contains('\\')) {
+    if path.contains(['"', '\n', '\r']) {
         return Err(AppError::new(
             code::STARTUP,
             "安装路径含不支持的字符，请移动到标准应用目录",
         ));
     }
-    let args = if cfg!(target_os = "macos") {
-        vec!["--hidden"]
-    } else {
-        vec![LOGIN_ARG]
-    };
+    let args = vec![LOGIN_ARG];
     // auto-launch writes its Windows path verbatim into the Run command.
     let path = registration_path(path, cfg!(target_os = "windows"));
     AutoLaunchBuilder::new()

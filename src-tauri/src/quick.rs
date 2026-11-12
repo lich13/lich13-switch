@@ -30,7 +30,16 @@ impl Panel {
         let path = data.join("quick.json");
         let preferences = storage::read_optional(&path)?
             .map(|raw| {
-                serde_json::from_slice(&raw)
+                serde_json::from_slice::<serde_json::Value>(&raw)
+                    .and_then(|mut value| {
+                        if let Some(clients) = value
+                            .get_mut("hiddenClients")
+                            .and_then(serde_json::Value::as_array_mut)
+                        {
+                            clients.retain(|v| v != "agy");
+                        }
+                        serde_json::from_value(value)
+                    })
                     .map_err(|_| AppError::new(code::PANEL, "快捷面板设置无法读取"))
             })
             .transpose()?

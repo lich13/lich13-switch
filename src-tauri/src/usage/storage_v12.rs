@@ -1,6 +1,6 @@
 //! Accounting facts are stored once. Optional diagnostics use a bounded binary
 //! codec; SQL views preserve the established query and detail contracts.
-use super::{bodies, model::*, query};
+use super::{model::*, query};
 use crate::storage::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -1389,17 +1389,10 @@ pub(super) fn prune(c: &Connection) -> Result<()> {
     Ok(())
 }
 pub(super) fn compact_diagnostics(c: &Connection) -> Result<bool> {
-    if compact_archives(c)? {
-        return Ok(true);
-    }
     diagnostics::compact(c)
 }
 pub(super) fn packing_pending(c: &Connection) -> Result<bool> {
-    Ok(db(c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM daily WHERE json_extract(body,'$._usageArchive') IS NULL)",
-        [],
-        |r| r.get::<_, bool>(0),
-    ))? || diagnostics::pending(c)?)
+    diagnostics::pending(c)
 }
 pub(super) fn save_archive(c: &Connection, value: &Value) -> Result<i64> {
     let body = pack_diagnostic(c, value.clone(), 0)?;
@@ -1414,29 +1407,6 @@ pub(super) fn load_archive(c: &Connection, id: i64) -> Result<Value> {
     )?;
     unpack_diagnostic(c, body, 0)
 }
-fn compact_archives(c: &Connection) -> Result<bool> {
-    let tx = db(c.unchecked_transaction())?;
-    let rows = {
-        let mut stmt=db(tx.prepare("SELECT id,body FROM daily WHERE json_extract(body,'$._usageArchive') IS NULL LIMIT 2000"))?;
-        let rows =
-            db(stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-        db(rows.collect::<rusqlite::Result<Vec<_>>>())?
-    };
-    if !rows.is_empty() && !has_room(&tx)? {
-        return Err(failure("用量历史整理等待可用磁盘空间，原数据已保留"));
-    }
-    for (id, body) in &rows {
-        let value: Value = bodies::decode(&tx, body)?;
-        if value.get("example").is_none() {
-            return Err(failure("用量历史归档缺少依据，原数据已保留"));
-        }
-        let packed = bodies::encode(&tx, &value)?;
-        db(tx.execute("UPDATE daily SET body=?2 WHERE id=?1", params![id, packed]))?;
-    }
-    db(tx.commit())?;
-    Ok(!rows.is_empty())
-}
-
 pub(super) fn encode_stage(r: &Record) -> Result<Vec<u8>> {
     pack(&serde_json::to_value(r).map_err(json_error)?)
 }

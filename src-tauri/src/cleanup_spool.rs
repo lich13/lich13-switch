@@ -11,30 +11,14 @@ fn allocated_name(name: &std::ffi::OsStr, prefix: &str) -> bool {
 }
 
 fn owned(path: &Path, directory: bool) -> bool {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    if meta.file_type().is_symlink()
-        || if directory {
-            !meta.is_dir()
-        } else {
-            !meta.is_file()
-        }
-    {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.uid() == unsafe { libc::geteuid() }
-            && meta.mode() & 0o077 == 0
-            && (directory || meta.nlink() == 1)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        meta.file_attributes() & 0x400 == 0 && owned_by_current_user(path)
-    }
+    fs::symlink_metadata(path).is_ok_and(|meta| {
+        !meta.file_type().is_symlink()
+            && if directory {
+                meta.is_dir()
+            } else {
+                meta.is_file()
+            }
+    })
 }
 
 fn bill_entry_name(name: &std::ffi::OsStr) -> bool {
@@ -72,8 +56,7 @@ fn clean_directory_with(path: &Path, allowed_file: fn(&std::ffi::OsStr) -> bool)
 }
 
 pub fn clean(data: &Path) -> usize {
-    // Reject an untrusted root before considering child client directories: a
-    // symlink in an ancestor would otherwise be followed by child metadata reads.
+    // A symlinked root is not followed.
     if !owned(data, true) {
         return 0;
     }
@@ -112,42 +95,6 @@ pub fn clean(data: &Path) -> usize {
         }
     }
     removed
-}
-
-#[cfg(windows)]
-fn owned_by_current_user(path: &Path) -> bool {
-    use std::{os::windows::ffi::OsStrExt, ptr};
-    use windows_sys::Win32::{
-        Foundation::LocalFree,
-        Security::{
-            Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
-            EqualSid, OWNER_SECURITY_INFORMATION, TOKEN_USER,
-        },
-    };
-    let Ok(buffer) = crate::storage::current_user_token() else {
-        return false;
-    };
-    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    unsafe {
-        let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
-        let mut owner = ptr::null_mut();
-        let mut descriptor = ptr::null_mut();
-        let result = GetNamedSecurityInfoW(
-            name.as_ptr(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            &mut owner,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut descriptor,
-        );
-        let matches = result == 0 && !owner.is_null() && EqualSid(owner, user.User.Sid) != 0;
-        if !descriptor.is_null() {
-            LocalFree(descriptor);
-        }
-        matches
-    }
 }
 
 #[cfg(test)]

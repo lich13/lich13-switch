@@ -7,8 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 mod private;
-#[cfg(windows)]
-pub(crate) use private::windows::current_user_token;
 pub use private::{private_tempdir, private_tempfile, PrivateTempDir};
 
 pub type Result<T> = std::result::Result<T, AppError>;

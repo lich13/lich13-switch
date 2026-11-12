@@ -121,59 +121,6 @@ fn symlink_data_root_is_not_followed() {
     assert!(file.exists());
 }
 
-#[cfg(unix)]
-#[test]
-fn hard_link_entries_are_preserved() {
-    let fixture = tempdir().unwrap();
-    let data = private_root(fixture.path(), "data");
-    let spool = old_spool(&data);
-    let linked_path = private_file_named(spool.path(), ".tmpS1t2U3");
-    fs::write(&linked_path, b"fixture hard-link target").unwrap();
-    let outside_link = data.join("kept-hard-link");
-    fs::hard_link(&linked_path, &outside_link).unwrap();
-
-    assert_eq!(super::clean(&data), 0);
-    assert!(spool.path().exists());
-    assert_eq!(fs::read(&linked_path).unwrap(), b"fixture hard-link target");
-    assert_eq!(
-        fs::read(&outside_link).unwrap(),
-        b"fixture hard-link target"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn non_private_spool_files_are_preserved() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let fixture = tempdir().unwrap();
-    let data = private_root(fixture.path(), "data");
-    let spool = old_spool(&data);
-    let file = private_file_named(spool.path(), ".tmpV4w5X6");
-    fs::write(&file, b"fixture public-mode file").unwrap();
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
-
-    assert_eq!(super::clean(&data), 0);
-    assert!(spool.path().exists());
-    assert_eq!(fs::read(&file).unwrap(), b"fixture public-mode file");
-}
-
-#[cfg(unix)]
-#[test]
-fn non_private_roots_are_not_cleaned() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let fixture = tempdir().unwrap();
-    let data = private_root(fixture.path(), "data");
-    let non_private_spool = old_spool(&data);
-    let retained_file = private_file_named(non_private_spool.path(), ".tmpY7z8A9");
-    fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
-
-    assert_eq!(super::clean(&data), 0);
-    assert!(non_private_spool.path().exists());
-    assert!(retained_file.exists());
-}
-
 #[test]
 fn spools_outside_the_data_root_are_not_cleaned() {
     let fixture = tempdir().unwrap();

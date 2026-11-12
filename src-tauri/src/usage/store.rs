@@ -855,8 +855,7 @@ impl Store {
             }
             for (_, body) in &rows {
                 let r = storage_v12::decode_stage(body)?;
-                if source == "claude" || !archived || r.started_at >= cutoff
-                {
+                if source == "claude" || !archived || r.started_at >= cutoff {
                     insert(&tx, &r)?;
                 }
             }

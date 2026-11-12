@@ -240,11 +240,7 @@ impl Record {
     ) -> Option<Self> {
         let reason = if matches!(
             error.code.as_str(),
-            code::CONFLICT
-                | code::RESUME_CONFLICT
-                | code::CLAUDE_PROFILE_CONFLICT
-                | "CONFIG_CHANGED"
-                | "OFFICIAL_CONFLICT"
+            code::CONFLICT | code::RESUME_CONFLICT | code::CLAUDE_PROFILE_CONFLICT
         ) {
             Reason::ConfigConflict
         } else if startup {
@@ -1590,8 +1586,6 @@ mod v016_tests {
             code::CONFLICT,
             code::RESUME_CONFLICT,
             code::CLAUDE_PROFILE_CONFLICT,
-            "CONFIG_CHANGED",
-            "OFFICIAL_CONFLICT",
         ] {
             let error = AppError::new(
                 code,
