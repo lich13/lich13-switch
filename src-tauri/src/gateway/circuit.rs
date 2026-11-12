@@ -10,7 +10,6 @@ use std::{
 };
 
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
-const MAX_HEALTH_SAMPLES: usize = 1024;
 
 #[derive(Clone, Copy, PartialEq)]
 enum SampleKind {
@@ -157,21 +156,7 @@ impl State {
     fn record(&mut self, kind: SampleKind) {
         let now = Instant::now();
         self.samples.push_back((now, kind));
-        while self.samples.len() > MAX_HEALTH_SAMPLES {
-            self.samples.pop_front();
-        }
         self.refresh_samples(now);
-    }
-    fn fault_rate(&self) -> (u32, u32) {
-        // Intermittent 5xx responses have their own consecutive threshold.
-        // They must not later trip the generic error-rate path indirectly.
-        self.samples
-            .iter()
-            .fold((0, 0), |(total, failed), (_, kind)| match kind {
-                SampleKind::Success | SampleKind::EarlierSuccess => (total + 1, failed),
-                SampleKind::Failure => (total + 1, failed + 1),
-                SampleKind::Transient => (total, failed),
-            })
     }
     fn available(&self) -> bool {
         let now = Instant::now();
@@ -486,14 +471,7 @@ impl Permit {
                     cfg.failure_threshold
                 };
                 let consecutive = s.failures >= threshold;
-                let (rate_total, rate_failed) = s.fault_rate();
-                let rate_exceeded = rate_total >= cfg.min_requests
-                    && f64::from(rate_failed) / f64::from(rate_total) >= cfg.error_rate;
-                let should_open = if transient {
-                    consecutive
-                } else {
-                    s.phase != CircuitState::Closed || consecutive || rate_exceeded
-                };
+                let should_open = consecutive || (!transient && s.phase != CircuitState::Closed);
                 s.successes = 0;
                 if protected_single_provider && (!transient || consecutive) {
                     let delay = retry.unwrap_or_default().max(s.protection.unwrap());
@@ -541,26 +519,14 @@ impl Permit {
                             ),
                             failures: s.failures,
                             failure_threshold: threshold,
-                            failed_requests: if !transient && !consecutive {
-                                rate_failed
-                            } else {
-                                s.failed
-                            },
-                            requests: if !transient && !consecutive {
-                                rate_total
-                            } else {
-                                s.total
-                            },
-                            error_rate: cfg.error_rate,
-                            min_requests: cfg.min_requests,
+                            failed_requests: s.failed,
+                            requests: s.total,
                             trigger: if transient {
                                 "transient_failures"
                             } else if s.phase != CircuitState::Closed {
                                 "probe_failed"
-                            } else if consecutive {
-                                "consecutive_failures"
                             } else {
-                                "error_rate"
+                                "consecutive_failures"
                             }
                             .into(),
                         });
@@ -660,14 +626,11 @@ mod tests {
         assert_eq!(c.health().state, CircuitState::Closed);
     }
     #[test]
-    fn stale_success_cannot_close_new_circuit_and_rate_threshold() {
+    fn stale_success_cannot_close_new_circuit() {
         let c = Circuit::default();
-        let cfg = Settings {
-            failure_threshold: 20,
-            ..Default::default()
-        };
+        let cfg = Settings::default();
         let stale = c.acquire().unwrap();
-        for i in 0..10 {
+        for i in 0..8 {
             c.acquire().unwrap().finish(
                 if i < 4 {
                     Outcome::Success
@@ -864,7 +827,6 @@ mod v020_tolerance_tests {
         let cfg = Settings {
             failure_threshold: 1,
             transient_failure_threshold: 6,
-            min_requests: 1,
             ..Settings::default()
         };
         let circuit = Circuit::default();

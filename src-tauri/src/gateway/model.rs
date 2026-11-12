@@ -33,8 +33,6 @@ const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_FAILURE_THRESHOLD: u32 = 4;
 const DEFAULT_SUCCESS_THRESHOLD: u32 = 2;
 const DEFAULT_COOLDOWN_SECONDS: u64 = 60;
-const DEFAULT_ERROR_RATE: f64 = 0.6;
-const DEFAULT_MIN_REQUESTS: u32 = 10;
 // These phase limits have different meanings even where the values match.
 const DEFAULT_FIRST_BYTE_SECONDS: u64 = 300;
 const DEFAULT_IDLE_SECONDS: u64 = 300;
@@ -66,8 +64,6 @@ pub struct Settings {
     pub thread_idle_release_seconds: u64,
     #[serde(default = "default_endpoint_probe_seconds")]
     pub endpoint_probe_seconds: u64,
-    pub error_rate: f64,
-    pub min_requests: u32,
     pub first_byte_seconds: u64,
     pub idle_seconds: u64,
     #[serde(default = "default_request_seconds")]
@@ -118,8 +114,6 @@ impl Default for Settings {
             websocket_retry_seconds: default_request_seconds(),
             thread_idle_release_seconds: default_thread_idle_seconds(),
             endpoint_probe_seconds: default_endpoint_probe_seconds(),
-            error_rate: DEFAULT_ERROR_RATE,
-            min_requests: DEFAULT_MIN_REQUESTS,
             first_byte_seconds: DEFAULT_FIRST_BYTE_SECONDS,
             idle_seconds: DEFAULT_IDLE_SECONDS,
             retry_budget_seconds: DEFAULT_RETRY_BUDGET_SECONDS,
@@ -137,11 +131,9 @@ impl Settings {
             || self.failure_threshold == 0
             || !(1..=1000).contains(&self.transient_failure_threshold)
             || self.success_threshold == 0
-            || self.min_requests == 0
             || self.max_waiting == 0
             || self.max_waiting > 10000
             || !(10..=86400).contains(&self.endpoint_probe_seconds)
-            || !(0.01..=1.0).contains(&self.error_rate)
             || [
                 self.cooldown_seconds,
                 self.rate_limit_seconds,

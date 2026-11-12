@@ -20,7 +20,6 @@ fn settings(cooldown_seconds: u64) -> Settings {
     Settings {
         failure_threshold: 50,
         transient_failure_threshold: 2,
-        min_requests: 50,
         cooldown_seconds,
         ..Settings::default()
     }

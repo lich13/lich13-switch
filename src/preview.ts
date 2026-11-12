@@ -852,8 +852,6 @@ let demoEvents: EventRecord[] = [
         failureThreshold: 4,
         failedRequests: 4,
         requests: 8,
-        errorRate: 0.6,
-        minRequests: 10,
         trigger: "consecutive_failures",
       },
     },

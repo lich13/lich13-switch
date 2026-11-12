@@ -483,14 +483,6 @@ impl Record {
                         format!("连续失败 {}/{}", c.failures, c.failure_threshold)
                     }
                     "probe_failed" => "恢复探测失败".into(),
-                    "error_rate" => format!(
-                        "错误率 {:.0}% ≥ {:.0}%（{}/{}，至少 {} 次）",
-                        f64::from(c.failed_requests) / f64::from(c.requests.max(1)) * 100.,
-                        c.error_rate * 100.,
-                        c.failed_requests,
-                        c.requests,
-                        c.min_requests
-                    ),
                     _ => "触发条件未记录".into(),
                 })
                 .unwrap_or_else(|| "触发条件未记录".into());

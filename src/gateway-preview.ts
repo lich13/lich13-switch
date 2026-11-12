@@ -40,8 +40,6 @@ export const gatewayDemo: GatewayState = {
     rateLimitSeconds: 5,
     capacityRetrySeconds: 60,
     websocketRetrySeconds: 300,
-    errorRate: 0.6,
-    minRequests: 10,
     firstByteSeconds: 300,
     idleSeconds: 300,
     retryBudgetSeconds: 300,

@@ -85,8 +85,6 @@ export default function Advanced({
         ["transientFailureThreshold", "5xx 连续失败阈值"],
         ["successThreshold", "恢复成功次数"],
         ["cooldownSeconds", "熔断等待 / 秒"],
-        ["errorRate", "错误率阈值 (0–1)"],
-        ["minRequests", "最小请求数"],
         ["queueSeconds", "排队等待 / 秒"],
         ["maxWaiting", "最多等待请求"],
         ["connectSeconds", "连接超时 / 秒"],
@@ -122,30 +120,22 @@ export default function Advanced({
             }
             required
             min={
-              key === "maxRetries"
-                ? 0
-                : key === "errorRate"
-                  ? 0.01
-                  : key === "endpointProbeSeconds"
-                    ? 10
-                    : 1
+              key === "maxRetries" ? 0 : key === "endpointProbeSeconds" ? 10 : 1
             }
             max={
-              key === "errorRate"
-                ? 1
-                : key === "maxRetries"
-                  ? 15
-                  : key === "transientFailureThreshold"
-                    ? 1000
-                    : key === "maxWaiting"
-                      ? 10000
-                      : key === "port"
-                        ? 65535
-                        : key.endsWith("Seconds")
-                          ? 86400
-                          : undefined
+              key === "maxRetries"
+                ? 15
+                : key === "transientFailureThreshold"
+                  ? 1000
+                  : key === "maxWaiting"
+                    ? 10000
+                    : key === "port"
+                      ? 65535
+                      : key.endsWith("Seconds")
+                        ? 86400
+                        : undefined
             }
-            step={key === "errorRate" ? 0.01 : 1}
+            step={1}
             value={
               draft[key] ?? (key === "transientFailureThreshold" ? 6 : 300)
             }
@@ -173,7 +163,6 @@ export default function Advanced({
                       "failureThreshold",
                       "transientFailureThreshold",
                       "successThreshold",
-                      "minRequests",
                     ].includes(key)
                   ? "次"
                   : ""}

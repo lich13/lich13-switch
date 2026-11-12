@@ -140,8 +140,6 @@ export type EventRecord = {
       failureThreshold: number;
       failedRequests: number;
       requests: number;
-      errorRate: number;
-      minRequests: number;
       trigger: string;
     } | null;
   };
@@ -310,8 +308,6 @@ function circuitTrigger(r: EventRecord) {
     case "transient_failures":
     case "consecutive_failures":
       return `连续失败 ${c.failures}/${c.failureThreshold}`;
-    case "error_rate":
-      return `错误率 ${((c.failedRequests / Math.max(1, c.requests)) * 100).toFixed(0)}% ≥ ${(c.errorRate * 100).toFixed(0)}%（${c.failedRequests}/${c.requests}，至少 ${c.minRequests} 次）`;
     case "probe_failed":
       return "恢复探测失败";
     default:
@@ -1171,10 +1167,6 @@ function EventDetail({
                   [
                     "失败请求",
                     `${r.details.circuit.failedRequests} / ${r.details.circuit.requests}`,
-                  ],
-                  [
-                    "错误率阈值",
-                    `${r.details.circuit.errorRate * 100}% / 最少 ${r.details.circuit.minRequests} 次`,
                   ],
                 ]
               : []),

@@ -175,8 +175,9 @@ pub struct DeliveryEvidence {
     pub request_hash: Option<String>,
     pub response_hash: Option<String>,
 }
+// Records written before v0.27.0 also carry the removed error-rate fields.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct CircuitEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause_reason: Option<super::Reason>,
@@ -187,8 +188,6 @@ pub struct CircuitEvidence {
     pub failure_threshold: u32,
     pub failed_requests: u32,
     pub requests: u32,
-    pub error_rate: f64,
-    pub min_requests: u32,
     pub trigger: String,
 }
 fn code(value: Option<String>) -> Option<String> {
@@ -317,13 +316,8 @@ impl Details {
         self.ws_close_code = self.ws_close_code.filter(|v| (1000..=4999).contains(v));
         if let Some(c) = &mut self.circuit {
             c.retry_at = c.retry_at.filter(|v| (1..=253_402_300_799).contains(v));
-            if ![
-                "consecutive_failures",
-                "transient_failures",
-                "error_rate",
-                "probe_failed",
-            ]
-            .contains(&c.trigger.as_str())
+            if !["consecutive_failures", "transient_failures", "probe_failed"]
+                .contains(&c.trigger.as_str())
             {
                 c.trigger = "consecutive_failures".into();
             }

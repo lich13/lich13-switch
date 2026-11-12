@@ -94,8 +94,6 @@ export type GatewaySettings = {
   websocketRetrySeconds: number;
   threadIdleReleaseSeconds?: number;
   endpointProbeSeconds?: number;
-  errorRate: number;
-  minRequests: number;
   firstByteSeconds: number;
   idleSeconds: number;
   retryBudgetSeconds: number;

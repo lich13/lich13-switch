@@ -43,7 +43,6 @@ fn settings() -> Settings {
     Settings {
         failure_threshold: 100,
         transient_failure_threshold: 100,
-        min_requests: 100,
         ..Settings::default()
     }
 }
@@ -66,8 +65,6 @@ fn default_settings_match_current_serialization() {
             "websocketRetrySeconds": 300,
             "threadIdleReleaseSeconds": 300,
             "endpointProbeSeconds": 300,
-            "errorRate": 0.6,
-            "minRequests": 10,
             "firstByteSeconds": 300,
             "idleSeconds": 300,
             "retryBudgetSeconds": 300,

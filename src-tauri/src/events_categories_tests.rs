@@ -125,8 +125,6 @@ async fn category_filter_classifies_causes_before_pagination_and_flattens_detail
         failure_threshold: 6,
         failed_requests: 6,
         requests: 6,
-        error_rate: 0.5,
-        min_requests: 10,
         trigger: "transient_failures".into(),
     });
     let opened_id = opened.id.clone();
@@ -259,8 +257,6 @@ async fn legacy_jsonl_queries_classify_without_persisting_categories() {
         failure_threshold: 4,
         failed_requests: 4,
         requests: 4,
-        error_rate: 0.5,
-        min_requests: 10,
         trigger: "consecutive_failures".into(),
     });
 
@@ -356,8 +352,6 @@ fn circuit_notification_uses_remaining_deadline_and_preserves_provider_and_messa
         failure_threshold: 6,
         failed_requests: 6,
         requests: 6,
-        error_rate: 0.5,
-        min_requests: 10,
         trigger: "transient_failures".into(),
     });
 
