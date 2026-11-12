@@ -95,6 +95,9 @@ pub struct AntigravityAuthState {
     pub adc_project: Option<String>,
     #[serde(default)]
     pub app_restarted: bool,
+    /// The switch succeeded but the application could not be reopened.
+    #[serde(default)]
+    pub relaunch_failed: bool,
     pub revision: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -837,6 +840,7 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
         adc_email,
         adc_project,
         app_restarted: false,
+        relaunch_failed: false,
         revision: String::new(),
     };
     if let Some(id) = active_account_id(&state) {
@@ -891,16 +895,14 @@ fn with_lifecycle(
         with_lock(|| verify_revision(paths, rev).map(|_| ()))?;
         lc.quit()?;
     }
-    let mut snapshots = Vec::new();
     let next = with_lock(|| {
         verify_revision(paths, rev)?;
-        let snaps: Vec<_> = paths
+        let snapshots: Vec<_> = paths
             .watched_files()
             .into_iter()
             .chain(std::iter::once(paths.vault_file()))
             .map(|f| storage::read_optional(&f).map(|b| (f, b)))
             .collect::<Result<_>>()?;
-        snapshots = snaps;
         let next = mutate().and_then(|_| state_at(paths));
         if let Err(e) = next {
             let res: Vec<_> = snapshots
@@ -920,24 +922,12 @@ fn with_lifecycle(
         }
         next
     });
-    if was_running {
-        if next.is_ok() {
-            if let Err(error) = lc.launch() {
-                with_lock(|| {
-                    for (file, before) in &snapshots {
-                        restore_file(file, before.as_deref())?;
-                    }
-                    Ok(())
-                })?;
-                let _ = lc.launch();
-                return Err(error);
-            }
-        } else {
-            let _ = lc.launch();
-        }
-    }
+    // A completed switch stays in place when the application cannot be
+    // reopened; the caller only asks the user to open it.
+    let relaunched = was_running.then(|| lc.launch().is_ok());
     next.map(|mut s| {
-        s.app_restarted = was_running;
+        s.app_restarted = relaunched == Some(true);
+        s.relaunch_failed = relaunched == Some(false);
         s
     })
 }

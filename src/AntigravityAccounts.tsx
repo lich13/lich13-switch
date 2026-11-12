@@ -138,7 +138,9 @@ export default function AntigravityAccounts({ notify, setError }: Props) {
       const next = await fn();
       if (id === sequence.current) setState(next);
       const msg = formatNotice(next);
-      if (msg) notify(msg);
+      if (next.relaunchFailed)
+        notify(`${msg}；自动重启 Antigravity 失败，请手动打开应用`);
+      else if (msg) notify(msg);
       closeDialog();
     } catch (e) {
       if (dialog) setDialogError(errorOf(e).message);

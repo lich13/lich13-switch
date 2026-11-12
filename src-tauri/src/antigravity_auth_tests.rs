@@ -671,14 +671,9 @@ fn vertex_activation_edit_and_adc_restore_preserve_private_credentials_and_setti
         .any(|a| a.id == id));
 }
 #[test]
-fn vertex_conflicts_listener_failure_and_restart_failure_restore_files_and_vault() {
-    for fail_launch in [false, true] {
-        let (_tmp, paths) = setup_paths();
-        let mut lifecycle = MockLifecycle::new(true);
-        lifecycle.fail_launch = fail_launch;
-        let state = state_at(&paths).unwrap();
-        let (entry, key) = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
-        let before: Vec<_> = paths
+fn vertex_listener_failure_restores_files_and_restart_failure_keeps_the_switch() {
+    let snapshot = |paths: &Paths| -> Vec<_> {
+        paths
             .watched_files()
             .into_iter()
             .chain(std::iter::once(paths.vault_file()))
@@ -686,8 +681,16 @@ fn vertex_conflicts_listener_failure_and_restart_failure_restore_files_and_vault
                 let bytes = storage::read_optional(&p).unwrap();
                 (p, bytes)
             })
-            .collect();
-        let error = activate_vertex_at(
+            .collect()
+    };
+    for fail_launch in [false, true] {
+        let (_tmp, paths) = setup_paths();
+        let mut lifecycle = MockLifecycle::new(true);
+        lifecycle.fail_launch = fail_launch;
+        let state = state_at(&paths).unwrap();
+        let (entry, key) = vertex_entry(&paths, &vertex_input(state.revision.clone())).unwrap();
+        let before = snapshot(&paths);
+        let result = activate_vertex_at(
             &paths,
             &lifecycle,
             entry,
@@ -702,19 +705,16 @@ fn vertex_conflicts_listener_failure_and_restart_failure_restore_files_and_vault
                     Err(err(code::CONFLICT, "fixture listener conflict"))
                 }
             },
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.code,
-            if fail_launch {
-                code::PROCESS
-            } else {
-                code::CONFLICT
-            }
         );
-        for (path, bytes) in before {
-            assert_eq!(storage::read_optional(&path).unwrap(), bytes);
+        if fail_launch {
+            let switched = result.unwrap();
+            assert!(switched.relaunch_failed && !switched.app_restarted);
+            assert_ne!(snapshot(&paths), before);
+            assert_eq!(lifecycle.events(), vec!["quit", "launch"]);
+            continue;
         }
+        assert_eq!(result.unwrap_err().code, code::CONFLICT);
+        assert_eq!(snapshot(&paths), before);
         let current = state_at(&paths).unwrap();
         let mut input = vertex_input(current.revision);
         write_app_settings(&paths, &json!({"theme":"external-change"})).unwrap();

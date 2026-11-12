@@ -108,6 +108,7 @@ export type AntigravityAuthState = {
   adcEmail: string | null;
   adcProject: string | null;
   appRestarted?: boolean;
+  relaunchFailed?: boolean;
   revision: string;
 };
 export type AddAntigravityAdcInput = {
