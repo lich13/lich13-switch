@@ -161,20 +161,26 @@ fn scan(text: &str) -> Result<Scan> {
         .and_then(|v| v.get("custom"))
         .and_then(|v| v.as_table())
         .ok_or_else(|| AppError::new(code::OFFICIAL_MODE, "custom 不是独立表，无法安全接管"))?;
-    let all = lines(text);
-    let header = all
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.body.trim() == "[model_providers.custom]")
-        .map(|(i, _)| i)
-        .collect::<Vec<_>>();
-    if header.len() != 1 {
+    if custom.is_dotted() || custom.is_implicit() {
         return Err(AppError::new(
             code::OFFICIAL_MODE,
             "custom 表必须是唯一的独立表，无法安全接管",
         ));
     }
-    let start = header[0];
+    let all = lines(text);
+    let header = custom
+        .span()
+        .and_then(|span| {
+            all.iter()
+                .position(|line| span.start >= line.start && span.start < line.end)
+        })
+        .ok_or_else(|| {
+            AppError::new(
+                code::OFFICIAL_MODE,
+                "custom 表必须是唯一的独立表，无法安全接管",
+            )
+        })?;
+    let start = header;
     let mut end = all.len();
     for (i, line) in all.iter().enumerate().skip(start + 1) {
         let t = line.body.trim();
@@ -442,10 +448,7 @@ impl ViewCache {
                 account_id: Some(record.account_id.clone()),
                 error: None,
             }
-        } else if matches!(record.stage.as_str(), "disabling" | "enabling")
-            && matches_original(scan, record)
-        {
-            let _ = fs::remove_file(record_path(data));
+        } else if settled(&scan, &record) {
             OfficialModeView::default()
         } else {
             OfficialModeView {
@@ -462,19 +465,32 @@ fn view(data: &Path, home: &Path) -> OfficialModeView {
     ViewCache::default().view(data, home)
 }
 
+/// An interrupted enable or disable whose config still matches its original.
+fn settled(scan: &Scan, record: &Record) -> bool {
+    matches!(record.stage.as_str(), "disabling" | "enabling") && matches_original(scan, record)
+}
+
 fn cleanup_settled_stage(data: &Path, record: &Record) -> bool {
-    if matches!(record.stage.as_str(), "disabling" | "enabling")
-        && storage::read_user_optional(&record.path)
-            .ok()
-            .flatten()
-            .and_then(|raw| String::from_utf8(raw).ok())
-            .and_then(|text| scan(&text).ok())
-            .is_some_and(|scan| matches_original(&scan, record))
-    {
-        let _ = fs::remove_file(record_path(data));
-        true
-    } else {
-        false
+    if record.stage == "enabling" || record.stage == "disabling" {
+        if let Ok(Some(raw)) = storage::read_user_optional(&record.path) {
+            if let Ok(text) = String::from_utf8(raw) {
+                if let Ok(scan) = scan(&text) {
+                    if settled(&scan, &record) {
+                        let _ = fs::remove_file(record_path(data));
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Startup recovery for a transaction interrupted by a crash: the record only
+/// stays while an enable or disable is in flight or conflicted.
+pub fn recover_interrupted(data: &Path) {
+    if let Ok(Some(record)) = load(data) {
+        cleanup_settled_stage(data, &record);
     }
 }
 
@@ -641,9 +657,7 @@ pub fn disable(data: &Path, home: &Path) -> Result<OfficialModeView> {
     let text =
         String::from_utf8(raw).map_err(|_| AppError::new(code::CONFIG, "Codex 配置不是 UTF-8"))?;
     let current_scan = scan(&text)?;
-    if matches!(record.stage.as_str(), "disabling" | "enabling")
-        && matches_original(&current_scan, &record)
-    {
+    if settled(&current_scan, &record) {
         let _ = fs::remove_file(record_path(data));
         return Ok(OfficialModeView::default());
     }
@@ -839,6 +853,17 @@ mod tests {
     }
 
     #[test]
+    fn custom_table_header_accepts_trailing_comment_and_inner_spaces() {
+        for header in [
+            "[model_providers.custom] # gateway",
+            "[ model_providers.custom ]",
+            "  [model_providers.custom]",
+        ] {
+            let text = TEXT.replace("[model_providers.custom]", header);
+            assert!(scan(&text).is_ok(), "{header}");
+        }
+    }
+    #[test]
     fn recovers_from_interrupted_disabling_or_enabling_when_config_matches_original() {
         for stage in ["disabling", "enabling"] {
             let t = tempfile::tempdir().unwrap();
@@ -870,6 +895,10 @@ mod tests {
             let viewed = cache.view(&data, &home);
             assert!(!viewed.enabled);
             assert_eq!(viewed.state, "disabled");
+            // A read never deletes the transaction record; startup recovery does.
+            assert!(record_path(&data).exists());
+            assert!(blocks_gateway(&data));
+            super::recover_interrupted(&data);
             assert!(!record_path(&data).exists());
             assert!(!blocks_gateway(&data));
         }

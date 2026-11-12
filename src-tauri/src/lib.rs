@@ -1625,6 +1625,7 @@ pub fn run() {
                 });
             // Single-instance registration has completed; no current spool exists yet.
             cleanup_spool::clean(&data);
+            official::recover_interrupted(&data);
             let mut core = Core::new(data.clone(), home)?;
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;

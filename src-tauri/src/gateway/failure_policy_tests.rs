@@ -474,6 +474,30 @@ fn custom_rules_fill_only_ambiguous_evidence_and_code_precedes_keyword() {
             .error_basis,
         Some(B::Billing)
     );
+    for field in ["code", "reason", "errorKey"] {
+        for wrapper in [
+            "api_error",
+            "server_error",
+            "internal_error",
+            "internal_server_error",
+        ] {
+            let wrapped = json!({"error":{field:wrapper,"message":"fixture window"}});
+            assert_eq!(
+                policy::details_with_rules(
+                    &wrapped,
+                    &[custom(Keyword, "fixture window", B::Billing)]
+                )
+                .error_basis,
+                Some(B::Billing),
+                "{field}={wrapper}"
+            );
+            assert_eq!(
+                policy::details_with_rules(&json!({"error":{field:wrapper}}), &[]).error_basis,
+                Some(B::ServiceError),
+                "{field}={wrapper}"
+            );
+        }
+    }
     assert!(custom(Code, "rate_limit.exceeded", B::Rpm)
         .validate()
         .is_ok());

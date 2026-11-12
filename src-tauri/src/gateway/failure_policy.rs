@@ -170,6 +170,17 @@ fn code_kind(code: &str) -> Option<ErrorBasis> {
         .or_else(|| model_message(&code).then_some(ErrorBasis::ModelUnavailable))
 }
 
+/// Generic wrappers only say that the upstream failed. They never outrank a
+/// concrete message, quota detail or user rule in the same envelope.
+fn specific_code_kind(code: &str) -> Option<ErrorBasis> {
+    (!matches!(
+        code.to_ascii_lowercase().as_str(),
+        "api_error" | "server_error" | "internal_error" | "internal_server_error"
+    ))
+    .then(|| code_kind(code))
+    .flatten()
+}
+
 fn positive_message(text: &str) -> bool {
     !super::failure_rules::QUOTA_NEGATIVES
         .iter()
@@ -340,7 +351,7 @@ fn classification_trace(
     error: &Value,
 ) -> (Option<ErrorBasis>, Option<HealthScope>, Option<Source>) {
     let explicit = structured_codes(error)
-        .find_map(code_kind)
+        .find_map(specific_code_kind)
         .or_else(|| {
             error
                 .as_str()
@@ -400,6 +411,11 @@ fn classification_trace(
                     })
                 })
                 .map(|b| (b, Source::Status))
+        })
+        .or_else(|| {
+            structured_codes(error)
+                .find_map(code_kind)
+                .map(|b| (b, Source::BuiltinCode))
         });
     let basis = matched.map(|m| m.0);
     let explicit = explicit.map(|m| m.0);
@@ -505,7 +521,7 @@ pub(super) fn http_value_with_rules(
     let mut d = details_value(value, status >= 400);
     let structured = envelope(value, true, 0).and_then(|e| {
         structured_codes(e)
-            .find_map(code_kind)
+            .find_map(specific_code_kind)
             .or_else(|| explicit_type(e))
             .or_else(|| quota_details(e).map(|q| q.0))
     });
@@ -568,7 +584,7 @@ pub(super) fn details_with_headers(
         return (details, None);
     };
     let structured = structured_codes(error)
-        .find_map(code_kind)
+        .find_map(specific_code_kind)
         .or_else(|| explicit_type(error))
         .is_some()
         || quota_details(error).is_some();
@@ -1136,7 +1152,7 @@ fn apply_custom(
         return;
     }
     let specific = structured_codes(error)
-        .filter_map(code_kind)
+        .filter_map(specific_code_kind)
         .chain(explicit_type(error))
         .chain(quota_details(error).map(|q| q.0))
         .chain(strings(error).filter_map(message_kind))
