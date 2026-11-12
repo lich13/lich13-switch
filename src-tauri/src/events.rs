@@ -225,9 +225,7 @@ pub struct Record {
     pub level: Level,
     pub status: Option<u16>,
     pub attempt: Option<u32>,
-    /// Added in v0.13.1. Old JSONL records omit this field and are mapped
-    /// from reason at read time by the frontend.
-    pub error_code: Option<ErrorCode>,
+    pub error_code: ErrorCode,
     pub notified_at: u64,
     #[serde(default)]
     pub details: Details,
@@ -377,7 +375,7 @@ impl Record {
             },
             status,
             attempt: Some(1),
-            error_code: Some(reason.code()),
+            error_code: reason.code(),
             notified_at: 0,
             details: details.sanitized(),
         }
@@ -426,7 +424,7 @@ impl Record {
             },
             status,
             attempt,
-            error_code: Some(reason.code()),
+            error_code: reason.code(),
             notified_at: 0,
             details: Details::default(),
         }
@@ -558,22 +556,6 @@ fn safe_id(s: &str) -> Option<String> {
 fn raw_log_message(value: &str) -> Option<String> {
     let text = value.split_whitespace().collect::<Vec<_>>().join(" ");
     (!text.is_empty()).then(|| text.chars().take(4096).collect())
-}
-fn is_antigravity_log_record(r: &Record) -> bool {
-    r.client_id == Some(JournalClient::External(ExternalClient::Antigravity))
-        && r.provider_id.is_none()
-        && matches!(
-            r.details.upstream_code.as_deref(),
-            Some(
-                "STREAM_TIMEOUT"
-                    | "STREAM_INTERRUPTED"
-                    | "INTERNAL"
-                    | "RESOURCE_EXHAUSTED"
-                    | "UNAUTHENTICATED"
-                    | "MODEL_UNAVAILABLE"
-                    | "ANTIGRAVITY_ERROR"
-            )
-        )
 }
 fn scan_antigravity_file_lines(
     path: &Path,
@@ -878,17 +860,11 @@ fn classify(record: &Record, causes: &HashSet<&str>) -> Category {
 }
 fn load(path: &Path) -> Journal {
     let mut j = Journal::default();
-    let file = (|| -> std::io::Result<Option<std::fs::File>> {
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(std::io::Error::other("invalid journal file"));
-        }
-        std::fs::File::open(path).map(Some)
-    })();
+    let file = match std::fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    };
     match file {
         Ok(Some(file)) => {
             let mut reader = BufReader::new(file);
@@ -908,11 +884,7 @@ fn load(path: &Path) -> Journal {
                 }
                 match serde_json::from_slice::<Record>(&line) {
                     Ok(r) => {
-                        if r.client_id == Some(JournalClient::External(ExternalClient::Antigravity))
-                            && !is_antigravity_log_record(&r)
-                        {
-                            j.dirty = true;
-                        } else if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
+                        if r.visible() && r.last_at >= now().saturating_sub(RETENTION) {
                             j.records.push_back(Arc::new(r))
                         } else {
                             j.dirty = true;
@@ -932,12 +904,6 @@ fn load(path: &Path) -> Journal {
 }
 fn append_lines<'a>(path: &Path, rows: impl Iterator<Item = &'a Record>) -> Result<()> {
     use std::io::Write;
-    let metadata = std::fs::symlink_metadata(path).map_err(storage::io_error)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(storage::io_error(std::io::Error::other(
-            "invalid journal file",
-        )));
-    }
     let mut buf = Vec::new();
     for record in rows {
         serde_json::to_writer(&mut buf, record)
@@ -1972,19 +1938,9 @@ mod routing_visibility_tests {
     }
 
     #[test]
-    fn load_journal_retains_antigravity_log_events_and_purges_legacy_gateway_antigravity_rows() {
+    fn load_journal_retains_antigravity_log_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.jsonl");
-        let mut legacy = Record::new(
-            None,
-            None,
-            Some("gemini-2.5-pro"),
-            Reason::RateLimit,
-            Action::Returned,
-            Some(429),
-            Some(1),
-        );
-        legacy.client_id = Some(JournalClient::External(ExternalClient::Antigravity));
         let log_record = Record::antigravity_error(
             "transcript:conv-1:1",
             now(),
@@ -2009,15 +1965,14 @@ mod routing_visibility_tests {
             Some("STREAM_TIMEOUT")
         );
         let content = format!(
-            "{}\n{}\n{}\n",
-            serde_json::to_string(&legacy).unwrap(),
+            "{}\n{}\n",
             serde_json::to_string(&log_record).unwrap(),
             serde_json::to_string(&timeout_record).unwrap()
         );
         std::fs::write(&path, content).unwrap();
 
         let loaded = load(&path);
-        assert!(loaded.dirty);
+        assert!(!loaded.dirty);
         assert_eq!(loaded.records.len(), 2);
         assert_eq!(loaded.records[0].id, log_record.id);
         assert_eq!(loaded.records[1].id, timeout_record.id);

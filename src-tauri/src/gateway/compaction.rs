@@ -280,18 +280,12 @@ struct Entry {
     updated: u64,
     epoch: u64,
     boundary: Option<String>,
-    #[serde(default)]
     consumed_boundary: Option<String>,
     boundary_sequence: u64,
-    #[serde(default)]
     boundary_fresh: bool,
-    #[serde(default)]
     establishing: bool,
-    #[serde(default)]
     first_turn: bool,
-    #[serde(default)]
     history_seen: bool,
-    #[serde(default)]
     claim: Option<u64>,
 }
 fn model_detour(
@@ -378,7 +372,7 @@ impl PendingReport {
         } else if let Some(mut record) = self.record {
             if !saved {
                 record.reason = crate::events::Reason::ThreadRouting;
-                record.error_code = Some(crate::errors::ErrorCode::ConversationOwnership);
+                record.error_code = crate::errors::ErrorCode::ConversationOwnership;
                 record.level = crate::events::Level::Error;
                 record.action = crate::events::Action::Stopped;
                 record.details.message = Some("线程归属记录保存失败".into());

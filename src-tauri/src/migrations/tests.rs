@@ -44,12 +44,18 @@ fn gateway_recovers_before_loading_and_preserves_unknown_fields_idempotently() {
     .unwrap();
     let pair = json!({"base_url": base_url, "token": token});
     let journal = json!({
+        "client": "codex",
         "version": 2,
+        "connection": {"mode": "bearer"},
+        "grok": null,
         "path": config,
         "before": pair,
         "applied": pair,
         "exit": pair,
-        "live": false
+        "live": false,
+        "config_applied": false,
+        "store_before": null,
+        "store_after": null
     });
     let recovery = data.path().join("gateway-recovery.json");
     fs::write(&recovery, serde_json::to_vec(&journal).unwrap()).unwrap();

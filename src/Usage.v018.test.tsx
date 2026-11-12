@@ -445,9 +445,8 @@ describe("v0.19 usage overview", () => {
     );
   });
 
-  it("keeps review and historical-source information in sources and request details", async () => {
+  it("keeps review information in sources and request details", async () => {
     const user = userEvent.setup();
-    dashboard.sourceHistoryIncomplete = true;
     state.reports = {
       codex: {
         files: 1,
@@ -462,20 +461,11 @@ describe("v0.19 usage overview", () => {
     records = [record({ deduplication: "ambiguous" })];
     await renderUsage();
     expect(screen.queryByText(/待核对/)).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("部分历史汇总无法按来源拆分"),
-    ).not.toBeInTheDocument();
 
     const sourcesButton = screen.getByRole("button", { name: "数据来源" });
     await user.click(sourcesButton);
     const sources = screen.getByRole("dialog", { name: "数据来源" });
     expect(within(sources).getByText(/待核对 3/)).toBeInTheDocument();
-    await user.click(
-      within(sources).getByText("历史数据", { selector: "summary" }),
-    );
-    expect(
-      within(sources).getByText("部分旧日汇总仅支持全部来源查询。"),
-    ).toBeVisible();
     cancelDialog(sources);
     await waitFor(() => expect(sourcesButton).toHaveFocus());
 

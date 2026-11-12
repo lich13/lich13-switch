@@ -52,7 +52,6 @@ pub struct Dashboard {
     pub models: Vec<Group>,
     pub detail_since: i64,
     pub sources: BTreeMap<String, u64>,
-    pub source_history_incomplete: bool,
     pub data_version: u64,
 }
 #[derive(Serialize, Deserialize)]

@@ -155,7 +155,6 @@ it("runs explicit app history repair through the existing synchronization comman
     <Sources
       state={state}
       counts={{}}
-      historyIncomplete={false}
       onClose={vi.fn()}
       onChange={changed}
     />,

@@ -1156,7 +1156,7 @@ impl Gateway {
             let mut state = self.0.inner.lock().unwrap();
             self.replace_store(&mut state, store);
             state.revision = revision;
-            state.editable_mut().upgrade_error = None;
+            state.editable_mut().recovery_error = None;
         }
         Ok(())
     }

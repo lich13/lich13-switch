@@ -787,7 +787,6 @@ export default function Usage({
         <Sources
           state={state}
           counts={data?.sources ?? {}}
-          historyIncomplete={data?.sourceHistoryIncomplete ?? false}
           onClose={() => setSheet(false)}
           onChange={(s) => {
             stateSequence.current++;

@@ -9,13 +9,11 @@ import { clientName, numeric, type UsageState } from "./usage-types";
 export default function Sources({
   state,
   counts,
-  historyIncomplete,
   onClose,
   onChange,
 }: {
   state: UsageState;
   counts: Record<string, number>;
-  historyIncomplete: boolean;
   onClose: () => void;
   onChange: (v: UsageState) => void;
 }) {
@@ -81,12 +79,6 @@ export default function Sources({
           </div>
         ))}
       </div>
-      {historyIncomplete && (
-        <details className="usage-price-source">
-          <summary>历史数据</summary>
-          <p>部分旧日汇总仅支持全部来源查询。</p>
-        </details>
-      )}
       <div className="usage-actions usage-source-actions">
         <button
           disabled={busy || state.syncing}

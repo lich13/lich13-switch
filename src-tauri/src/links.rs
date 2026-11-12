@@ -160,13 +160,11 @@ fn parse(raw: &str) -> Result<Parsed> {
 }
 impl Imports {
     fn enqueue(&mut self, raw: &str) -> Result<bool> {
-        if raw.len() > 64 * 1024 || raw.chars().any(char::is_control) {
-            return Err(invalid("导入链接过长或无效"));
+        if raw.chars().any(char::is_control) {
+            return Err(invalid("导入链接无效"));
         }
-        let url = url::Url::parse(raw).map_err(|_| invalid("无效的导入链接"))?;
-        if url.scheme() != "ccswitch" {
-            return Err(invalid("仅支持 CC Switch 链接"));
-        }
+        // `receive` only forwards ccswitch links; any other defect is shown
+        // on the pending entry.
         let parsed = parse(raw);
         let fingerprint = parsed
             .as_ref()

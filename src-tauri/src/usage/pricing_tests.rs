@@ -20,9 +20,6 @@ use std::{
     time::Duration,
 };
 
-const ETAG: &str = "\"fixture-v1\"";
-const NEXT_ETAG: &str = "\"fixture-v2\"";
-
 struct Reply {
     status: u16,
     body: Vec<u8>,
@@ -47,7 +44,6 @@ impl Reply {
         let reason = match self.status {
             200 => "OK",
             302 => "Found",
-            304 => "Not Modified",
             503 => "Service Unavailable",
             _ => "Internal Server Error",
         };
@@ -69,7 +65,6 @@ impl Reply {
 #[derive(Debug, PartialEq, Eq)]
 struct Request {
     path: String,
-    etag: Option<String>,
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<Request> {
@@ -96,11 +91,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Request> {
         ));
     }
     let path = start.next().unwrap_or_default().to_owned();
-    let etag = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
-        .map(|(_, value)| value.trim().to_owned());
-    Ok(Request { path, etag })
+    Ok(Request { path })
 }
 
 struct SourceFixture {
@@ -190,12 +181,11 @@ impl SourceFixture {
         }
     }
 
-    fn assert_requests(&self, expected: &[(&str, Option<&str>)]) {
+    fn assert_requests(&self, expected: &[&str]) {
         let expected: Vec<_> = expected
             .iter()
-            .map(|(path, etag)| Request {
+            .map(|path| Request {
                 path: (*path).into(),
-                etag: etag.map(str::to_owned),
             })
             .collect();
         assert_eq!(*self.requests.lock().unwrap(), expected);
@@ -231,11 +221,8 @@ fn hash_reply(body: &[u8]) -> Reply {
     Reply::new(200, storage::digest(body).into_bytes())
 }
 
-fn download_replies(body: &[u8], etag: &str) -> Vec<Reply> {
-    vec![
-        hash_reply(body),
-        Reply::new(200, body.to_vec()).header("ETag", etag),
-    ]
+fn download_replies(body: &[u8]) -> Vec<Reply> {
+    vec![hash_reply(body), Reply::new(200, body.to_vec())]
 }
 
 async fn refresh(prices: &Pricing, source: &SourceFixture, force: bool) -> storage::Result<View> {
@@ -329,8 +316,8 @@ async fn http_200_updates_existing_model_and_adds_new_model() {
         "fixture-new-model": rates("0.000003")
     }))
     .unwrap();
-    let mut replies = download_replies(&original, ETAG);
-    replies.extend(download_replies(&next, NEXT_ETAG));
+    let mut replies = download_replies(&original);
+    replies.extend(download_replies(&next));
     let source = SourceFixture::new(replies);
     let first = refresh(&prices, &source, true).await.unwrap();
     let updated = refresh(&prices, &source, true).await.unwrap();
@@ -353,68 +340,10 @@ async fn http_200_updates_existing_model_and_adds_new_model() {
         Some(rates("0.000003"))
     );
     source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-        ("/prices.json", Some(ETAG)),
-    ]);
-}
-
-#[tokio::test]
-async fn etag_304_advances_check_time_without_changing_update_time() {
-    let dir = tempfile::tempdir().unwrap();
-    let prices = Pricing::new(dir.path()).unwrap();
-    let body = catalog("0.000001");
-    let mut replies = download_replies(&body, ETAG);
-    replies.extend([hash_reply(&body), Reply::new(304, vec![])]);
-    let source = SourceFixture::new(replies);
-    refresh(&prices, &source, true).await.unwrap();
-    drop(prices);
-    age_cache(dir.path());
-    let prices = Pricing::new(dir.path()).unwrap();
-    let before = prices.view();
-    let checked = refresh(&prices, &source, true).await.unwrap();
-    assert_same_prices(&before, &checked);
-    assert_eq!(checked.updated_at, Some(1));
-    assert!(checked.checked_at.unwrap() > 1);
-    assert_ne!(checked.checked_at, checked.updated_at);
-    assert!(checked.error.is_none());
-    let persisted: Value =
-        serde_json::from_slice(&fs::read(dir.path().join("price-cache.json")).unwrap()).unwrap();
-    assert_eq!(persisted["updatedAt"], json!(1));
-    assert_eq!(persisted["checkedAt"], json!(1));
-    source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-        ("/prices.json", Some(ETAG)),
-    ]);
-}
-
-#[tokio::test]
-async fn changed_hash_after_304_retries_without_conditional_header() {
-    let dir = tempfile::tempdir().unwrap();
-    let prices = Pricing::new(dir.path()).unwrap();
-    let original = catalog("0.000001");
-    let next = catalog("0.000002");
-    let mut replies = download_replies(&original, ETAG);
-    replies.extend([
-        hash_reply(&next),
-        Reply::new(304, vec![]),
-        Reply::new(200, next.clone()).header("ETag", NEXT_ETAG),
-    ]);
-    let source = SourceFixture::new(replies);
-    refresh(&prices, &source, true).await.unwrap();
-    let updated = refresh(&prices, &source, true).await.unwrap();
-    assert_eq!(updated.version, storage::digest(&next));
-    assert_eq!(updated.models["fixture-model"], rates("0.000002"));
-    assert!(updated.error.is_none());
-    source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-        ("/prices.json", Some(ETAG)),
-        ("/prices.json", None),
+        "/prices.sha256",
+        "/prices.json",
+        "/prices.sha256",
+        "/prices.json",
     ]);
 }
 
@@ -423,7 +352,7 @@ async fn assert_rejected_update_keeps_cache(rejected: Vec<Reply>, expected_error
     let prices = Pricing::new(dir.path()).unwrap();
     let original = catalog("0.000001");
     let rejected_count = rejected.len();
-    let mut replies = download_replies(&original, ETAG);
+    let mut replies = download_replies(&original);
     replies.extend(rejected);
     let source = SourceFixture::new(replies);
     refresh(&prices, &source, true).await.unwrap();
@@ -447,16 +376,12 @@ async fn assert_rejected_update_keeps_cache(rejected: Vec<Reply>, expected_error
     let restarted = Pricing::new(dir.path()).unwrap().view();
     assert_same_prices(&before, &restarted);
     assert!(restarted.error.is_none());
-    let mut expected = vec![
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-    ];
+    let mut expected = vec!["/prices.sha256", "/prices.json", "/prices.sha256"];
     if rejected_count >= 2 {
-        expected.push(("/prices.json", Some(ETAG)));
+        expected.push("/prices.json");
     }
     if rejected_count == 4 {
-        expected.extend([("/prices.sha256", None), ("/prices.json", None)]);
+        expected.extend(["/prices.sha256", "/prices.json"]);
     }
     source.assert_requests(&expected);
 }
@@ -484,15 +409,15 @@ async fn temporarily_out_of_sync_hash_and_json_retry_pair_once() {
         hash_reply(&catalog("0.000001")),
         Reply::new(200, next.clone()),
         hash_reply(&next),
-        Reply::new(200, next.clone()).header("ETag", NEXT_ETAG),
+        Reply::new(200, next.clone()),
     ]);
     let view = refresh(&prices, &source, true).await.unwrap();
     assert_eq!(view.version, storage::digest(&next));
     source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-        ("/prices.json", None),
+        "/prices.sha256",
+        "/prices.json",
+        "/prices.sha256",
+        "/prices.json",
     ]);
 }
 
@@ -501,7 +426,7 @@ async fn unchanged_hash_skips_json_download_on_scheduled_update() {
     let dir = tempfile::tempdir().unwrap();
     let prices = Pricing::new(dir.path()).unwrap();
     let body = catalog("0.000001");
-    let mut replies = download_replies(&body, ETAG);
+    let mut replies = download_replies(&body);
     replies.push(hash_reply(&body));
     let source = SourceFixture::new(replies);
     refresh(&prices, &source, true).await.unwrap();
@@ -512,11 +437,7 @@ async fn unchanged_hash_skips_json_download_on_scheduled_update() {
     let after = refresh(&prices, &source, false).await.unwrap();
     assert_same_prices(&before, &after);
     assert!(after.checked_at.unwrap() > before.checked_at.unwrap());
-    source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-    ]);
+    source.assert_requests(&["/prices.sha256", "/prices.json", "/prices.sha256"]);
 }
 
 #[tokio::test]
@@ -526,8 +447,8 @@ async fn equivalent_catalog_formatting_does_not_write_cache_or_change_content_ve
     let body = catalog("0.000001");
     let formatted =
         serde_json::to_vec_pretty(&serde_json::from_slice::<Value>(&body).unwrap()).unwrap();
-    let mut replies = download_replies(&body, ETAG);
-    replies.extend(download_replies(&formatted, NEXT_ETAG));
+    let mut replies = download_replies(&body);
+    replies.extend(download_replies(&formatted));
     let source = SourceFixture::new(replies);
     let before = refresh(&prices, &source, true).await.unwrap();
     let version = prices.content_version();
@@ -602,8 +523,8 @@ async fn invalid_sha_response_does_not_fetch_catalog_or_replace_cache() {
 async fn fixed_price_survives_remote_refresh_and_restart() {
     let dir = tempfile::tempdir().unwrap();
     let prices = Pricing::new(dir.path()).unwrap();
-    let mut replies = download_replies(&catalog("0.000001"), ETAG);
-    replies.extend(download_replies(&catalog("0.000009"), NEXT_ETAG));
+    let mut replies = download_replies(&catalog("0.000001"));
+    replies.extend(download_replies(&catalog("0.000009")));
     let source = SourceFixture::new(replies);
     let view = refresh(&prices, &source, true).await.unwrap();
     let mut config = view.config;
@@ -627,10 +548,10 @@ async fn fixed_price_survives_remote_refresh_and_restart() {
         );
     }
     source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-        ("/prices.json", Some(ETAG)),
+        "/prices.sha256",
+        "/prices.json",
+        "/prices.sha256",
+        "/prices.json",
     ]);
 }
 
@@ -639,7 +560,7 @@ async fn overlapping_force_updates_share_one_download() {
     let dir = tempfile::tempdir().unwrap();
     let prices = Pricing::new(dir.path()).unwrap();
     let body = catalog("0.000002");
-    let mut source = SourceFixture::start(download_replies(&body, ETAG), true);
+    let mut source = SourceFixture::start(download_replies(&body), true);
     let source_url = source.url("/prices.json");
     let hash_url = source.url("/prices.sha256");
     let mut first = Box::pin(prices.update_from(true, &source_url, &hash_url));
@@ -660,7 +581,7 @@ async fn overlapping_force_updates_share_one_download() {
     assert_eq!(second.checked_at, first.checked_at);
     assert!(first.error.is_none());
     assert!(second.error.is_none());
-    source.assert_requests(&[("/prices.sha256", None), ("/prices.json", None)]);
+    source.assert_requests(&["/prices.sha256", "/prices.json"]);
 }
 
 #[tokio::test]
@@ -668,7 +589,7 @@ async fn restart_loads_verified_catalog_and_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let prices = Pricing::new(dir.path()).unwrap();
     let body = catalog("0.000002");
-    let source = SourceFixture::new(download_replies(&body, ETAG));
+    let source = SourceFixture::new(download_replies(&body));
     let before = refresh(&prices, &source, true).await.unwrap();
     drop(prices);
     let restarted = Pricing::new(dir.path()).unwrap();
@@ -680,7 +601,7 @@ async fn restart_loads_verified_catalog_and_metadata() {
         restarted.quote(Some("fixture-model"), "1").data,
         Some(rates("0.000002"))
     );
-    source.assert_requests(&[("/prices.sha256", None), ("/prices.json", None)]);
+    source.assert_requests(&["/prices.sha256", "/prices.json"]);
 }
 
 #[tokio::test]
@@ -688,7 +609,7 @@ async fn restart_accepts_valid_edited_catalog_and_rejects_malformed_cache() {
     let dir = tempfile::tempdir().unwrap();
     let prices = Pricing::new(dir.path()).unwrap();
     let seed = prices.view();
-    let source = SourceFixture::new(download_replies(&catalog("0.000002"), ETAG));
+    let source = SourceFixture::new(download_replies(&catalog("0.000002")));
     refresh(&prices, &source, true).await.unwrap();
     drop(prices);
     let path = dir.path().join("price-cache.json");
@@ -718,7 +639,7 @@ async fn restart_accepts_valid_edited_catalog_and_rejects_malformed_cache() {
         );
         assert!(restarted.quote(Some("fixture-model"), "1").data.is_none());
     }
-    source.assert_requests(&[("/prices.sha256", None), ("/prices.json", None)]);
+    source.assert_requests(&["/prices.sha256", "/prices.json"]);
 }
 
 #[tokio::test]
@@ -731,7 +652,7 @@ async fn aliases_are_explicit_and_missing_prices_are_not_estimated() {
         "fixture-missing-output": {"input_cost_per_token": "0.000003"}
     }))
     .unwrap();
-    let source = SourceFixture::new(download_replies(&body, ETAG));
+    let source = SourceFixture::new(download_replies(&body));
     let view = refresh(&prices, &source, true).await.unwrap();
     let mut config = view.config;
     config
@@ -789,7 +710,7 @@ async fn aliases_are_explicit_and_missing_prices_are_not_estimated() {
     config.selected = Some(BTreeSet::from(["fixture-model-v2".into()]));
     prices.configure(config, &view.revision).unwrap();
     assert!(prices.quote(Some("fixture-alias"), "1").data.is_none());
-    source.assert_requests(&[("/prices.sha256", None), ("/prices.json", None)]);
+    source.assert_requests(&["/prices.sha256", "/prices.json"]);
 }
 
 #[tokio::test]
@@ -800,8 +721,8 @@ async fn auto_update_setting_and_check_interval_control_network_requests() {
     let mut config = initial.config;
     config.auto_update = false;
     prices.configure(config, &initial.revision).unwrap();
-    let mut replies = download_replies(&catalog("0.000001"), ETAG);
-    replies.extend(download_replies(&catalog("0.000002"), NEXT_ETAG));
+    let mut replies = download_replies(&catalog("0.000001"));
+    replies.extend(download_replies(&catalog("0.000002")));
     let source = SourceFixture::new(replies);
     let skipped = refresh(&prices, &source, false).await.unwrap();
     assert!(skipped.checked_at.is_none());
@@ -822,10 +743,10 @@ async fn auto_update_setting_and_check_interval_control_network_requests() {
     assert_eq!(refreshed.models["fixture-model"], rates("0.000002"));
     assert!(refreshed.checked_at.unwrap() > 1);
     source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-        ("/prices.json", Some(ETAG)),
+        "/prices.sha256",
+        "/prices.json",
+        "/prices.sha256",
+        "/prices.json",
     ]);
 }
 
@@ -835,8 +756,8 @@ async fn frozen_quotes_survive_remote_updates_and_manual_configuration() {
     let prices = Pricing::new(dir.path()).unwrap();
     let original = catalog("0.000001");
     let next = catalog("0.000002");
-    let mut replies = download_replies(&original, ETAG);
-    replies.extend(download_replies(&next, NEXT_ETAG));
+    let mut replies = download_replies(&original);
+    replies.extend(download_replies(&next));
     let source = SourceFixture::new(replies);
     refresh(&prices, &source, true).await.unwrap();
     let original_snapshot = prices.frozen();
@@ -901,10 +822,10 @@ async fn frozen_quotes_survive_remote_updates_and_manual_configuration() {
         assert_eq!(calculated.source, origin);
     }
     source.assert_requests(&[
-        ("/prices.sha256", None),
-        ("/prices.json", None),
-        ("/prices.sha256", None),
-        ("/prices.json", Some(ETAG)),
+        "/prices.sha256",
+        "/prices.json",
+        "/prices.sha256",
+        "/prices.json",
     ]);
 }
 #[test]

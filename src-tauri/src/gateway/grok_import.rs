@@ -556,7 +556,7 @@ impl Gateway {
             .filter(|p| p.token == token)
             .ok_or_else(|| error("导入预览已失效，请重新预览"))?;
         if s.running
-            || s.upgrade_error.is_some()
+            || s.recovery_error.is_some()
             || self.0.data.join(JOURNAL).exists()
             || self.0.data.join("gateway-recovery.json").exists()
             || p.home != home
@@ -682,7 +682,7 @@ impl Gateway {
             JOURNAL_LIMIT,
         )?;
         if let Err(e) = transaction.apply(&self.0.data) {
-            s.editable_mut().upgrade_error = Some(e.clone());
+            s.editable_mut().recovery_error = Some(e.clone());
             s.error = Some(e.message.clone());
             drop(pending);
             drop(s);

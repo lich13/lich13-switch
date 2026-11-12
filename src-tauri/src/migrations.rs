@@ -6,7 +6,7 @@ use std::path::Path;
 
 /// Recover interrupted transactions before loading their final store.
 pub(crate) fn gateway(data: &Path) -> Result<(crate::gateway::Store, String)> {
-    crate::gateway::recover_for_migration(data)?;
+    crate::gateway::recover_transactions(data)?;
     crate::gateway::Store::load(&data.join("gateway.json"))
 }
 

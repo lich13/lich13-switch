@@ -317,7 +317,6 @@ export type ClaudeUsageQuota = {
 };
 export type Dashboard = {
   dataVersion?: number;
-  sourceHistoryIncomplete?: boolean;
   totals: Totals;
   providers: Group[];
   models: Group[];

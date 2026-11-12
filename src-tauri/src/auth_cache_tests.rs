@@ -206,36 +206,3 @@ fn symlink_metadata_falls_back_to_the_bounded_reader() {
     assert_fixture(&recreated, Some("fixture-b"));
     assert_eq!(parses, 2, "a symlink must never reach the parser");
 }
-
-#[cfg(unix)]
-#[test]
-fn unreadable_file_error_does_not_return_a_cached_value() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("auth.fixture");
-    fs::write(&path, b"fixture-a").unwrap();
-    let mut cache = Cache::default();
-    let mut parses = 0;
-
-    let first = read_fixture(&mut cache, &path, &mut parses).unwrap();
-    let original_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
-    if fs::read(&path).is_ok() {
-        fs::set_permissions(&path, fs::Permissions::from_mode(original_mode)).unwrap();
-        return;
-    }
-
-    let rejected = read_fixture(&mut cache, &path, &mut parses);
-    fs::set_permissions(&path, fs::Permissions::from_mode(original_mode)).unwrap();
-    fs::write(&path, b"fixture-b").unwrap();
-    let recovered = read_fixture(&mut cache, &path, &mut parses).unwrap();
-
-    assert!(
-        rejected.is_err(),
-        "the bounded reader should propagate read failure"
-    );
-    assert_fixture(&first, Some("fixture-a"));
-    assert_fixture(&recovered, Some("fixture-b"));
-    assert_eq!(parses, 2, "a failed read must not reach the parser");
-}

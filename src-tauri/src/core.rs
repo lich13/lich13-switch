@@ -1334,8 +1334,7 @@ mod tests {
                 "version": 1,
                 "enabled": true,
                 "path": reopened.home().join("config.toml"),
-                "beforeRevision": "missing",
-                "managedRevision": null,
+                "stage": "enabled",
                 "fields": [
                     { "key": "base_url", "original": null, "managed": null },
                     { "key": "experimental_bearer_token", "original": null, "managed": null },

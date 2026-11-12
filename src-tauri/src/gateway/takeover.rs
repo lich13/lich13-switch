@@ -60,23 +60,17 @@ impl Pair {
 }
 #[derive(Serialize, Deserialize)]
 struct Journal {
-    #[serde(default)]
     client: ClientId,
     version: u32,
-    #[serde(default)]
     connection: Connection,
-    #[serde(default)]
     grok: Option<super::grok_config::Snapshot>,
     path: PathBuf,
     before: Pair,
     applied: Pair,
     exit: Pair,
     live: bool,
-    #[serde(default)]
     config_applied: bool,
-    #[serde(default)]
     store_before: Option<String>,
-    #[serde(default)]
     store_after: Option<String>,
 }
 fn managed_alias(record: &Journal, current: &Pair) -> bool {
@@ -359,17 +353,15 @@ fn load(data: &Path) -> Result<Option<Journal>> {
     let Some(raw) = storage::read_optional(&data.join(FILE))? else {
         return Ok(None);
     };
-    let value: serde_json::Value = serde_json::from_slice(&raw)
+    let record: Journal = serde_json::from_slice(&raw)
         .map_err(|_| AppError::new(code::RECOVERY, "恢复记录损坏，请保留并检查"))?;
-    if value.get("version").and_then(|v| v.as_u64()) != Some(2) {
+    if record.version != 2 {
         return Err(AppError::new(
             code::RECOVERY,
-            "旧版接管记录尚未解除；已保留配置，请在配置编辑器中处理",
+            "恢复记录版本不受支持，请保留并检查",
         ));
     }
-    serde_json::from_value(value)
-        .map(Some)
-        .map_err(|_| AppError::new(code::RECOVERY, "恢复记录格式无效"))
+    Ok(Some(record))
 }
 fn complete_store(data: &Path, record: &mut Journal, keep_journal: bool) -> Result<()> {
     if let Some(after) = &record.store_after {
@@ -845,7 +837,7 @@ mod tests {
         }
     }
     #[test]
-    fn legacy_already_restored_keeps_current_credentials_and_active_legacy_is_blocked() {
+    fn unreadable_record_is_kept_and_never_touches_config() {
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("config.toml");
         fs::write(&path, ORIGINAL).unwrap();

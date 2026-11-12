@@ -54,16 +54,9 @@ struct Record {
     version: u32,
     enabled: bool,
     path: PathBuf,
-    before_revision: String,
-    managed_revision: Option<String>,
     fields: Vec<FieldRecord>,
     account_id: String,
-    #[serde(default = "default_stage")]
     stage: String,
-}
-
-fn default_stage() -> String {
-    "enabled".into()
 }
 
 #[derive(Clone)]
@@ -561,13 +554,10 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
         });
     }
     let output = replace_lines(&text, &scan, &replacements);
-    let managed_revision = storage::revision(Some(output.as_bytes()));
     let mut record = Record {
         version: 1,
         enabled: false,
         path: path.clone(),
-        before_revision: expected.into(),
-        managed_revision: None,
         fields,
         account_id: account_id.into(),
         stage: "enabling".into(),
@@ -595,7 +585,6 @@ pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
     }
     record.enabled = true;
     record.stage = "enabled".into();
-    record.managed_revision = Some(managed_revision);
     if let Err(error) = save(data, &record) {
         match restore_record(home, &record) {
             Ok(()) => {

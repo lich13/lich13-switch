@@ -220,7 +220,7 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
                 &s.store,
                 s.running,
                 s.home.as_deref(),
-                s.upgrade_error.is_some(),
+                s.recovery_error.is_some(),
             )
         );
     }
@@ -260,7 +260,7 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
 
     {
         let mut s = g.0.inner.lock().unwrap();
-        s.editable_mut().upgrade_error = Some(AppError::new(code::RECOVERY, "fixture"));
+        s.editable_mut().recovery_error = Some(AppError::new(code::RECOVERY, "fixture"));
         assert!(!s.has_cached_editable_digest());
     }
     let v_err = g.view().revision;
@@ -275,7 +275,7 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
                 &s.store,
                 s.running,
                 s.home.as_deref(),
-                s.upgrade_error.is_some(),
+                s.recovery_error.is_some(),
             )
         );
     }

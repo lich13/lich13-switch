@@ -164,7 +164,6 @@ fn dashboard_value(store: &Store, filter: &Filter) -> Value {
         "models": dashboard.models,
         "detailSince": dashboard.detail_since,
         "sources": dashboard.sources,
-        "sourceHistoryIncomplete": dashboard.source_history_incomplete,
     })
 }
 

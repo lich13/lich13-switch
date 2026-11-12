@@ -170,7 +170,7 @@ impl Service {
                 None,
             );
             event.level = Level::Warning;
-            event.error_code = Some(ErrorCode::EndpointAffinity);
+            event.error_code = ErrorCode::EndpointAffinity;
             event.details = Details {
                 local_code: Some(code::ENDPOINT_AFFINITY.into()),
                 message: Some("端点归属刷新保存失败，已沿用原归属".into()),

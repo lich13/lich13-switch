@@ -53,7 +53,6 @@ struct Cache {
     catalog: Catalog,
     catalog_hash: String,
     hash: String,
-    etag: Option<String>,
     checked_at: Option<i64>,
     updated_at: Option<i64>,
 }
@@ -805,16 +804,12 @@ impl Pricing {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| failure("价格连接初始化失败"))?;
-        let (etag, oldhash, old_catalog_hash) = {
+        let (oldhash, old_catalog_hash) = {
             let s = self.state.read().unwrap();
-            (
-                s.cache.etag.clone(),
-                s.cache.hash.clone(),
-                s.cache.catalog_hash.clone(),
-            )
+            (s.cache.hash.clone(), s.cache.catalog_hash.clone())
         };
-        let hash_body = fetch(&client, hash_url, None, 1024).await?;
-        let hash = String::from_utf8(hash_body.1).map_err(|_| failure("价格校验码无效"))?;
+        let hash_body = fetch(&client, hash_url, 1024).await?;
+        let hash = String::from_utf8(hash_body).map_err(|_| failure("价格校验码无效"))?;
         let mut hash = hash
             .split_whitespace()
             .next()
@@ -827,39 +822,33 @@ impl Pricing {
                 .checked_at = Some(now());
             return Ok(());
         }
-        let mut response = fetch(&client, source, etag.as_deref(), LIMIT).await?;
-        if response.0 == 304 && hash != oldhash {
-            response = fetch(&client, source, None, LIMIT).await?;
-        }
+        let mut body = fetch(&client, source, LIMIT).await?;
         let mut cache = self.state.read().unwrap().cache.clone();
-        if response.0 != 304 {
-            if storage::digest(&response.1) != hash {
-                // The two public objects may be published at slightly different times.
-                // Retry the pair once; never install unverified data.
-                let retry = fetch(&client, hash_url, None, 1024).await?;
-                hash = String::from_utf8(retry.1)
-                    .ok()
-                    .and_then(|s| s.split_whitespace().next().map(str::to_owned))
-                    .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-                    .ok_or_else(|| failure("价格校验码无效"))?
-                    .to_ascii_lowercase();
-                response = fetch(&client, source, None, LIMIT).await?;
-                if storage::digest(&response.1) != hash {
-                    return Err(failure("价格哈希不匹配，已保留上次有效数据"));
-                }
+        if storage::digest(&body) != hash {
+            // The two public objects may be published at slightly different times.
+            // Retry the pair once; never install unverified data.
+            let retry = fetch(&client, hash_url, 1024).await?;
+            hash = String::from_utf8(retry)
+                .ok()
+                .and_then(|s| s.split_whitespace().next().map(str::to_owned))
+                .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| failure("价格校验码无效"))?
+                .to_ascii_lowercase();
+            body = fetch(&client, source, LIMIT).await?;
+            if storage::digest(&body) != hash {
+                return Err(failure("价格哈希不匹配，已保留上次有效数据"));
             }
-            let catalog: Catalog =
-                serde_json::from_slice(&response.1).map_err(|_| failure("价格数据无效"))?;
-            validate(&catalog)?;
-            let next_catalog_hash = catalog_hash(&catalog);
-            if cache.catalog_hash != next_catalog_hash {
-                cache.catalog_hash = next_catalog_hash;
-                cache.catalog = catalog;
-                cache.updated_at = Some(now());
-            }
-            cache.hash = hash;
-            cache.etag = response.2;
         }
+        let catalog: Catalog =
+            serde_json::from_slice(&body).map_err(|_| failure("价格数据无效"))?;
+        validate(&catalog)?;
+        let next_catalog_hash = catalog_hash(&catalog);
+        if cache.catalog_hash != next_catalog_hash {
+            cache.catalog_hash = next_catalog_hash;
+            cache.catalog = catalog;
+            cache.updated_at = Some(now());
+        }
+        cache.hash = hash;
         cache.checked_at = Some(now());
         if cache.catalog_hash != old_catalog_hash || !self.cache_path.exists() {
             let bytes = serde_json::to_vec(&cache).map_err(|_| failure("价格缓存保存失败"))?;
@@ -869,30 +858,15 @@ impl Pricing {
         Ok(())
     }
 }
-async fn fetch(
-    client: &reqwest::Client,
-    url: &str,
-    etag: Option<&str>,
-    limit: u64,
-) -> Result<(u16, Vec<u8>, Option<String>)> {
-    let mut request = client.get(url);
-    if let Some(e) = etag {
-        request = request.header(reqwest::header::IF_NONE_MATCH, e);
-    }
-    let mut r = request
+async fn fetch(client: &reqwest::Client, url: &str, limit: u64) -> Result<Vec<u8>> {
+    let mut r = client
+        .get(url)
         .send()
         .await
         .map_err(|_| failure("价格更新连接失败，正在使用缓存"))?;
-    let status = r.status().as_u16();
-    if status != 200 && status != 304 {
+    if r.status().as_u16() != 200 {
         return Err(failure("价格源暂不可用，正在使用缓存"));
     }
-    let etag = r
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|h| h.to_str().ok())
-        .filter(|s| s.len() < 512)
-        .map(str::to_owned);
     let mut bytes = Vec::new();
     while let Some(chunk) = r.chunk().await.map_err(|_| failure("价格下载中断"))? {
         if bytes.len() as u64 + chunk.len() as u64 > limit {
@@ -900,7 +874,7 @@ async fn fetch(
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok((status, bytes, etag))
+    Ok(bytes)
 }
 /// Calculate cache-read savings from the unit rates saved with each bill.
 /// Never mix the current catalog or multiplier with a historical bill.

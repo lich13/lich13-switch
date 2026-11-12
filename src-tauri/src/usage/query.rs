@@ -355,8 +355,6 @@ fn grok_model_filter(f: &Filter) -> Option<&str> {
         .flatten()
 }
 pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashboard> {
-    let start = f.start.unwrap_or(0);
-    let end = f.end.unwrap_or_else(now);
     let (cte, args) = selection(f);
     let cte = native_sql(cte);
     // Each aggregate reads the same narrow materialized projection, rather than
@@ -423,23 +421,12 @@ pub fn dashboard(c: &Connection, f: &Filter, detail_since: i64) -> Result<Dashbo
     };
     providers.sort_by(order);
     models.sort_by(order);
-    // Old daily totals have already lost the original source associations.
-    // Keep them in the combined view and explicitly flag source-only history.
-    let source_history_incomplete = if f.source.is_some() {
-        db(c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM daily WHERE json_extract(body,'$.scope') IS NULL AND day>=?1 AND day<=?2)",
-            params![start, end], |r| r.get(0),
-        ))?
-    } else {
-        false
-    };
     Ok(Dashboard {
         totals: total,
         providers,
         models,
         detail_since,
         sources,
-        source_history_incomplete,
         data_version: version(c)?,
     })
 }

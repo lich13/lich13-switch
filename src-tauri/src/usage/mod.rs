@@ -62,7 +62,6 @@ struct Inner {
     data_dir: PathBuf,
     directory: PathBuf,
     writer: mpsc::SyncSender<Option<Record>>,
-    overflow: mpsc::SyncSender<Record>,
     dropped_records: std::sync::atomic::AtomicU64,
     has_pending: std::sync::atomic::AtomicBool,
     repairs_active: std::sync::atomic::AtomicBool,
@@ -226,7 +225,6 @@ impl Service {
         let path = dir.join("settings.json");
         let (settings, settings_error) = load_settings(&path);
         let (writer, receiver) = mpsc::sync_channel::<Option<Record>>(256);
-        let (overflow, pending) = mpsc::sync_channel::<Record>(64);
         let (events, _) = broadcast::channel(32);
         let _ = std::fs::remove_dir(dir.join("pending"));
         let initial_pending = dir.join("pending").exists();
@@ -240,7 +238,6 @@ impl Service {
             data_dir: data.to_path_buf(),
             directory: dir,
             writer,
-            overflow,
             dropped_records: std::sync::atomic::AtomicU64::new(0),
             has_pending: std::sync::atomic::AtomicBool::new(initial_pending),
             repairs_active: std::sync::atomic::AtomicBool::new(true),
@@ -257,33 +254,6 @@ impl Service {
             syncing: Mutex::new(false),
             report: Mutex::new(Default::default()),
             events,
-        });
-        let spool = Arc::downgrade(&inner);
-        std::thread::spawn(move || {
-            while let Ok(record) = pending.recv() {
-                let Some(inner) = spool.upgrade() else {
-                    break;
-                };
-                let mut saved = false;
-                for retry in 0..3 {
-                    match inner.persist_pending(&record) {
-                        Ok(()) => {
-                            saved = true;
-                            break;
-                        }
-                        Err(error) => {
-                            *inner.pending_error.lock().unwrap() = Some(error.message);
-                        }
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(1 << retry));
-                }
-                if !saved {
-                    inner
-                        .dropped_records
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                let _ = inner.events.send(());
-            }
         });
         let weak = Arc::downgrade(&inner);
         std::thread::spawn(move || {
@@ -313,7 +283,7 @@ impl Service {
                 };
                 let mut batch: Vec<Record> = first.into_iter().collect();
                 // Reserve half a batch for persisted retries so a continuous
-                // stream of new requests cannot starve the overflow spool.
+                // stream of new requests cannot starve the disk spool.
                 batch.extend(receiver.try_iter().take(63).flatten());
                 let pending = if inner.has_pending.load(Ordering::Acquire) {
                     let old_pending_error = inner.pending_error.lock().unwrap().clone();
@@ -756,7 +726,10 @@ impl Drop for TraceInner {
                     r.expect("Some(record)")
                 }
             };
-            if self.service.0.overflow.try_send(record).is_err() {
+            // The writer is inside a long transaction: spool the record to disk,
+            // where the same writer picks it up afterwards.
+            if let Err(error) = self.service.0.persist_pending(&record) {
+                *self.service.0.pending_error.lock().unwrap() = Some(error.message);
                 self.service
                     .0
                     .dropped_records

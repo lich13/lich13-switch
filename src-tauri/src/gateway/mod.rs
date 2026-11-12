@@ -110,7 +110,7 @@ pub use quota::QuotaView;
 mod takeover;
 #[cfg(test)]
 mod takeover_alias_tests;
-pub(crate) fn recover_for_migration(data: &Path) -> Result<()> {
+pub(crate) fn recover_transactions(data: &Path) -> Result<()> {
     takeover::recover(data)?;
     grok_import::recover(data)?;
     dsh::recover(data)
@@ -214,7 +214,7 @@ mod inner_state {
     pub(in crate::gateway) struct EditableState {
         pub(in crate::gateway) store: Store,
         pub(in crate::gateway) running: bool,
-        pub(in crate::gateway) upgrade_error: Option<AppError>,
+        pub(in crate::gateway) recovery_error: Option<AppError>,
         pub(in crate::gateway) home: Option<PathBuf>,
     }
 
@@ -241,14 +241,14 @@ mod inner_state {
         pub(in crate::gateway) fn new(
             store: Store,
             revision: String,
-            upgrade_error: Option<AppError>,
+            recovery_error: Option<AppError>,
             error: Option<String>,
         ) -> Self {
             Self {
                 editable: EditableState {
                     store,
                     running: false,
-                    upgrade_error,
+                    recovery_error,
                     home: None,
                 },
                 editable_digest: OnceLock::new(),
@@ -267,7 +267,7 @@ mod inner_state {
             store: &Store,
             running: bool,
             home: Option<&Path>,
-            has_upgrade_error: bool,
+            has_recovery_error: bool,
         ) -> String {
             let editable = (
                 client,
@@ -283,7 +283,7 @@ mod inner_state {
                 &store.local_token,
                 running,
                 home,
-                has_upgrade_error,
+                has_recovery_error,
             );
             storage::digest(
                 &serde_json::to_vec(&editable).expect("serializable gateway configuration"),
@@ -313,7 +313,7 @@ mod inner_state {
                     &self.editable.store,
                     self.editable.running,
                     self.editable.home.as_deref(),
-                    self.editable.upgrade_error.is_some(),
+                    self.editable.recovery_error.is_some(),
                 )
             })
         }
@@ -616,9 +616,9 @@ impl Gateway {
         shared: Option<Arc<registry::Registry>>,
     ) -> Result<Self> {
         storage::private_dir(&data)?;
-        let upgrade_error = recover_for_migration(&data).err();
+        let recovery_error = recover_transactions(&data).err();
         let (store, revision) = Store::load(&data.join("gateway.json"))?;
-        let error = upgrade_error.as_ref().map(|e| e.message.clone());
+        let error = recovery_error.as_ref().map(|e| e.message.clone());
         let registry = match shared {
             Some(n) => n,
             None => Arc::new(registry::Registry::new(
@@ -640,7 +640,7 @@ impl Gateway {
             diagnostics: Mutex::new(None),
             usage: Mutex::new(None),
             registry: registry.clone(),
-            inner: Mutex::new(Inner::new(store, revision, upgrade_error, error)),
+            inner: Mutex::new(Inner::new(store, revision, recovery_error, error)),
             view_config_cache: Mutex::new(ViewConfigCache::default()),
             lifecycle: tokio::sync::Mutex::new(()),
             clients: Mutex::new(HashMap::new()),
@@ -708,7 +708,7 @@ impl Gateway {
         if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
             return Ok(());
         }
-        if let Some(error) = &s.upgrade_error {
+        if let Some(error) = &s.recovery_error {
             return Err(error.clone());
         }
         if s.store.initialized {
@@ -1016,7 +1016,7 @@ impl Gateway {
                 vec![]
             },
             error: s.error.clone().or_else(|| self.0.compaction.error()),
-            recovery_pending: s.upgrade_error.is_some(),
+            recovery_pending: s.recovery_error.is_some(),
         };
         // Selection readers need only connection identity and provider matching data.
         let config = Store {
@@ -1404,7 +1404,7 @@ impl Gateway {
         if !s.running && self.0.data.join("gateway-recovery.json").exists() {
             return Err(AppError::new(code::RECOVERY, "请先处理未完成的配置事务"));
         }
-        if let Some(error) = &s.upgrade_error {
+        if let Some(error) = &s.recovery_error {
             return Err(error.clone());
         }
         if let Edit::ImportLink { protocol, .. } = &edit {
@@ -1617,7 +1617,7 @@ impl Gateway {
                 drop(s);
                 return self.try_view();
             }
-            if let Some(error) = &s.upgrade_error {
+            if let Some(error) = &s.recovery_error {
                 return Err(error.clone());
             }
             if self.0.data.join("grok-import.json").exists() {
@@ -1745,7 +1745,7 @@ impl Gateway {
         }
         let (revision, intent, connection) = {
             let s = self.0.inner.lock().unwrap();
-            if let Some(error) = &s.upgrade_error {
+            if let Some(error) = &s.recovery_error {
                 return Err(error.clone());
             }
             (
@@ -1897,8 +1897,8 @@ impl Gateway {
                 }
             }
             // Recovery can complete a store/config transaction interrupted by I/O.
-            if was_running && s.upgrade_error.is_none() {
-                if let Err(e) = recover_for_migration(&self.0.data) {
+            if was_running && s.recovery_error.is_none() {
+                if let Err(e) = recover_transactions(&self.0.data) {
                     s.error = Some(e.message.clone());
                     drop(s);
                     self.changed();
@@ -1923,7 +1923,7 @@ impl Gateway {
             {
                 let editable = s.editable_mut();
                 editable.running = false;
-                editable.upgrade_error = None;
+                editable.recovery_error = None;
             }
             self.0.admission.configure(&s.store.providers, false);
             self.0

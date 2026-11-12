@@ -381,30 +381,3 @@ it("marks provider mappings as estimates and reports compacted attempts with unk
   expect(within(drawer).getByText(/合并 1K 次/)).toBeInTheDocument();
   expect(within(drawer).getAllByText("请求速度").length).toBeGreaterThan(0);
 });
-
-it("keeps the historical source limitation inside the data-sources drawer", async () => {
-  const user = userEvent.setup();
-  const original = mock.command.getMockImplementation()!;
-  mock.command.mockImplementation(
-    (name: string, args: Record<string, unknown> = {}) =>
-      name === "get_usage_dashboard"
-        ? Promise.resolve({
-            ...dashboard((args.filter as UsageFilter)?.source),
-            sourceHistoryIncomplete: true,
-          })
-        : original(name, args),
-  );
-  render(<Usage />);
-  await screen.findByText("fixture-model-all");
-  expect(
-    screen.queryByText("部分历史汇总无法按来源拆分"),
-  ).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "数据来源" }));
-  const sources = screen.getByRole("dialog", { name: "数据来源" });
-  await user.click(
-    within(sources).getByText("历史数据", { selector: "summary" }),
-  );
-  expect(
-    within(sources).getByText("部分旧日汇总仅支持全部来源查询。"),
-  ).toBeVisible();
-});

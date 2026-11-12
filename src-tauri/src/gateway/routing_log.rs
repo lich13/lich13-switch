@@ -234,7 +234,7 @@ impl RoutingLog {
             }
             if failed {
                 record.reason = events::Reason::ThreadRouting;
-                record.error_code = Some(crate::errors::ErrorCode::ConversationOwnership);
+                record.error_code = crate::errors::ErrorCode::ConversationOwnership;
                 record.level = events::Level::Error;
                 record.action = events::Action::Stopped;
                 record.details.message = Some("线程归属记录保存失败".into());
@@ -243,7 +243,7 @@ impl RoutingLog {
                 record.action = events::Action::Routed;
                 if handoff {
                     record.reason = events::Reason::ThreadHandoff;
-                    record.error_code = Some(crate::errors::ErrorCode::ThreadHandoff);
+                    record.error_code = crate::errors::ErrorCode::ThreadHandoff;
                     record.notification_message = notification;
                 }
             }

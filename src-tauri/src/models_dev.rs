@@ -49,8 +49,6 @@ struct Provider {
 #[derive(Clone, Serialize, Deserialize)]
 struct Index {
     schema: u8,
-    #[serde(default)]
-    vertex_filters: bool,
     updated_at: i64,
     providers: BTreeMap<String, Provider>,
 }
@@ -185,7 +183,6 @@ fn crop(value: Value) -> Result<Index> {
     }
     let index = Index {
         schema: 1,
-        vertex_filters: true,
         updated_at: now(),
         providers,
     };
@@ -277,7 +274,7 @@ impl Catalog {
             if state
                 .index
                 .as_ref()
-                .is_some_and(|old| old.providers == index.providers && old.vertex_filters)
+                .is_some_and(|old| old.providers == index.providers)
             {
                 return Ok((index, state.version.clone().unwrap_or_default()));
             }
@@ -381,16 +378,12 @@ impl Catalog {
     }
     async fn vertex_models_from(&self, force: bool, source: &str) -> Result<VertexModels> {
         self.ensure_loaded();
-        let upgrade = {
-            let state = self.state.read().unwrap();
-            state.attempted.is_none() && state.index.as_ref().is_some_and(|i| !i.vertex_filters)
-        };
-        self.refresh_from(force || upgrade, source).await?;
+        self.refresh_from(force, source).await?;
         Ok(self.vertex_choices())
     }
     fn vertex_choices(&self) -> VertexModels {
         let state = self.state.read().unwrap();
-        let Some(index) = state.index.as_ref().filter(|i| i.vertex_filters) else {
+        let Some(index) = state.index.as_ref() else {
             return VertexModels {
                 models: vec![],
                 error: state.error.clone(),
@@ -837,7 +830,7 @@ mod tests {
         Catalog::new(dir)
     }
     #[tokio::test]
-    async fn vertex_catalog_upgrades_legacy_cache_once_and_retains_candidates_on_failure() {
+    async fn vertex_catalog_filters_candidates_and_retains_them_on_failure() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let model = |status: &str, date: &str, tool: bool, output: Value| json!({"status":status,"release_date":date,"tool_call":tool,"modalities":{"input":["text","image"],"output":output}});
         let source = json!({"google-vertex":{"models":{
@@ -850,8 +843,6 @@ mod tests {
             "other-model":model("stable","2026-11-01",true,json!(["text"]))
         }},"google":{"models":{"gemini-other":model("stable","2026-11-01",true,json!(["text"]))}}});
         let dir = tempfile::tempdir().unwrap();
-        let legacy = json!({"schema":1,"updated_at":0,"providers":{"google-vertex":{"name":"Vertex","models":{"gemini-old":{"name":"Old"}}}}});
-        std::fs::write(dir.path().join("models-dev-index.json"), legacy.to_string()).unwrap();
         let cat = Catalog::new(dir.path());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/api.json", listener.local_addr().unwrap());
@@ -872,7 +863,6 @@ mod tests {
         assert!(!upgraded.models[0].preview && upgraded.models[2].preview);
         let bytes = std::fs::read(&cat.path).unwrap();
         let cached: Index = serde_json::from_slice(&bytes).unwrap();
-        assert!(cached.vertex_filters);
         assert_eq!(
             cached.providers["google-vertex"].models["gemini-new"]
                 .modalities
@@ -889,23 +879,6 @@ mod tests {
         assert_eq!(ids(&failed), ids(&upgraded));
         assert_eq!(std::fs::read(&cat.path).unwrap(), bytes);
         server.await.unwrap();
-        // A failed legacy upgrade is not retried on every form open.
-        std::fs::write(&cat.path, legacy.to_string()).unwrap();
-        let legacy_cat = Catalog::new(dir.path());
-        assert!(legacy_cat
-            .vertex_models_from(false, &url)
-            .await
-            .unwrap()
-            .error
-            .is_some());
-        let attempt = legacy_cat.state.read().unwrap().attempted;
-        assert!(legacy_cat
-            .vertex_models_from(false, &url)
-            .await
-            .unwrap()
-            .models
-            .is_empty());
-        assert_eq!(legacy_cat.state.read().unwrap().attempted, attempt);
     }
     #[test]
     fn frozen_prices_share_the_index_and_survive_catalog_replacement() {
