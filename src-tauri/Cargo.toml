@@ -88,7 +88,7 @@ windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = "none"
+strip = "symbols"
 
 [profile.release.build-override]
 strip = "none"

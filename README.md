@@ -169,14 +169,9 @@ pnpm build
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-
-# 4. 源码域名白名单与本地错误码一致性门禁
-python3 scripts/check-network-hosts.py
-python3 scripts/check-error-codes.py
-python3 -m unittest discover -s scripts -p "test_*.py"
 ```
 
-- **隐私与网络边界门禁**：详细规范见 [PRIVACY.md](./PRIVACY.md)，并通过 `scripts/check-network-hosts.py` 在离线状态下强制校验源码中的联网域名白名单。
+- **隐私与网络边界**：详细规范见 [PRIVACY.md](./PRIVACY.md)。
 - **Dependabot 与依赖策略**：每周一自动检查 Cargo、npm 与 GitHub Actions 的兼容 `minor/patch` 更新（自动忽略跨主版本破坏性升级，前端合并为单一 `frontend-compatible` 组以避免锁文件冲突）。
 - **安全漏洞报告**：发现安全问题请通过 [GitHub Security Advisories](https://github.com/lich13/vela/security/advisories/new) 私下报告。
 

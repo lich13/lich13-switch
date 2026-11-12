@@ -5,8 +5,8 @@ use winreg::{
     RegKey,
 };
 
-const PROGRAM: &str = "gptSwitch.CCSwitch.0";
-const CAPABILITIES: &str = "Software\\gpt-Switch\\LinkHandlers\\0\\Capabilities";
+const PROGRAM: &str = "Vela.CCSwitch";
+const CAPABILITIES: &str = "Software\\Vela\\Capabilities";
 const REGISTERED: &str = "Vela Link Vela";
 const USER_CHOICE: &str =
     "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\ccswitch\\UserChoice";

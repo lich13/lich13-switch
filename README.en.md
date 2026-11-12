@@ -169,14 +169,9 @@ pnpm build
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-
-# 4. Static network host allowlist and error-code consistency gates
-python3 scripts/check-network-hosts.py
-python3 scripts/check-error-codes.py
-python3 -m unittest discover -s scripts -p "test_*.py"
 ```
 
-- **Privacy & Network Boundaries**: Documented in [PRIVACY.md](./PRIVACY.md) and enforced offline by `scripts/check-network-hosts.py`.
+- **Privacy & Network Boundaries**: Documented in [PRIVACY.md](./PRIVACY.md).
 - **Dependabot & Dependency Policy**: Checks compatible `minor/patch` updates for Cargo, npm, and GitHub Actions every Monday (ignoring breaking major upgrades and grouping frontend updates into a single `frontend-compatible` group to avoid lockfile conflicts).
 - **Security Reporting**: Please report security vulnerabilities privately via [GitHub Security Advisories](https://github.com/lich13/vela/security/advisories/new).
 
