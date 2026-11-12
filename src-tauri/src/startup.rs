@@ -143,32 +143,6 @@ fn registration_path(path: &str, windows: bool) -> String {
         path.to_owned()
     }
 }
-#[cfg(windows)]
-pub fn smoke_registration() -> Result<()> {
-    let entry = auto_launch()?;
-    if entry.is_enabled().map_err(system_error)? {
-        return Ok(());
-    }
-    entry.enable().map_err(system_error)?;
-    let checked = (|| -> Result<()> {
-        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-        let value: String = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run")
-            .and_then(|key| key.get_value("Vela"))
-            .map_err(storage::io_error)?;
-        let expected = format!("{} {LOGIN_ARG}", entry.get_app_path());
-        if value != expected || !entry.is_enabled().map_err(system_error)? {
-            return Err(AppError::new(code::SMOKE, "Windows 启动项校验失败"));
-        }
-        Ok(())
-    })();
-    entry.disable().map_err(system_error)?;
-    checked?;
-    if entry.is_enabled().map_err(system_error)? {
-        return Err(AppError::new(code::SMOKE, "Windows 启动项未解除"));
-    }
-    Ok(())
-}
 pub fn login_source(args: &[String]) -> bool {
     if args.iter().any(|a| is_login_argument(a)) {
         return true;

@@ -205,9 +205,7 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
         }
     });
     // Price checks must not wait behind a session scan or historical compaction.
-    if r.smoke.is_none() {
-        r.usage.schedule_price_backfill();
-    }
+    r.usage.schedule_price_backfill();
     let price_runtime = Arc::downgrade(r);
     let price_handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -219,18 +217,12 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
                 break;
             };
             let usage = runtime.usage.clone();
-            if runtime.smoke.is_none() {
-                if let Ok(prices) = usage.prices() {
-                    let before = prices.sync_stamp();
-                    let _ = usage.update_prices(false).await;
-                    let after = prices.sync_stamp();
-                    if before.1 != after.1 {
-                        crate::emit_if_main_visible(
-                            &price_handle,
-                            crate::MainSignal::PricingState,
-                            (),
-                        );
-                    }
+            if let Ok(prices) = usage.prices() {
+                let before = prices.sync_stamp();
+                let _ = usage.update_prices(false).await;
+                let after = prices.sync_stamp();
+                if before.1 != after.1 {
+                    crate::emit_if_main_visible(&price_handle, crate::MainSignal::PricingState, ());
                 }
             }
             drop(runtime);
@@ -248,20 +240,18 @@ pub fn connect(app: &tauri::AppHandle, r: &Arc<Runtime>) {
             let Some(r) = r.upgrade() else {
                 break;
             };
-            if r.smoke.is_none() {
-                if r.usage.settings().auto_sync {
-                    let roots = vec![
-                        ("codex".into(), r.home(crate::gateway::ClientId::Codex)),
-                        ("claude".into(), r.home(crate::gateway::ClientId::Claude)),
-                        ("grok".into(), r.home(crate::gateway::ClientId::Grok)),
-                        ("antigravity".into(), crate::antigravity::home()),
-                    ];
-                    let s = r.usage.clone();
-                    let _ = tokio::task::spawn_blocking(move || s.sync_roots(roots, None)).await;
-                }
-                let maintenance = r.usage.clone();
-                let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
+            if r.usage.settings().auto_sync {
+                let roots = vec![
+                    ("codex".into(), r.home(crate::gateway::ClientId::Codex)),
+                    ("claude".into(), r.home(crate::gateway::ClientId::Claude)),
+                    ("grok".into(), r.home(crate::gateway::ClientId::Grok)),
+                    ("antigravity".into(), crate::antigravity::home()),
+                ];
+                let s = r.usage.clone();
+                let _ = tokio::task::spawn_blocking(move || s.sync_roots(roots, None)).await;
             }
+            let maintenance = r.usage.clone();
+            let _ = tokio::task::spawn_blocking(move || maintenance.maintain()).await;
             drop(r);
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }

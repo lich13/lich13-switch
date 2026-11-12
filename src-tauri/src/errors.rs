@@ -12,7 +12,8 @@ macro_rules! local_codes {
                 match self { $(Self::$variant => $wire,)* }
             }
         }
-        // Shared wire vocabulary includes event-only and frontend-only codes.
+        // Some codes are reached through `ErrorCode`, only on one platform, or
+        // only from tests; the variant list stays the shared vocabulary.
         #[allow(dead_code)]
         pub mod code {
             $(pub const $constant: &str = super::ErrorCode::$variant.as_str();)*
@@ -20,7 +21,6 @@ macro_rules! local_codes {
     };
 }
 
-// scripts/check-error-codes.py generates the TypeScript union from this list.
 local_codes! {
     Account => ACCOUNT = "ACCOUNT",
     AccountExchange => ACCOUNT_EXCHANGE = "ACCOUNT_EXCHANGE",
@@ -148,7 +148,6 @@ local_codes! {
     RpmLimit => RPM_LIMIT = "RPM_LIMIT",
     Running => RUNNING = "RUNNING",
     Settings => SETTINGS = "SETTINGS",
-    Smoke => SMOKE = "SMOKE",
     Stale => STALE = "STALE",
     Startup => STARTUP = "STARTUP",
     StartupRecoveryFailed => STARTUP_RECOVERY_FAILED = "STARTUP_RECOVERY_FAILED",
@@ -167,7 +166,6 @@ local_codes! {
     Token => TOKEN = "TOKEN",
     Toml => TOML = "TOML",
     Tray => TRAY = "TRAY",
-    Unknown => UNKNOWN = "UNKNOWN",
     Unsupported => UNSUPPORTED = "UNSUPPORTED",
     Update => UPDATE = "UPDATE",
     UpstreamBody => UPSTREAM_BODY = "UPSTREAM_BODY",

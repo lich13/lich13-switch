@@ -1726,6 +1726,7 @@ impl Gateway {
         self.0.registry.changed();
         self.try_view()
     }
+    #[cfg(test)]
     pub async fn stop(&self) -> Result<View> {
         self.stop_checked(None).await
     }

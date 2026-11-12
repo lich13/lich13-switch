@@ -2,7 +2,9 @@ use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -767,6 +769,7 @@ impl Core {
         self.set_sync("updated", Some(target.id.clone()), "指定账号凭据已更新");
         Ok(target.current)
     }
+    #[cfg(test)]
     pub fn add_api_key(&mut self, name: &str, key: &str) -> Result<String> {
         if key.trim().is_empty() || key.contains(['\n', '\r']) {
             return Err(AppError::new(code::KEY, "请输入单行有效 API Key"));
@@ -1095,6 +1098,7 @@ impl Core {
             false,
         )
     }
+    #[cfg(test)]
     pub fn save_config(
         &self,
         text: &str,

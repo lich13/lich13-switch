@@ -448,7 +448,7 @@ impl ViewCache {
                 account_id: Some(record.account_id.clone()),
                 error: None,
             }
-        } else if settled(&scan, &record) {
+        } else if settled(scan, record) {
             OfficialModeView::default()
         } else {
             OfficialModeView {
@@ -475,7 +475,7 @@ fn cleanup_settled_stage(data: &Path, record: &Record) -> bool {
         if let Ok(Some(raw)) = storage::read_user_optional(&record.path) {
             if let Ok(text) = String::from_utf8(raw) {
                 if let Ok(scan) = scan(&text) {
-                    if settled(&scan, &record) {
+                    if settled(&scan, record) {
                         let _ = fs::remove_file(record_path(data));
                         return true;
                     }

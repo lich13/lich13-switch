@@ -60,8 +60,7 @@ pub fn on_manual_open(app: &tauri::AppHandle) {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return;
     };
-    if r.smoke.is_some()
-        || !r.core.lock().unwrap().preferences().system_notifications
+    if !r.core.lock().unwrap().preferences().system_notifications
         || ASKING.swap(true, Ordering::AcqRel)
     {
         return;
@@ -133,10 +132,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
                 Ok(event) => {
                     crate::emit_main_app_event(&app, &event);
                     let r = app.state::<Arc<Runtime>>();
-                    if !event.notify
-                        || !r.core.lock().unwrap().preferences().system_notifications
-                        || r.smoke.is_some()
-                    {
+                    if !event.notify || !r.core.lock().unwrap().preferences().system_notifications {
                         continue;
                     }
                     let Some(record) = event.record else { continue };

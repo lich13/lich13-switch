@@ -28,7 +28,6 @@ mod power_macos;
 mod process_control;
 mod provider_testing;
 mod quick;
-mod smoke;
 mod startup;
 #[cfg(target_os = "macos")]
 mod startup_macos;
@@ -67,9 +66,6 @@ struct Runtime {
     claude_login: Mutex<claude_profile::login::Session>,
     quitting: AtomicBool,
     quit_pending: AtomicBool,
-    smoke: Option<PathBuf>,
-    smoke_result: Mutex<Option<Result<smoke::SmokeSnapshot>>>,
-    fixture: Mutex<Option<tempfile::TempDir>>,
     startup: startup::Service,
     start_silently: bool,
     frontend_started: AtomicBool,
@@ -1139,15 +1135,6 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = runtime.stop_gateways().await {
-            if runtime.smoke.is_some() {
-                if let Ok(mut result) = runtime.smoke_result.lock() {
-                    *result = Some(Err(e));
-                }
-                runtime.quitting.store(true, Ordering::Relaxed);
-                runtime.window_wake.notify_one();
-                app.exit(1);
-                return;
-            }
             runtime.quit_pending.store(false, Ordering::Relaxed);
             let _ = app.emit("switch-error", e);
             let _ = show(&app, Some("gateway"));
@@ -1529,33 +1516,29 @@ async fn frontend_ready(
     if !r.start_silently {
         notifications::on_manual_open(&app);
     }
-    if r.smoke.is_some() {
-        return smoke::run(&app, &r).await;
-    } else {
-        for client in [
-            gateway::ClientId::Codex,
-            gateway::ClientId::Claude,
-            gateway::ClientId::Grok,
-            gateway::ClientId::Dsh,
-        ] {
-            if (client == gateway::ClientId::Codex && official::blocks_gateway(&r.data))
-                || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
-            {
-                continue;
-            }
-            if let Err(e) = r.gateway(client).resume(&r.home(client)?).await {
-                let e = AppError::new(&e.code, &format!("{}：{}", client.name(), e.message));
-                if let Some(record) = events::Record::configuration_failure(client, &e, true) {
-                    r.diagnostics.emit(record);
-                }
-                *r.startup_error.lock().unwrap() = Some(e.clone());
-                let _ = app.emit("switch-error", e);
-            }
-            publish_gateway(&app, r.gateway(client));
+    for client in [
+        gateway::ClientId::Codex,
+        gateway::ClientId::Claude,
+        gateway::ClientId::Grok,
+        gateway::ClientId::Dsh,
+    ] {
+        if (client == gateway::ClientId::Codex && official::blocks_gateway(&r.data))
+            || (client == gateway::ClientId::Claude && claude_profile::blocks(&r.data))
+        {
+            continue;
         }
-        if !r.start_silently {
-            show(&app, None)?;
+        if let Err(e) = r.gateway(client).resume(&r.home(client)?).await {
+            let e = AppError::new(&e.code, &format!("{}：{}", client.name(), e.message));
+            if let Some(record) = events::Record::configuration_failure(client, &e, true) {
+                r.diagnostics.emit(record);
+            }
+            *r.startup_error.lock().unwrap() = Some(e.clone());
+            let _ = app.emit("switch-error", e);
         }
+        publish_gateway(&app, r.gateway(client));
+    }
+    if !r.start_silently {
+        show(&app, None)?;
     }
     Ok(())
 }
@@ -1570,92 +1553,45 @@ fn tray_is_dark() -> bool {
 }
 pub fn run() {
     let args: Vec<_> = std::env::args().collect();
-    let smoke = args
-        .iter()
-        .position(|s| s == "--smoke-test")
-        .and_then(|i| args.get(i + 1))
-        .map(PathBuf::from);
-    let mut context = tauri::generate_context!();
-    if smoke.is_some() {
-        // Installer checks must not open the live application's WebView store.
-        for window in &mut context.config_mut().app.windows {
-            window.incognito = true;
-        }
-    }
-    let builder = tauri::Builder::default();
-    let builder = if smoke.is_none() {
-        builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
+    let context = tauri::generate_context!();
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             let has_link = args.iter().any(|arg| arg.starts_with("ccswitch:"));
             links::receive(app, args.iter().cloned());
             if !has_link && !args.iter().any(|a| startup::is_login_argument(a)) {
                 let _ = show(app, None);
             }
         }))
-    } else {
-        // Smoke runs own a temporary data directory and must not notify the live app.
-        builder
-    };
-    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(move |app| {
-            let fixture = if smoke.is_some() {
-                Some(
-                    tempfile::Builder::new()
-                        .prefix("vela-smoke-")
-                        .tempdir()?,
-                )
-            } else {
-                None
-            };
             let user_home = dirs::home_dir()
                 .ok_or_else(|| AppError::new(code::PATH, "无法定位用户主目录"))?;
-            let data = fixture
-                .as_ref()
-                .map(|t| t.path().join("data"))
-                .unwrap_or_else(|| user_home.join(".vela"));
+            let data = user_home.join(".vela");
             storage::private_dir(&data)?;
-            let home = fixture
-                .as_ref()
-                .map(|t| t.path().join("codex"))
-                .unwrap_or_else(|| {
-                    std::env::var_os("CODEX_HOME")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| user_home.join(".codex"))
-                });
+            let home = std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| user_home.join(".codex"));
             // Single-instance registration has completed; no current spool exists yet.
             cleanup_spool::clean(&data);
             official::recover_interrupted(&data);
-            let mut core = Core::new(data.clone(), home)?;
+            let core = Core::new(data.clone(), home)?;
             let gateway = gateway::Gateway::new(data.clone())?;
             let claude = gateway.companion(data.join("claude"))?;
             let grok = gateway.grok_companion(data.join("grok"))?;
             let dsh = gateway.dsh_companion(data.join("dsh"))?;
             let startup = startup::Service::new();
-            let start_silently = smoke.is_none() && startup::login_source(&args);
+            let start_silently = startup::login_source(&args);
             app.manage(quick::Panel::new(&data)?);
             let power = power::Service::new();
-            if let Some(fixture) = &fixture {
-                storage::private_dir(&core.home())?;
-                storage::private_dir(&fixture.path().join("claude"))?;
-                storage::private_dir(&fixture.path().join("grok"))?;
-                let mut preferences = core.preferences();
-                preferences.claude_home =
-                    fixture.path().join("claude").to_string_lossy().into_owned();
-                preferences.grok_home = fixture.path().join("grok").to_string_lossy().into_owned();
-                preferences.dsh_home = fixture.path().join("dsh").to_string_lossy().into_owned();
-                core.set_preferences(preferences)?;
-            }
-            if smoke.is_none() {
-                let _ = antigravity::auth::poll_state(&data);
-            }
+            let _ = antigravity::auth::poll_state(&data);
             let usage = usage::Service::new(&data);
             gateway.set_usage(usage.clone());
             claude.set_usage(usage.clone());
             grok.set_usage(usage.clone());
             dsh.set_usage(usage.clone());
-            let codex_import_error = if smoke.is_none() { gateway.import_initial(&core.home()).err() } else { None };
-            let claude_import_error = if smoke.is_none() {
+            let codex_import_error = gateway.import_initial(&core.home()).err();
+            let claude_import_error = {
                 let home=std::path::PathBuf::from(core.preferences().claude_home);
                 let recovery=if claude_profile::recovery_pending(&data) && claude_profile::login::running_sessions()? {
                     Err(AppError::new(code::CLAUDE_RUNNING,"请先退出 Claude Code，再恢复配置切换事务"))
@@ -1665,10 +1601,8 @@ pub fn run() {
                     Ok(()) if !claude_profile::blocks(&data)=>claude.import_initial(&home).err(),
                     Ok(())=>None,
                 }
-            } else {
-                None
             };
-            let grok_import_error = if smoke.is_none() { grok.import_initial(&PathBuf::from(core.preferences().grok_home)).err() } else { None };
+            let grok_import_error = grok.import_initial(&PathBuf::from(core.preferences().grok_home)).err();
             gateway.set_quota_interval(core.preferences().quota_refresh_seconds);
             grok.set_quota_interval(core.preferences().quota_refresh_seconds);
             dsh.set_quota_interval(core.preferences().quota_refresh_seconds);
@@ -1679,9 +1613,7 @@ pub fn run() {
             grok.set_diagnostics(diagnostics.clone());
             dsh.set_diagnostics(diagnostics.clone());
             let provider_tests = provider_testing::Service::new(&data, [gateway.clone(), claude.clone(), grok.clone(), dsh.clone()])?;
-            let vertex_error = if smoke.is_none() {
-                tauri::async_runtime::block_on(antigravity::auth::restore_vertex_listener(&data, &gateway)).err()
-            } else { None };
+            let vertex_error = tauri::async_runtime::block_on(antigravity::auth::restore_vertex_listener(&data, &gateway)).err();
             let runtime = Arc::new(Runtime {
                 usage,
                 diagnostics,
@@ -1697,9 +1629,6 @@ pub fn run() {
                 claude_login: Mutex::new(Default::default()),
                 quitting: AtomicBool::new(false),
                 quit_pending: AtomicBool::new(false),
-                smoke,
-                smoke_result: Mutex::new(None),
-                fixture: Mutex::new(fixture),
                 startup,
                 start_silently,
                 power,
@@ -1719,25 +1648,23 @@ pub fn run() {
                 .observe_home(&runtime.home(gateway::ClientId::Claude)?);
             let state = state_for(&runtime)?;
             app.manage(runtime.clone());
-            if runtime.smoke.is_none() { provider_testing::commands::connect(app.handle()); }
+            provider_testing::commands::connect(app.handle());
             notifications::connect(app.handle(), &runtime.diagnostics);
             usage::commands::connect(app.handle(), &runtime);
             runtime.grok.observe_home(&runtime.home(gateway::ClientId::Grok)?);
             runtime.dsh.observe_home(&runtime.home(gateway::ClientId::Dsh)?);
-            if runtime.smoke.is_none() {
-                for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(e) = g.backfill_models().await {
-                            g.report_model_error(e);
-                        }
-                    });
-                }
+            for g in [runtime.gateway.clone(), runtime.claude.clone(), runtime.grok.clone(), runtime.dsh.clone()] {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = g.backfill_models().await {
+                        g.report_model_error(e);
+                    }
+                });
             }
             runtime.gateway.report_diagnostics();
             runtime.grok.report_diagnostics();
             runtime.dsh.report_diagnostics();
             runtime.claude.report_diagnostics();
-            if runtime.smoke.is_none() {
+            {
                 let handle = app.handle().clone();
                 let r = runtime.clone();
                 tauri::async_runtime::spawn(async move {
@@ -1748,7 +1675,7 @@ pub fn run() {
                 });
             }
             links::receive(app.handle(), args.iter().cloned());
-            quick::Panel::create(app.handle(), runtime.smoke.is_some())?;
+            quick::Panel::create(app.handle())?;
             let freeze = runtime.gateway.freeze_gate();
             let mut freeze_events = freeze.subscribe();
             let freeze_app = app.handle().clone();
@@ -2268,10 +2195,7 @@ pub fn run() {
                 let r = app.state::<Arc<Runtime>>();
                 // macOS Dock/system termination can bypass ExitRequested.
                 // Serialize restoration with any in-flight takeover before returning to the OS.
-                let restored = tauri::async_runtime::block_on(r.stop_gateways());
-                if r.smoke.is_some() {
-                    let _ = smoke::report_exit(app, &r, restored);
-                }
+                let _ = tauri::async_runtime::block_on(r.stop_gateways());
             }
         });
 }

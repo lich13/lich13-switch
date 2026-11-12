@@ -1,4 +1,3 @@
-import { ErrorCodes } from "./error-codes";
 export type ClientId = "codex" | "claude" | "grok" | "dsh";
 export type Preferences = {
   codexHome: string;
@@ -64,7 +63,7 @@ export type LoginState = {
   targetAccountId?: string | null;
 };
 export type AppError = {
-  code: import("./error-codes").CompatibleErrorCode;
+  code: string;
   message: string;
   line?: number;
   column?: number;
@@ -77,7 +76,7 @@ export const errorOf = (e: unknown): AppError =>
   typeof e === "object" && e !== null && "message" in e
     ? (e as AppError)
     : {
-        code: ErrorCodes.Unknown,
+        code: "UNKNOWN",
         message: typeof e === "string" ? e : "操作失败，请重新尝试",
       };
 
