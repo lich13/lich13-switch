@@ -350,12 +350,6 @@
   min-width: 0;
 }
 
-.event-policy-link {
-  flex: none;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
 .event-rule-actions {
   display: flex;
   flex-wrap: wrap;

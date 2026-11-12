@@ -1,9 +1,5 @@
 import FailureRuleDialog from "./FailureRuleDialog";
-import type {
-  FailureFocus,
-  ErrorResponse,
-  FailureOrigin,
-} from "./failure-policy-types";
+import type { ErrorResponse } from "./failure-policy-types";
 import {
   limitLabel,
   rpmWaitLabel,
@@ -83,7 +79,7 @@ const categories = {
   status: "状态记录",
 } as const;
 
-export type EventOrigin = FailureOrigin | "antigravity";
+export type EventOrigin = "upstream" | "gateway" | "antigravity";
 
 export type EventRecord = {
   id: string;
@@ -392,9 +388,7 @@ function wireStatus(r: EventRecord) {
 export default function EventLog({
   focus,
   consumed,
-  onOpenPolicy,
 }: {
-  onOpenPolicy?: (focus: FailureFocus) => void;
   focus?: {
     id: string;
     clientId: ClientId;
@@ -437,44 +431,6 @@ export default function EventLog({
     null,
   );
   const detailSequence = useRef(0);
-  const openPolicy = async (record: EventRecord) => {
-    const request = ++detailSequence.current;
-    try {
-      const event =
-        (await command("get_app_event", { id: record.id })) ?? record;
-      if (
-        request !== detailSequence.current ||
-        !event.clientId ||
-        event.clientId === "agy" ||
-        event.clientId === "antigravity" ||
-        eventOrigin(event) !== "upstream"
-      )
-        return;
-      onOpenPolicy?.({
-        clientId: event.clientId,
-        recordedCategory: event.details?.errorBasis,
-        input: {
-          eventId: event.details?.rawError ? event.id : undefined,
-          code: event.details?.rawError
-            ? undefined
-            : event.details?.upstreamCode,
-          message: event.details?.rawError ? undefined : event.details?.message,
-          status: event.status,
-          upstreamType: event.details?.rawError
-            ? undefined
-            : event.details?.upstreamType,
-          upstreamReason: event.details?.rawError
-            ? undefined
-            : event.details?.upstreamReason,
-          parameter: event.details?.rawError
-            ? undefined
-            : event.details?.parameter,
-        },
-      });
-    } catch (e) {
-      if (request === detailSequence.current) setError(errorOf(e).message);
-    }
-  };
   useEffect(
     () => () => {
       detailSequence.current++;
@@ -921,17 +877,6 @@ export default function EventLog({
                           </span>
                         )}
                       </button>
-                      {onOpenPolicy &&
-                        r.clientId &&
-                        eventOrigin(r) === "upstream" && (
-                          <button
-                            type="button"
-                            className="text-button event-policy-link"
-                            onClick={() => void openPolicy(r)}
-                          >
-                            查看策略
-                          </button>
-                        )}
                     </div>
                   </td>
                   <td>
@@ -970,9 +915,6 @@ export default function EventLog({
       </div>
       {selected && (
         <EventDetail
-          onOpenPolicy={
-            onOpenPolicy ? () => void openPolicy(selected) : undefined
-          }
           event={selected}
           provider={name(selected)}
           onClose={() => {
@@ -989,9 +931,7 @@ function EventDetail({
   event: r,
   provider,
   onClose,
-  onOpenPolicy,
 }: {
-  onOpenPolicy?: () => void;
   event: EventRecord;
   provider: string;
   onClose: () => void;
@@ -1074,11 +1014,6 @@ function EventDetail({
           </button>
         </header>
         <div className="event-rule-actions">
-          {onOpenPolicy && r.clientId && eventOrigin(r) === "upstream" && (
-            <button className="secondary event-add-rule" onClick={onOpenPolicy}>
-              查看策略
-            </button>
-          )}
           {eventOrigin(r) === "upstream" &&
             r.clientId &&
             (r.details?.upstreamCode ||

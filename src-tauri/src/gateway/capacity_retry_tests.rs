@@ -102,16 +102,6 @@ async fn http_200_capacity_and_unknown_rejection_use_the_safe_backup_before_deli
             serde_json::from_str::<serde_json::Value>(&raw.body).unwrap()["message"],
             message
         );
-        let matched = g
-            .match_failure_policy(super::super::failure_match::Input {
-                status: error.status,
-                raw_response: Some(raw.body),
-                headers: Some(raw.headers),
-                event: raw.event,
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!(matched.category, Some(basis));
         g.stop().await.unwrap();
     }
 }

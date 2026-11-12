@@ -1,81 +1,32 @@
-import type { ClientId, GatewaySettings } from "./types";
-
-export type FailureOrigin = "upstream" | "gateway";
-export type FailureInput = {
-  query?: string | null;
-  rawResponse?: string | null;
-  event?: string | null;
-  eventId?: string | null;
-  headers?: ErrorResponseHeader[] | null;
-  code?: string | null;
-  message?: string | null;
-  status?: number | null;
-  upstreamType?: string | null;
-  upstreamReason?: string | null;
-  parameter?: string | null;
-};
-export type FailureParameter = Exclude<
-  keyof GatewaySettings,
-  "customFailureRules"
->;
-export type FailureMatch = {
-  origin?: FailureOrigin | null;
-  policyId?: string | null;
-  label?: string | null;
-  parsed?: FailureInput;
-  candidates?: FailureCandidate[];
-  category: string | null;
-  source:
-    | "builtin_code"
-    | "builtin_type"
-    | "builtin_message"
-    | "builtin_condition"
-    | "custom_code"
-    | "custom_keyword"
-    | "status"
-    | null;
-  evidence: string;
-  action: string | null;
-  customRuleId: string | null;
-  conflict: boolean;
-  parameters: FailureParameter[];
-  commonParameters: FailureParameter[];
-};
-export type FailureFocus = {
-  clientId: ClientId;
-  input: FailureInput;
-  recordedCategory?: string | null;
-};
-
 export type FailureRule = {
   id: string;
   matchKind: "code" | "keyword";
   value: string;
   category: string;
 };
-export type FailureCategory = {
-  origin?: FailureOrigin;
-  policyId?: string;
-  parameters?: FailureParameter[];
-  category: string;
-  label: string;
-  group: string;
-  action: string;
-  codes: { value: string; category?: string; platform: string }[];
-  keywords?: { allOf: string[][]; exact: boolean }[];
-  protocols?: string[];
-  excludedKeywords?: string[];
-  conditions: string[];
-  statuses?: string[];
-};
-
-export type FailureCandidate = {
-  category: string;
-  label: string;
-  action: string;
-  parameters: FailureParameter[];
-  commonParameters: FailureParameter[];
-};
+/** Upstream error classes a custom rule can map to; values match Rust `ErrorBasis`. */
+export const failureCategories: { category: string; label: string }[] = [
+  { category: "rpm", label: "请求频率 RPM" },
+  { category: "rps", label: "请求频率 RPS" },
+  { category: "tpm", label: "Token 速率" },
+  { category: "input_tokens", label: "输入 Token 速率" },
+  { category: "output_tokens", label: "输出 Token 速率" },
+  { category: "concurrency", label: "并发与连接数" },
+  { category: "acceleration", label: "突发与增长过快" },
+  { category: "spending_rate", label: "短时消费速率" },
+  { category: "capacity", label: "容量不足" },
+  { category: "unknown_rate_limit", label: "未分类限流" },
+  { category: "usage_limit", label: "待核验用量限制" },
+  { category: "quota_exhausted", label: "周期额度耗尽" },
+  { category: "billing", label: "余额与消费硬上限" },
+  { category: "authentication", label: "认证失败" },
+  { category: "permission", label: "权限与访问限制" },
+  { category: "model_unavailable", label: "模型不可用" },
+  { category: "service_error", label: "服务异常" },
+  { category: "invalid_request", label: "请求或协议错误" },
+  { category: "request_too_large", label: "单次请求超限" },
+  { category: "safety_rejection", label: "安全拒绝" },
+];
 export type ErrorResponseHeader = {
   name: string;
   value: string;

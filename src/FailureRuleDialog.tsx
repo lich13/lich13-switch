@@ -2,20 +2,18 @@ import { useEffect, useState } from "react";
 import { command } from "./bridge";
 import Modal from "./Modal";
 import { errorOf, type ClientId, type GatewayState } from "./types";
-import type { FailureCategory, FailureRule } from "./failure-policy-types";
+import { failureCategories, type FailureRule } from "./failure-policy-types";
 
 export default function FailureRuleDialog({
   clientId,
   initial,
   close,
   saved,
-  catalog: providedCatalog,
 }: {
   clientId: ClientId;
   initial?: Partial<FailureRule>;
   close: () => void;
   saved?: (state: GatewayState) => void;
-  catalog?: FailureCategory[];
 }) {
   const [rule, setRule] = useState<FailureRule>(() => ({
     id: crypto.randomUUID(),
@@ -24,22 +22,15 @@ export default function FailureRuleDialog({
     category: "",
     ...initial,
   }));
-  const [catalog, setCatalog] = useState<FailureCategory[]>([]);
   const [revision, setRevision] = useState<string | null>(null);
   const [ready, setReady] = useState(false),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   useEffect(() => {
     let active = true;
-    void Promise.all([
-      providedCatalog
-        ? Promise.resolve(providedCatalog)
-        : command("get_failure_policy_catalog"),
-      command("get_gateway", { clientId }),
-    ])
-      .then(([items, state]) => {
+    void command("get_gateway", { clientId })
+      .then((state) => {
         if (!active) return;
-        setCatalog(items.filter((c) => c.origin !== "gateway"));
         setRevision(state.revision);
         setReady(true);
       })
@@ -49,7 +40,7 @@ export default function FailureRuleDialog({
     return () => {
       active = false;
     };
-  }, [clientId, providedCatalog]);
+  }, [clientId]);
   return (
     <Modal
       compact
@@ -120,7 +111,7 @@ export default function FailureRuleDialog({
             onChange={(e) => setRule({ ...rule, category: e.target.value })}
           >
             <option value="">选择类别</option>
-            {catalog.map((c) => (
+            {failureCategories.map((c) => (
               <option key={c.category} value={c.category}>
                 {c.label}
               </option>

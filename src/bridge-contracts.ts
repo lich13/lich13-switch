@@ -612,14 +612,6 @@ export type CommandMap = {
     QuickPreferences
   >;
   hide_quick: Call<None, void>;
-  get_failure_policy_catalog: Call<
-    None,
-    import("./failure-policy-types").FailureCategory[]
-  >;
-  match_failure_policy: Call<
-    Client & { input: import("./failure-policy-types").FailureInput },
-    import("./failure-policy-types").FailureMatch
-  >;
   cancel_gateway_wait: Call<Client & { requestId: string }, boolean>;
   get_gateway: Call<Client, GatewayState>;
   get_gateway_freeze: Call<None, GatewayFreeze>;

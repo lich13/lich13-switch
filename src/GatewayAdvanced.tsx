@@ -1,20 +1,8 @@
 import { command } from "./bridge";
-import FailurePolicyCatalog from "./FailurePolicyCatalog";
-import FailurePolicySearch from "./FailurePolicySearch";
-import type {
-  FailureFocus,
-  FailureCategory,
-  FailureOrigin,
-  FailureParameter,
-} from "./failure-policy-types";
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
+import FailureRuleDialog from "./FailureRuleDialog";
+import { failureCategories, type FailureRule } from "./failure-policy-types";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   errorOf,
   type ClientId,
@@ -32,12 +20,8 @@ export default function Advanced({
   busy,
   save,
   children,
-  focusFailure,
-  onFailureHandled,
 }: {
   children?: ReactNode;
-  focusFailure?: FailureFocus | null;
-  onFailureHandled?: () => void;
   clientId: ClientId;
   onDirtyChange?: (dirty: boolean) => void;
   settings: GatewaySettings;
@@ -50,40 +34,6 @@ export default function Advanced({
     [error, setError] = useState("");
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const [editing, setEditing] = useState(false);
-  const [allOpen, setAllOpen] = useState(false);
-  const [catalog, setCatalog] = useState<FailureCategory[]>([]);
-  const [catalogError, setCatalogError] = useState("");
-  const [origin, setOrigin] = useState<FailureOrigin>("upstream");
-  const [highlight, setHighlight] = useState<FailureParameter[]>([]);
-  const selectedPolicy = useCallback(
-    (next: FailureOrigin, keys: FailureParameter[]) => {
-      setOrigin(next);
-      setHighlight(keys);
-      setAllOpen(true);
-    },
-    [],
-  );
-  useEffect(() => {
-    let active = true;
-    void command("get_failure_policy_catalog")
-      .then((items) => {
-        if (active) setCatalog(items ?? []);
-      })
-      .catch((e) => {
-        if (active) setCatalogError(errorOf(e).message);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-  const policySection = useRef<HTMLDetailsElement>(null);
-  useEffect(() => {
-    if (focusFailure && policySection.current) {
-      policySection.current.open = true;
-      setAllOpen(false);
-      policySection.current.scrollIntoView?.({ block: "start" });
-    }
-  }, [focusFailure]);
   const baseRevision = useRef<EditRevision>(revision);
   useEffect(() => {
     if (!editing) {
@@ -158,14 +108,7 @@ export default function Advanced({
   ) => (
     <div className="policy-parameters">
       {items.map(([key, label]) => (
-        <label
-          key={key}
-          className={
-            highlight.includes(key)
-              ? "policy-parameter is-relevant"
-              : "policy-parameter"
-          }
-        >
+        <label key={key} className="policy-parameter">
           <span>{label.split(" / ")[0]}</span>
           <input
             aria-label={label}
@@ -241,126 +184,23 @@ export default function Advanced({
   );
   return (
     <section className="gateway-settings">
-      <details className="advanced" ref={policySection}>
+      <details className="advanced">
         <summary>故障策略</summary>
-        <FailurePolicySearch
+        <FailureRules
           clientId={clientId}
           rules={settings.customFailureRules ?? []}
           revision={revision}
-          focus={focusFailure}
-          consumed={onFailureHandled}
-          catalog={catalog}
-          onSelection={selectedPolicy}
         />
-        <details
-          className="failure-all"
-          open={allOpen}
-          onToggle={(e) => setAllOpen(e.currentTarget.open)}
-        >
-          <summary>全部规则与参数</summary>
-          {catalogError && (
-            <div role="alert" className="form-error">
-              {catalogError}
-            </div>
-          )}
-          <div className="policy-tabs" role="tablist" aria-label="故障策略来源">
-            {(["upstream", "gateway"] as const).map((value) => (
-              <button
-                type="button"
-                role="tab"
-                key={value}
-                data-origin={value}
-                aria-selected={origin === value}
-                onClick={() => setOrigin(value)}
-              >
-                {value === "upstream" ? "上游报错策略" : "网关内部策略"}
-              </button>
-            ))}
-          </div>
-          {allOpen && (
-            <>
-              <div
-                role="tabpanel"
-                aria-label={
-                  origin === "upstream" ? "上游报错策略" : "网关内部策略"
-                }
-              >
-                {origin === "upstream" ? (
-                  groups.map((group) => (
-                    <section
-                      className="failure-policy-group"
-                      data-policy-group={group.tone}
-                      key={group.name}
-                    >
-                      <h3>
-                        {group.name === "服务与网络故障"
-                          ? "服务与请求错误"
-                          : group.name}
-                      </h3>
-                      <FailurePolicyCatalog
-                        group={group.name}
-                        catalog={catalog.filter((c) => c.origin !== "gateway")}
-                        clientId={clientId}
-                        rules={settings.customFailureRules ?? []}
-                        revision={revision}
-                      />
-                      {group.name !== "服务与网络故障" && fields(group.fields)}
-                    </section>
-                  ))
-                ) : (
-                  <section
-                    className="failure-policy-group"
-                    data-policy-group="gateway"
-                  >
-                    <FailurePolicyCatalog
-                      catalog={catalog.filter((c) => c.origin === "gateway")}
-                      clientId={clientId}
-                      rules={[]}
-                      revision={revision}
-                    />
-                    {fields(
-                      groups
-                        .flatMap((g) => g.fields)
-                        .filter(([key]) =>
-                          [
-                            "queueSeconds",
-                            "maxWaiting",
-                            "connectSeconds",
-                            "firstByteSeconds",
-                            "idleSeconds",
-                            "websocketRetrySeconds",
-                          ].includes(key),
-                        ),
-                    )}
-                  </section>
-                )}
-              </div>
-              <section
-                className="failure-policy-group policy-shared"
-                data-policy-group="shared"
-                aria-label="共享重试与熔断参数"
-              >
-                <h3>共享重试与熔断参数</h3>
-                {fields(
-                  groups
-                    .flatMap((g) => g.fields)
-                    .filter(([key]) =>
-                      [
-                        "maxRetries",
-                        "retryBudgetSeconds",
-                        "failureThreshold",
-                        "transientFailureThreshold",
-                        "successThreshold",
-                        "cooldownSeconds",
-                        "errorRate",
-                        "minRequests",
-                      ].includes(key),
-                    ),
-                )}
-              </section>
-            </>
-          )}
-        </details>
+        {groups.map((group) => (
+          <section
+            className="failure-policy-group"
+            data-policy-group={group.tone}
+            key={group.name}
+          >
+            <h3>{group.name}</h3>
+            {fields(group.fields)}
+          </section>
+        ))}
       </details>
       <details className="advanced">
         <summary>高级设置</summary>
@@ -396,5 +236,86 @@ export default function Advanced({
         </button>
       </form>
     </section>
+  );
+}
+
+function FailureRules({
+  clientId,
+  rules,
+  revision,
+}: {
+  clientId: ClientId;
+  rules: FailureRule[];
+  revision: string;
+}) {
+  const [editing, setEditing] = useState<Partial<FailureRule> | null>(null),
+    [deleting, setDeleting] = useState(""),
+    [error, setError] = useState("");
+  return (
+    <div className="failure-catalog">
+      {error && (
+        <div role="alert" className="form-error">
+          {error}
+        </div>
+      )}
+      <h3>自定义规则</h3>
+      {rules.map((rule) => (
+        <div className="custom-failure-rule" key={rule.id}>
+          <span>{rule.matchKind === "code" ? "错误码" : "关键词"}</span>
+          <code>{rule.value}</code>
+          <span>{categoryLabel(rule.category)}</span>
+          <button
+            className="icon-button"
+            aria-label={`编辑 ${rule.value}`}
+            onClick={() => setEditing(rule)}
+          >
+            <Pencil size={14} />
+          </button>
+          <button
+            className="icon-button"
+            disabled={deleting !== ""}
+            aria-label={`删除 ${rule.value}`}
+            onClick={async () => {
+              setDeleting(rule.id);
+              setError("");
+              try {
+                await command("update_gateway", {
+                  clientId,
+                  expectedRevision: revision,
+                  edit: { op: "deleteFailureRule", id: rule.id },
+                });
+              } catch (e) {
+                setError(errorOf(e).message);
+              } finally {
+                setDeleting("");
+              }
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="text-button failure-add"
+        onClick={() => setEditing({})}
+      >
+        <Plus size={14} />
+        添加匹配条件
+      </button>
+      {editing && (
+        <FailureRuleDialog
+          clientId={clientId}
+          initial={editing}
+          close={() => setEditing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function categoryLabel(category: string): string {
+  return (
+    failureCategories.find((c) => c.category === category)?.label ?? category
   );
 }

@@ -117,43 +117,6 @@ it("starts a fresh visible request and ignores an older hidden-window response",
   ).toBeInTheDocument();
 });
 
-it("opens a policy from either the row or drawer with the original error fields", async () => {
-  const user = userEvent.setup();
-  const open = vi.fn();
-  eventRecords = [
-    {
-      ...record,
-      clientId: "claude",
-      details: {
-        upstreamCode: "fixture_failure",
-        upstreamType: "rate_limit_error",
-        upstreamReason: "RATE_LIMIT_EXCEEDED",
-        parameter: "model",
-        message: "fixture failure message",
-        errorBasis: "rpm",
-      },
-    },
-  ];
-  render(<EventLog onOpenPolicy={open} />);
-  await user.click(await screen.findByRole("button", { name: "查看策略" }));
-  expect(open).toHaveBeenLastCalledWith({
-    clientId: "claude",
-    recordedCategory: "rpm",
-    input: {
-      code: "fixture_failure",
-      message: "fixture failure message",
-      status: 404,
-      upstreamType: "rate_limit_error",
-      upstreamReason: "RATE_LIMIT_EXCEEDED",
-      parameter: "model",
-    },
-  });
-  await user.click(screen.getByRole("button", { name: "上游 RPM 限制" }));
-  const drawer = await screen.findByRole("dialog");
-  await user.click(within(drawer).getByRole("button", { name: "查看策略" }));
-  expect(open).toHaveBeenCalledTimes(2);
-});
-
 describe("event log", () => {
   it("filters by client, provider, level, reason and time range", async () => {
     const user = userEvent.setup();
@@ -512,11 +475,8 @@ it("separates origins, resets pagination, and hides policy actions for internal 
           : record;
     return original(name, args);
   });
-  const open = vi.fn();
-  render(<EventLog onOpenPolicy={open} />);
-  expect(
-    await screen.findByRole("button", { name: "查看策略" }),
-  ).toBeInTheDocument();
+  render(<EventLog />);
+  await screen.findByRole("button", { name: "下一页" });
   await user.click(screen.getByRole("button", { name: "下一页" }));
   await user.click(screen.getByRole("tab", { name: "网关内部" }));
   await waitFor(() =>
@@ -527,14 +487,8 @@ it("separates origins, resets pagination, and hides policy actions for internal 
   const detail = await screen.findByRole("button", {
     name: "熔断",
   });
-  expect(
-    screen.queryByRole("button", { name: "查看策略" }),
-  ).not.toBeInTheDocument();
   await user.click(detail);
   const dialog = await screen.findByRole("dialog");
-  expect(
-    within(dialog).queryByRole("button", { name: "查看策略" }),
-  ).not.toBeInTheDocument();
   expect(
     within(dialog).queryByRole("button", { name: "加入故障规则" }),
   ).not.toBeInTheDocument();
@@ -547,9 +501,6 @@ it("separates origins, resets pagination, and hides policy actions for internal 
   expect(
     await screen.findByText(/stream was interrupted after 5m0s/),
   ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "查看策略" }),
-  ).not.toBeInTheDocument();
 });
 
 it("opens the internal tab and clears incompatible filters when a gateway event is focused", async () => {

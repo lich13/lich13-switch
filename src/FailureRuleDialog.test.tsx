@@ -4,11 +4,10 @@ import { expect, it, vi } from "vitest";
 const mock = vi.hoisted(() => ({ command: vi.fn() }));
 vi.mock("./bridge", () => ({ command: mock.command }));
 import FailureRuleDialog from "./FailureRuleDialog";
-import { failureCatalogPreview, gatewayDemo } from "./gateway-preview";
+import { gatewayDemo } from "./gateway-preview";
 it("preserves a rule draft on conflict and retries only the rule edit", async () => {
   let writes = 0;
   mock.command.mockImplementation(async (name: string) => {
-    if (name === "get_failure_policy_catalog") return failureCatalogPreview;
     if (name === "get_gateway")
       return { ...gatewayDemo, revision: writes ? "fresh" : "original" };
     if (name === "update_gateway") {

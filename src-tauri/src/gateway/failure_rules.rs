@@ -26,83 +26,15 @@ impl Rule {
             || self.value.trim().is_empty()
             || self.value.len() > 256
             || self.value != self.value.trim()
-            || !valid_rule_keyword(&self.value)
             || matches!(self.category, Unknown)
         {
             return Err(AppError::new(
                 code::SETTINGS,
-                "规则需要有效类别及不含敏感信息的错误码或关键词",
+                "规则需要有效类别及非空的错误码或关键词",
             ));
         }
         Ok(())
     }
-}
-fn valid_rule_keyword(value: &str) -> bool {
-    if value.chars().any(|c| {
-        c.is_control() || matches!(c, '\"' | '\'' | '`' | '“' | '”' | '‘' | '’' | '「' | '」')
-    }) {
-        return false;
-    }
-    let lower = value.to_lowercase();
-    if [
-        "prompt",
-        "request body",
-        "request_body",
-        "messages:",
-        "messages=",
-        "content:",
-        "content=",
-        "input:",
-        "input=",
-        "request payload",
-        "query=",
-        "<script",
-        "<!doctype",
-        "<html",
-        "-----begin",
-        "bearer",
-        "authorization",
-        "api_key",
-        "apikey",
-        "api-key",
-        "password",
-        "cookie",
-        "id_token",
-        "access_token",
-        "refresh_token",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-    {
-        return false;
-    }
-    for token in value.split_whitespace() {
-        let s = token.trim_matches(|c: char| "()[]{}<>,;".contains(c));
-        let lower = s.to_lowercase();
-        if s.contains('@')
-            || s.contains("://")
-            || s.contains('/')
-            || s.contains('\\')
-            || s.contains("sk-")
-            || s.starts_with("eyJ")
-            || s.len() > 100
-            || s.parse::<std::net::IpAddr>().is_ok()
-            || s.split(':')
-                .next()
-                .is_some_and(|v| v.parse::<std::net::IpAddr>().is_ok())
-            || [
-                ".com", ".net", ".org", ".xyz", ".invalid", ".cn", ".io", ".dev", ".app", ".ai",
-            ]
-            .iter()
-            .any(|v| lower.contains(v))
-            || s.as_bytes()
-                .windows(24)
-                .any(|w| w.iter().all(u8::is_ascii_hexdigit))
-        {
-            return false;
-        }
-    }
-    true
 }
 pub fn validate(rules: &[Rule]) -> Result<()> {
     for (i, rule) in rules.iter().enumerate() {
@@ -124,373 +56,299 @@ pub fn validate(rules: &[Rule]) -> Result<()> {
 pub struct Code {
     pub value: &'static str,
     pub category: ErrorBasis,
-    pub platform: &'static str,
 }
 pub(super) const CODES: &[Code] = &[
     Code {
         value: "credit_balance_exhausted",
         category: Billing,
-        platform: "OpenAI",
     },
     Code {
         value: "organization_spend_limit_exceeded",
         category: Billing,
-        platform: "OpenAI",
     },
     Code {
         value: "project_spend_limit_exceeded",
         category: Billing,
-        platform: "OpenAI",
     },
     Code {
         value: "organization_usage_limit_exceeded",
         category: Billing,
-        platform: "OpenAI",
     },
     Code {
         value: "insufficient_quota",
         category: Billing,
-        platform: "OpenAI",
     },
     Code {
         value: "insufficient_balance",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "insufficient_account_balance",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "account_balance_insufficient",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "insufficient_user_quota",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "balance_exhausted",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "balance_not_enough",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "credits_exhausted",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "credit_limit_exceeded",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "credit_balance_too_low",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "billing_hard_limit_reached",
         category: Billing,
-        platform: "OpenAI",
     },
     Code {
         value: "billing_error",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "enforced_spend_limit_reached",
         category: QuotaExhausted,
-        platform: "Claude",
     },
     Code {
         value: "quota_exceeded",
         category: QuotaExhausted,
-        platform: "通用兼容",
     },
     Code {
         value: "api_key_quota_exhausted",
         category: Billing,
-        platform: "通用兼容",
     },
     Code {
         value: "invalid_api_key",
         category: Authentication,
-        platform: "OpenAI",
     },
     Code {
         value: "api_key_expired",
         category: Authentication,
-        platform: "通用兼容",
     },
     Code {
         value: "api_key_revoked",
         category: Authentication,
-        platform: "通用兼容",
     },
     Code {
         value: "api_key_disabled",
         category: Authentication,
-        platform: "通用兼容",
     },
     Code {
         value: "authentication_error",
         category: Authentication,
-        platform: "Claude",
     },
     Code {
         value: "account_disabled",
         category: Authentication,
-        platform: "通用兼容",
     },
     Code {
         value: "account_deactivated",
         category: Authentication,
-        platform: "通用兼容",
     },
     Code {
         value: "account_suspended",
         category: Authentication,
-        platform: "通用兼容",
     },
     Code {
         value: "permission_denied",
         category: Permission,
-        platform: "通用兼容",
     },
     Code {
         value: "permission_error",
         category: Permission,
-        platform: "Claude",
     },
     Code {
         value: "ip_not_authorized",
         category: Permission,
-        platform: "通用兼容",
     },
     Code {
         value: "unsupported_country_region_territory",
         category: Permission,
-        platform: "通用兼容",
     },
     Code {
         value: "tokens_per_minute_limit_exceeded",
         category: Tpm,
-        platform: "通用兼容",
     },
     Code {
         value: "tpm_limit_exceeded",
         category: Tpm,
-        platform: "通用兼容",
     },
     Code {
         value: "input_token_rate_limit_exceeded",
         category: InputTokens,
-        platform: "通用兼容",
     },
     Code {
         value: "itpm_limit_exceeded",
         category: InputTokens,
-        platform: "通用兼容",
     },
     Code {
         value: "output_token_rate_limit_exceeded",
         category: OutputTokens,
-        platform: "通用兼容",
     },
     Code {
         value: "otpm_limit_exceeded",
         category: OutputTokens,
-        platform: "通用兼容",
     },
     Code {
         value: "requests_per_second_limit_exceeded",
         category: Rps,
-        platform: "通用兼容",
     },
     Code {
         value: "rps_limit_exceeded",
         category: Rps,
-        platform: "通用兼容",
     },
     Code {
         value: "rpm_limit_exceeded",
         category: Rpm,
-        platform: "通用兼容",
     },
     Code {
         value: "group_rpm_exceeded",
         category: Rpm,
-        platform: "通用兼容",
     },
     Code {
         value: "user_rpm_exceeded",
         category: Rpm,
-        platform: "通用兼容",
     },
     Code {
         value: "requests_per_minute_limit_exceeded",
         category: Rpm,
-        platform: "通用兼容",
     },
     Code {
         value: "concurrency_limit_exceeded",
         category: Concurrency,
-        platform: "通用兼容",
     },
     Code {
         value: "too_many_concurrent_requests",
         category: Concurrency,
-        platform: "通用兼容",
     },
     Code {
         value: "connection_limit_exceeded",
         category: Concurrency,
-        platform: "通用兼容",
     },
     Code {
         value: "slow_down",
         category: Acceleration,
-        platform: "通用兼容",
     },
     Code {
         value: "acceleration_limit_exceeded",
         category: Acceleration,
-        platform: "通用兼容",
     },
     Code {
         value: "spend_rate_limit_exceeded",
         category: SpendingRate,
-        platform: "通用兼容",
     },
     Code {
         value: "spending_rate_limit_exceeded",
         category: SpendingRate,
-        platform: "通用兼容",
     },
     Code {
         value: "usage_limit_exceeded",
         category: UsageLimit,
-        platform: "通用兼容",
     },
     Code {
         value: "usage_limit_reached",
         category: UsageLimit,
-        platform: "通用兼容",
     },
     Code {
         value: "overloaded_error",
         category: Capacity,
-        platform: "Claude",
     },
     Code {
         value: "server_is_overloaded",
         category: Capacity,
-        platform: "通用兼容",
     },
     Code {
         value: "model_capacity_exceeded",
         category: Capacity,
-        platform: "通用兼容",
     },
     Code {
         value: "context_length_exceeded",
         category: RequestTooLarge,
-        platform: "OpenAI",
     },
     Code {
         value: "request_too_large",
         category: RequestTooLarge,
-        platform: "Claude",
     },
     Code {
         value: "max_tokens_exceeded",
         category: RequestTooLarge,
-        platform: "通用兼容",
     },
     Code {
         value: "invalid_request",
         category: InvalidRequest,
-        platform: "通用兼容",
     },
     Code {
         value: "invalid_request_error",
         category: InvalidRequest,
-        platform: "通用兼容",
     },
     Code {
         value: "unsupported_endpoint",
         category: InvalidRequest,
-        platform: "通用兼容",
     },
     Code {
         value: "unsupported_protocol",
         category: InvalidRequest,
-        platform: "通用兼容",
     },
     Code {
         value: "conflict",
         category: InvalidRequest,
-        platform: "通用兼容",
     },
     Code {
         value: "api_error",
         category: ServiceError,
-        platform: "Claude",
     },
     Code {
         value: "server_error",
         category: ServiceError,
-        platform: "通用兼容",
     },
     Code {
         value: "internal_error",
         category: ServiceError,
-        platform: "通用兼容",
     },
     Code {
         value: "internal_server_error",
         category: ServiceError,
-        platform: "通用兼容",
     },
     Code {
         value: "upstream_stream_read_error",
         category: ServiceError,
-        platform: "通用兼容",
     },
     Code {
         value: "upstream_http2_stream_error",
         category: ServiceError,
-        platform: "通用兼容",
     },
     Code {
         value: "content_filter",
         category: SafetyRejection,
-        platform: "通用兼容",
     },
     Code {
         value: "content_policy_violation",
         category: SafetyRejection,
-        platform: "OpenAI",
     },
     Code {
         value: "safety_error",
         category: SafetyRejection,
-        platform: "通用兼容",
     },
     Code {
         value: "cyber_policy",
         category: SafetyRejection,
-        platform: "通用兼容",
     },
 ];
 pub(super) const MSG_0: &[&str] = &[
@@ -768,66 +626,38 @@ pub(super) const PERMANENT_CODES: &[&str] = &[
     "USER_PLATFORM_MONTHLY_QUOTA_EXHAUSTED",
 ];
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeywordCondition {
-    pub all_of: Vec<Vec<&'static str>>,
-    pub exact: bool,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Category {
-    pub category: ErrorBasis,
-    pub label: &'static str,
-    pub group: &'static str,
-    pub action: &'static str,
-    pub codes: Vec<&'static Code>,
-    pub keywords: Vec<KeywordCondition>,
-    pub protocols: [&'static str; 3],
-    pub excluded_keywords: Vec<&'static str>,
-    pub conditions: Vec<String>,
-    pub statuses: Vec<&'static str>,
-}
 pub(super) const STATUS_CODES: &[Code] = &[
     Code {
         value: "RESOURCE_EXHAUSTED",
         category: UnknownRateLimit,
-        platform: "Gemini",
     },
     Code {
         value: "UNAUTHENTICATED",
         category: Authentication,
-        platform: "Gemini",
     },
     Code {
         value: "PERMISSION_DENIED",
         category: Permission,
-        platform: "Gemini",
     },
     Code {
         value: "INVALID_ARGUMENT",
         category: InvalidRequest,
-        platform: "Gemini",
     },
     Code {
         value: "FAILED_PRECONDITION",
         category: InvalidRequest,
-        platform: "Gemini",
     },
     Code {
         value: "INTERNAL",
         category: ServiceError,
-        platform: "Gemini",
     },
     Code {
         value: "UNAVAILABLE",
         category: ServiceError,
-        platform: "Gemini",
     },
     Code {
         value: "DEADLINE_EXCEEDED",
         category: ServiceError,
-        platform: "Gemini",
     },
 ];
 pub(super) const LIMIT_HEADERS: &[(&str, ErrorBasis)] = &[
@@ -839,206 +669,3 @@ pub(super) const LIMIT_HEADERS: &[(&str, ErrorBasis)] = &[
     ("x-ratelimit-remaining-requests", Rpm),
     ("anthropic-ratelimit-requests-remaining", Rpm),
 ];
-pub fn catalog() -> Vec<Category> {
-    let mut result = Vec::new();
-    for (category, label, group, action) in [
-        (Rpm, "请求频率 RPM", "限流与容量", "按请求窗口等待"),
-        (Rps, "请求频率 RPS", "限流与容量", "按请求窗口等待"),
-        (Tpm, "Token 速率", "限流与容量", "按 Token 窗口等待"),
-        (
-            InputTokens,
-            "输入 Token 速率",
-            "限流与容量",
-            "按输入窗口等待",
-        ),
-        (
-            OutputTokens,
-            "输出 Token 速率",
-            "限流与容量",
-            "按输出窗口等待",
-        ),
-        (Concurrency, "并发与连接数", "限流与容量", "退避后重新准入"),
-        (Acceleration, "突发与增长过快", "限流与容量", "渐进退避"),
-        (SpendingRate, "短时消费速率", "限流与容量", "按短时窗口等待"),
-        (Capacity, "容量不足", "限流与容量", "已有会话优先原供应商"),
-        (
-            UnknownRateLimit,
-            "未分类限流",
-            "限流与容量",
-            "在总预算内退避",
-        ),
-        (UsageLimit, "待核验用量限制", "限流与容量", "核验额度并等待"),
-        (
-            QuotaExhausted,
-            "周期额度耗尽",
-            "额度与认证",
-            "跳过候选，到期按需探测",
-        ),
-        (
-            Billing,
-            "余额与消费硬上限",
-            "额度与认证",
-            "跳过候选，冷却后探测",
-        ),
-        (
-            Authentication,
-            "认证失败",
-            "额度与认证",
-            "跳过供应商，检查凭据",
-        ),
-        (Permission, "权限与访问限制", "额度与认证", "隔离受影响范围"),
-        (
-            ModelUnavailable,
-            "模型不可用",
-            "额度与认证",
-            "仅隔离对应模型",
-        ),
-        (ServiceError, "服务异常", "服务与网络故障", "有限重试与熔断"),
-        (
-            InvalidRequest,
-            "请求或协议错误",
-            "服务与网络故障",
-            "返回原因",
-        ),
-        (
-            RequestTooLarge,
-            "单次请求超限",
-            "服务与网络故障",
-            "返回原因，不缩减请求",
-        ),
-        (
-            SafetyRejection,
-            "安全拒绝",
-            "服务与网络故障",
-            "返回原因，不换商绕过",
-        ),
-    ] {
-        let any = |words: &[&'static str]| KeywordCondition {
-            all_of: vec![words.to_vec()],
-            exact: false,
-        };
-        let mut keywords = match category {
-            Rpm => vec![any(RPM_WORDS)],
-            Rps => vec![any(MSG_12)],
-            Tpm => vec![any(MSG_10)],
-            InputTokens => vec![any(MSG_8)],
-            OutputTokens => vec![any(MSG_9)],
-            Concurrency => vec![any(MSG_11)],
-            Acceleration => vec![any(MSG_13)],
-            SpendingRate => vec![any(MSG_4)],
-            Capacity => vec![
-                any(MSG_14),
-                KeywordCondition {
-                    all_of: vec![vec!["capacity"]],
-                    exact: true,
-                },
-            ],
-            UnknownRateLimit => vec![any(MSG_16)],
-            UsageLimit => vec![any(MSG_15)],
-            QuotaExhausted => vec![any(QUOTA_WORDS), any(MSG_5)],
-            Billing => vec![any(BILLING_WORDS)],
-            Authentication => vec![any(MSG_6)],
-            Permission => vec![any(MSG_7)],
-            ModelUnavailable => vec![
-                KeywordCondition {
-                    all_of: vec![vec!["model"], MODEL_EN.to_vec()],
-                    exact: false,
-                },
-                KeywordCondition {
-                    all_of: vec![vec!["模型"], MODEL_ZH.to_vec()],
-                    exact: false,
-                },
-            ],
-            RequestTooLarge => vec![
-                any(MSG_0),
-                KeywordCondition {
-                    all_of: vec![MSG_1.to_vec(), MSG_2.to_vec()],
-                    exact: false,
-                },
-            ],
-            SafetyRejection => vec![any(MSG_3)],
-            _ => vec![],
-        };
-        if category == QuotaExhausted {
-            keywords.push(KeywordCondition {
-                all_of: vec![PERMANENT_CODES.to_vec()],
-                exact: true,
-            });
-        }
-        if category == ModelUnavailable {
-            keywords.push(KeywordCondition {
-                all_of: vec![MODEL_CODES.to_vec()],
-                exact: true,
-            });
-        }
-        let mut conditions: Vec<_> = LIMIT_HEADERS
-            .iter()
-            .filter(|(_, basis)| *basis == category)
-            .map(|(name, _)| format!("{name} = 0"))
-            .collect();
-        conditions.extend(
-            (match category {
-                Rpm => vec![
-                    "Gemini QuotaFailure：quotaId / quotaMetric 含 request 与 perminute",
-                    "兼容网关：完整的分钟请求限制消息，次数与分钟数均为正整数",
-                ],
-                Rps => vec!["Gemini QuotaFailure：quotaId / quotaMetric 含 persecond"],
-                InputTokens => vec!["Gemini QuotaFailure：指标同时含 input 与 token"],
-                OutputTokens => vec!["Gemini QuotaFailure：指标同时含 output 与 token"],
-                Tpm => vec!["Gemini QuotaFailure：指标含 token，且未命中输入、输出或周期额度条件"],
-                QuotaExhausted => vec![
-                    "Claude：details.error_code = enforced_spend_limit_reached",
-                    "Gemini QuotaFailure：quotaValue = 0，或指标含 perday / perweek / permonth",
-                ],
-                SpendingRate => vec!["Gemini QuotaFailure：quotaId / quotaMetric 含 spend"],
-                ModelUnavailable => vec![
-                    "Claude：type = not_found_error 且 message 以 model: 开头",
-                    "排除明确的容量或账号故障",
-                ],
-                UnknownRateLimit => vec![
-                    "Claude：rate_limit_error 需要进一步判断具体原因",
-                    "Gemini：RESOURCE_EXHAUSTED 需要进一步判断具体原因",
-                ],
-                Permission => vec!["param = model 或明确模型证据时仅隔离模型"],
-                _ => vec![],
-            })
-            .into_iter()
-            .map(String::from),
-        );
-        let statuses = match category {
-            UnknownRateLimit => vec!["429"],
-            Authentication => vec!["401"],
-            Billing => vec!["402"],
-            Permission => vec!["403"],
-            RequestTooLarge => vec!["413", "414"],
-            InvalidRequest => vec!["400", "405", "406", "409", "415", "422", "426", "501"],
-            ServiceError => vec!["500", "502–599"],
-            _ => vec![],
-        };
-        result.push(Category {
-            category,
-            label,
-            group,
-            action,
-            codes: CODES
-                .iter()
-                .chain(STATUS_CODES)
-                .filter(|c| c.category == category)
-                .collect(),
-            keywords,
-            protocols: [
-                "HTTP 错误响应",
-                "SSE 错误事件",
-                "Responses WebSocket 错误帧",
-            ],
-            excluded_keywords: QUOTA_NEGATIVES
-                .iter()
-                .chain(if category == Rpm { RPM_NEGATIVES } else { &[] })
-                .copied()
-                .collect(),
-            conditions,
-            statuses,
-        });
-    }
-    result
-}

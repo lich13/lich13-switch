@@ -1176,44 +1176,6 @@ fn get_gateway(
     r.gateway(client_id).try_view()
 }
 #[tauri::command]
-fn get_failure_policy_catalog() -> Vec<gateway::failure_match::CatalogEntry> {
-    gateway::failure_match::catalog()
-}
-#[tauri::command]
-async fn match_failure_policy(
-    client_id: gateway::ClientId,
-    mut input: gateway::failure_match::Input,
-    r: tauri::State<'_, Arc<Runtime>>,
-) -> Result<gateway::failure_match::Match> {
-    let diagnostics = r.diagnostics.clone();
-    let gateway = r.gateway(client_id).clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Some(id) = input.event_id.as_deref() {
-            let event = diagnostics
-                .detail(id)
-                .ok_or_else(|| AppError::new(code::LOG_READ, "日志已过期或不存在"))?;
-            if event.record.client_id != Some(client_id.into()) {
-                return Err(AppError::new(code::LOG_READ, "日志客户端不匹配"));
-            }
-            input.status = event.record.status;
-            if let Some(raw) = diagnostics.raw(id)? {
-                if raw.base64 {
-                    return Err(AppError::new(
-                        code::LOG_READ,
-                        "错误响应不是文本，请在日志中复制原始数据",
-                    ));
-                }
-                input.raw_response = Some(raw.body);
-                input.headers = Some(raw.headers);
-                input.event = raw.event;
-            }
-        }
-        gateway.match_failure_policy(input)
-    })
-    .await
-    .map_err(|_| AppError::new(code::LOG_READ, "错误策略查询失败"))?
-}
-#[tauri::command]
 fn cancel_gateway_wait(
     client_id: gateway::ClientId,
     request_id: String,
@@ -2115,8 +2077,6 @@ pub fn run() {
             get_gateway_freeze,
             set_gateway_frozen,
             cancel_gateway_wait,
-            get_failure_policy_catalog,
-            match_failure_policy,
             preview_grok_import,
             get_gateway_models,
             refresh_gateway_models,

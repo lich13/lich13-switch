@@ -32,23 +32,6 @@ pub fn headers(values: &hyper::HeaderMap) -> Vec<Header> {
         })
         .collect()
 }
-pub fn header_map(values: &[Header]) -> hyper::HeaderMap {
-    let mut result = hyper::HeaderMap::new();
-    for h in values {
-        let bytes = if h.base64 {
-            STANDARD.decode(&h.value).ok()
-        } else {
-            Some(h.value.as_bytes().to_vec())
-        };
-        if let (Ok(name), Some(Ok(value))) = (
-            h.name.parse::<hyper::header::HeaderName>(),
-            bytes.map(|b| hyper::header::HeaderValue::from_bytes(&b)),
-        ) {
-            result.append(name, value);
-        }
-    }
-    result
-}
 
 #[derive(Default)]
 pub struct Capture {

@@ -1,5 +1,4 @@
 import QuickFreeze from "./QuickFreeze";
-import type { FailureFocus } from "./failure-policy-types";
 import { flushTestPrompt } from "./provider-test-prompt";
 import { subscriptions } from "./subscriptions";
 import { confirmAction } from "./confirmation";
@@ -97,8 +96,6 @@ export default function App() {
   const dirtyRef = useRef(false),
     pageRef = useRef(page);
   const gatewayDirty = useRef(false);
-  const [focusFailure, setFocusFailure] = useState<FailureFocus | null>(null);
-  const failureHandled = useCallback(() => setFocusFailure(null), []);
   const usageDirty = useRef(false);
   const usageDraftChanged = useCallback((value: boolean) => {
     usageDirty.current = value;
@@ -142,23 +139,10 @@ export default function App() {
       // Clear stale requests on normal page navigation so returning to the
       // gateway never reopens a provider dialog.
       setFocusProvider(null);
-      setFocusFailure(null);
       if (next !== "config") setDirty(false);
     },
     [],
   );
-  const openFailurePolicy = useCallback(async (target: FailureFocus) => {
-    if (!(await flushTestPrompt())) return;
-    if (
-      (gatewayDirty.current || usageDirty.current || dirtyRef.current) &&
-      !(await confirmAction("查看故障策略会丢弃未保存的草稿。"))
-    )
-      return;
-    setPage("gateway");
-    setDirty(false);
-    setFocusProvider(null);
-    setFocusFailure(target);
-  }, []);
   useEffect(() => {
     const menus = () =>
       document.querySelectorAll<HTMLDetailsElement>(
@@ -246,7 +230,6 @@ export default function App() {
         return;
       if (disposed) return;
       setPage("gateway");
-      setFocusFailure(null);
       setDirty(false);
       setFocusProvider({
         ...p,
@@ -430,7 +413,6 @@ export default function App() {
             <EventLog
               focus={focusEvent}
               consumed={() => setFocusEvent(null)}
-              onOpenPolicy={openFailurePolicy}
             />
           </Suspense>
         ) : page === "accounts" ? (
@@ -733,8 +715,6 @@ export default function App() {
         ) : page === "gateway" ? (
           <Suspense fallback={<div className="empty">正在打开网关…</div>}>
             <Gateway
-              focusFailure={focusFailure}
-              onFailureHandled={failureHandled}
               quotaRefreshSeconds={state?.preferences.quotaRefreshSeconds ?? 60}
               focusProvider={focusProvider}
               onFocusHandled={() => setFocusProvider(null)}

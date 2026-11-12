@@ -1,6 +1,5 @@
 //! Shared classification, retry timing and health decisions for HTTP, SSE and WebSocket.
 //! Inspect explicit error envelopes only; never scan successful output for keywords.
-use super::failure_match::Source;
 use crate::events::{Details, ErrorBasis, HealthScope, Reason};
 use serde_json::Value;
 use std::time::Duration;
@@ -343,13 +342,6 @@ fn quota_details(error: &Value) -> Option<(ErrorBasis, Option<HealthScope>)> {
 }
 
 fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
-    let (basis, scope, _) = classification_trace(error);
-    (basis, scope)
-}
-
-fn classification_trace(
-    error: &Value,
-) -> (Option<ErrorBasis>, Option<HealthScope>, Option<Source>) {
     let explicit = structured_codes(error)
         .find_map(specific_code_kind)
         .or_else(|| {
@@ -358,12 +350,11 @@ fn classification_trace(
                 .and_then(|_| known_reason(error))
                 .as_deref()
                 .and_then(code_kind)
-        })
-        .map(|b| (b, Source::BuiltinCode));
+        });
     let quota = quota_details(error);
-    let explicit = explicit.or_else(|| explicit_type(error).map(|b| (b, Source::BuiltinType)));
+    let explicit = explicit.or_else(|| explicit_type(error));
     let matched = explicit
-        .or_else(|| quota.map(|q| (q.0, Source::BuiltinCondition)))
+        .or_else(|| quota.map(|q| q.0))
         .or_else(|| {
             error
                 .as_str()
@@ -374,23 +365,15 @@ fn classification_trace(
                         .filter_map(|k| error.get(k).and_then(Value::as_str)),
                 )
                 .find_map(message_kind)
-                .map(|b| (b, Source::BuiltinMessage))
         })
-        .or_else(|| {
-            is_model(error).then_some((ErrorBasis::ModelUnavailable, Source::BuiltinCondition))
-        })
+        .or_else(|| is_model(error).then_some(ErrorBasis::ModelUnavailable))
         .or_else(|| {
             error
                 .get("type")
                 .and_then(Value::as_str)
                 .and_then(code_kind)
-                .map(|b| (b, Source::BuiltinType))
         })
-        .or_else(|| {
-            strings(error)
-                .find_map(message_kind)
-                .map(|b| (b, Source::BuiltinMessage))
-        })
+        .or_else(|| strings(error).find_map(message_kind))
         .or_else(|| {
             let status = error.get("status").or_else(|| error.get("code"))?;
             let number = status
@@ -410,15 +393,9 @@ fn classification_trace(
                             .map(|c| c.category)
                     })
                 })
-                .map(|b| (b, Source::Status))
         })
-        .or_else(|| {
-            structured_codes(error)
-                .find_map(code_kind)
-                .map(|b| (b, Source::BuiltinCode))
-        });
-    let basis = matched.map(|m| m.0);
-    let explicit = explicit.map(|m| m.0);
+        .or_else(|| structured_codes(error).find_map(code_kind));
+    let basis = matched;
     let scope = if quota.is_some() && (explicit.is_none() || quota.map(|q| q.0) == explicit) {
         quota.and_then(|q| q.1)
     } else if matches!(basis, Some(ErrorBasis::ModelUnavailable))
@@ -471,7 +448,7 @@ fn classification_trace(
     } else {
         None
     };
-    (basis, scope, matched.map(|m| m.1))
+    (basis, scope)
 }
 
 #[cfg(test)]
@@ -1237,95 +1214,4 @@ pub(super) fn details_with_rules(value: &Value, rules: &[super::failure_rules::R
         details.error_basis.get_or_insert(ErrorBasis::ServiceError);
     }
     details
-}
-
-pub(super) fn inspect_match_headers(
-    value: &Value,
-    status: Option<u16>,
-    headers: &hyper::HeaderMap,
-    rules: &[super::failure_rules::Rule],
-    catalog: &[super::failure_rules::Category],
-) -> (Details, Option<Source>, String) {
-    let mut details = match status {
-        Some(status) => http_value_with_rules(status, headers, value, rules).0,
-        None => details_with_headers(value, headers, rules).0,
-    };
-    // The live decision treats retryable HTTP failures without a finer basis as service failures.
-    if details.error_basis.is_none() && decision(status, &details).counted_failure {
-        details.error_basis = Some(ErrorBasis::ServiceError);
-    }
-    let Some(basis) = details.error_basis.filter(|b| *b != ErrorBasis::Unknown) else {
-        return (details, None, String::new());
-    };
-    if let Some(rule) = rules
-        .iter()
-        .find(|r| Some(&r.id) == details.custom_rule_id.as_ref())
-    {
-        let source = match rule.match_kind {
-            super::failure_rules::MatchKind::Code => Source::CustomCode,
-            super::failure_rules::MatchKind::Keyword => Source::CustomKeyword,
-        };
-        return (details, Some(source), rule.value.clone());
-    }
-    let error = envelope(value, status.is_some_and(|s| s >= 400), 0);
-    let trace = error.map(classification_trace);
-    let source = trace
-        .filter(|t| t.0 == Some(basis))
-        .and_then(|t| t.2)
-        .unwrap_or(Source::Status);
-    let evidence = match source {
-        Source::BuiltinCode => error
-            .and_then(|e| structured_codes(e).find(|c| code_kind(c) == Some(basis)))
-            .map(str::to_owned)
-            .unwrap_or_else(|| "内置错误码条件".into()),
-        Source::BuiltinType => details
-            .upstream_type
-            .clone()
-            .unwrap_or_else(|| "内置错误类型".into()),
-        Source::BuiltinCondition => "内置结构化条件".into(),
-        Source::BuiltinMessage => {
-            let text = error
-                .and_then(|e| strings(e).find(|s| message_kind(s) == Some(basis)))
-                .unwrap_or("")
-                .to_lowercase();
-            catalog
-                .iter()
-                .find(|c| c.category == basis)
-                .and_then(|c| {
-                    c.keywords.iter().find_map(|condition| {
-                        let words: Option<Vec<_>> = condition
-                            .all_of
-                            .iter()
-                            .map(|group| {
-                                group
-                                    .iter()
-                                    .find(|word| {
-                                        if condition.exact {
-                                            text.trim() == **word
-                                        } else {
-                                            text.contains(**word)
-                                        }
-                                    })
-                                    .copied()
-                            })
-                            .collect();
-                        words.map(|words| words.join(" 且 "))
-                    })
-                })
-                .unwrap_or_else(|| "内置消息判断条件".into())
-        }
-        Source::Status => {
-            if trace.is_some_and(|t| t.0 == Some(basis) && t.2 == Some(Source::Status)) {
-                details
-                    .upstream_code
-                    .as_ref()
-                    .map(|s| format!("错误封套状态：{s}"))
-                    .unwrap_or_else(|| "错误封套中的状态码".into())
-            } else {
-                status.map(|s| format!("HTTP {s}")).unwrap_or_default()
-            }
-        }
-        Source::CustomCode | Source::CustomKeyword => unreachable!(),
-    };
-    (details, Some(source), evidence)
 }

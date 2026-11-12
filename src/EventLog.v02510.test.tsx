@@ -97,8 +97,7 @@ beforeEach(() => {
 it("loads and copies the complete error, and opens policy by event ID without the shortened preview", async () => {
   const user = userEvent.setup();
   const write = vi.spyOn(navigator.clipboard, "writeText");
-  const openPolicy = vi.fn();
-  const record: EventRecord = {
+    const record: EventRecord = {
     ...structuredClone(baseRecord),
     reason: "capacity",
     level: "warning",
@@ -120,7 +119,7 @@ it("loads and copies the complete error, and opens policy by event ID without th
     base64: false,
     incomplete: null,
   };
-  render(<EventLog onOpenPolicy={openPolicy} />);
+  render(<EventLog />);
   const errorButton = await screen.findByRole("button", {
     name: "临时容量限制",
   });
@@ -140,19 +139,6 @@ it("loads and copies the complete error, and opens policy by event ID without th
   expect(mock.command).toHaveBeenCalledWith("get_app_event_raw", {
     id: record.id,
   });
-  await user.click(within(dialog).getByRole("button", { name: "查看策略" }));
-  expect(openPolicy).toHaveBeenCalledWith(
-    expect.objectContaining({
-      clientId: "codex",
-      recordedCategory: "capacity",
-      input: expect.objectContaining({
-        eventId: record.id,
-        status: 200,
-        message: undefined,
-        code: undefined,
-      }),
-    }),
-  );
 });
 
 it("renders historical v0.25.10 downstream status records with HTTP and byte evidence", async () => {

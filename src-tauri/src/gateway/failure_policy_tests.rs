@@ -115,18 +115,6 @@ fn complete_sse_and_websocket_errors_keep_wire_text_and_headers() {
             Some(Duration::from_secs(11))
         );
         assert_eq!(protocol.observation.error.error_basis, Some(B::Capacity));
-        let matched = super::failure_match::lookup(
-            &super::failure_match::Input {
-                status: Some(200),
-                raw_response: Some(wire),
-                event: raw.event.clone(),
-                headers: Some(raw.headers.clone()),
-                ..Default::default()
-            },
-            &[],
-        )
-        .unwrap();
-        assert_eq!(matched.category, Some(B::Capacity));
     }
     let wire = format!("{{ \"type\": \"error\", \"error\": {{\"message\":\"{MESSAGE}\"}} }}");
     let mut protocol = super::protocol::Protocol::new(true);
@@ -501,9 +489,8 @@ fn custom_rules_fill_only_ambiguous_evidence_and_code_precedes_keyword() {
     assert!(custom(Code, "rate_limit.exceeded", B::Rpm)
         .validate()
         .is_ok());
-    assert!(custom(Keyword, "api.example.invalid", B::Rpm)
-        .validate()
-        .is_err());
+    assert!(custom(Keyword, " padded ", B::Rpm).validate().is_err());
+    assert!(custom(Keyword, "", B::Rpm).validate().is_err());
 }
 #[test]
 fn custom_conflicts_keep_original_and_streams_share_the_snapshot() {
@@ -574,9 +561,7 @@ fn custom_rule_edits_are_isolated_persisted_and_preserve_settings() {
         .is_empty());
 }
 #[test]
-fn every_catalog_code_uses_the_same_classifier_and_categories_are_complete() {
-    let catalog = super::failure_rules::catalog();
-    assert_eq!(catalog.len(), 20);
+fn every_builtin_code_uses_the_same_classifier() {
     for entry in super::failure_rules::CODES {
         let value = json!({"error":{"code":entry.value}});
         assert_eq!(
@@ -585,7 +570,5 @@ fn every_catalog_code_uses_the_same_classifier_and_categories_are_complete() {
             "{}",
             entry.value
         );
-        assert!(catalog.iter().any(|c| c.category == entry.category
-            && c.codes.iter().any(|code| code.value == entry.value)));
     }
 }
