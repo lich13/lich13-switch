@@ -12,6 +12,32 @@ pub(super) fn transport_retry(received: bool, eligible: bool, failure: &str) -> 
     replay_policy::transport_retry(received, eligible) && failure != code::FIRST_BYTE_TIMEOUT
 }
 
+/// The current queue order without hard-denied provider versions, and the
+/// routes among it that speak the request path.
+pub(super) fn queue(
+    gateway: &super::Gateway,
+    pinned: Option<&str>,
+    hard_denied: &std::collections::HashSet<(String, String)>,
+    path: &str,
+) -> (Vec<String>, std::collections::HashMap<String, super::Route>) {
+    let mut ids = gateway.routing_ids(pinned);
+    ids.retain(|id| {
+        gateway
+            .route(id)
+            .is_some_and(|route| !hard_denied.contains(&(id.clone(), route.provider.version)))
+    });
+    let routes = ids
+        .iter()
+        .filter_map(|id| {
+            gateway
+                .route(id)
+                .filter(|route| route.accepts_protocol(path))
+                .map(|route| (id.clone(), route))
+        })
+        .collect();
+    (ids, routes)
+}
+
 pub(super) struct DeliveryGuard {
     pub delivery: Arc<Delivery>,
     pub complete: bool,

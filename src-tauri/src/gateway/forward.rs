@@ -270,6 +270,50 @@ pub(super) fn capacity_message(status: StatusCode, body: &[u8]) -> bool {
 pub(super) fn capacity_delay(settings: &Settings, retry: Option<Duration>) -> Duration {
     retry.unwrap_or(Duration::from_secs(settings.capacity_retry_seconds))
 }
+fn stopped() -> Response<WireBody> {
+    error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
+}
+/// A provider that failed transiently is retried in place while it stays
+/// available, or while its closed circuit only honours an upstream Retry-After.
+fn same_provider_delay(
+    retry_same: bool,
+    health: &super::Health,
+    retries: &mut u8,
+    retry_after: Option<Duration>,
+) -> Option<Duration> {
+    (retry_same
+        && (health.available
+            || (health.state == circuit::CircuitState::Closed
+                && health.cooldown_reason.as_deref() == Some("retry_after"))))
+    .then(|| routing::transient_delay(retries, retry_after))
+    .flatten()
+}
+/// Waits out a transient retry delay, then reports whether the same provider
+/// is still queued and available to be tried again first.
+async fn transient_wait(
+    gateway: &Gateway,
+    route: &Route,
+    reset_generation: u64,
+    delay: Duration,
+    max_waiting: usize,
+    pinned: Option<&str>,
+    requirement: &Requirement,
+) -> Result<bool, Rejected> {
+    gateway
+        .0
+        .admission
+        .wait_transient(
+            CapacitySource {
+                provider_id: route.provider.id.clone(),
+                reset_generation,
+            },
+            delay,
+            max_waiting,
+        )
+        .await?;
+    Ok(gateway.routing_ids(pinned).contains(&route.provider.id)
+        && route.health_for(requirement).available)
+}
 async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<WireBody> {
     let (settings, mode, mut ids, token, running) = {
         let s = gateway.request_state();
@@ -292,7 +336,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         )
     };
     if !running {
-        return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
+        return stopped();
     }
     if !super::listener::authorized(request.headers(), &token) {
         return error(
@@ -660,30 +704,17 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         Ok(false) => {}
                         Err(Rejected::Stopped) => {
                             failover.finish(super::failover::Exit::Stopped);
-                            return error(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                code::STOPPED,
-                                "网关已停止",
-                            );
+                            return stopped();
                         }
                         Err(_) => break,
                     }
 
-                    ids = gateway.routing_ids(pinned.as_deref());
-                    ids.retain(|id| {
-                        gateway.route(id).is_some_and(|route| {
-                            !hard_denied.contains(&(id.clone(), route.provider.version))
-                        })
-                    });
-                    routes = ids
-                        .iter()
-                        .filter_map(|id| {
-                            gateway
-                                .route(id)
-                                .filter(|r| r.accepts_protocol(parts.uri.path()))
-                                .map(|r| (id.clone(), r))
-                        })
-                        .collect();
+                    (ids, routes) = super::attempt::queue(
+                        &gateway,
+                        pinned.as_deref(),
+                        &hard_denied,
+                        parts.uri.path(),
+                    );
                     if ids.is_empty() {
                         break;
                     }
@@ -797,13 +828,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             last_error = cause.map(Into::into);
                         }
                         Ok(false) => {}
-                        Err(Rejected::Stopped) => {
-                            return error(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                code::STOPPED,
-                                "网关已停止",
-                            )
-                        }
+                        Err(Rejected::Stopped) => return stopped(),
                         Err(_) => {
                             return error(
                                 StatusCode::TOO_MANY_REQUESTS,
@@ -812,21 +837,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             )
                         }
                     }
-                    ids = gateway.routing_ids(pinned.as_deref());
-                    ids.retain(|id| {
-                        gateway.route(id).is_some_and(|r| {
-                            !hard_denied.contains(&(id.clone(), r.provider.version))
-                        })
-                    });
-                    routes = ids
-                        .iter()
-                        .filter_map(|id| {
-                            gateway
-                                .route(id)
-                                .filter(|r| r.accepts_protocol(parts.uri.path()))
-                                .map(|r| (id.clone(), r))
-                        })
-                        .collect();
+                    (ids, routes) = super::attempt::queue(
+                        &gateway,
+                        pinned.as_deref(),
+                        &hard_denied,
+                        parts.uri.path(),
+                    );
                     continue;
                 }
             }
@@ -959,7 +975,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     return response;
                 }
                 Err(Rejected::Stopped) => {
-                    return error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止");
+                    return stopped();
                 }
                 Err(Rejected::Model) => {
                     if attempted > 0 {
@@ -1309,16 +1325,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     } else {
                         admission.permits.failure(&settings, None);
                     }
-                    let health = route.health_for(&requirement);
-                    let retry_delay = if retry_same
-                        && (health.available
-                            || (health.state == circuit::CircuitState::Closed
-                                && health.cooldown_reason.as_deref() == Some("retry_after")))
-                    {
-                        routing::transient_delay(&mut transient_retries, None)
-                    } else {
-                        None
-                    };
+                    let retry_delay = same_provider_delay(
+                        retry_same,
+                        &route.health_for(&requirement),
+                        &mut transient_retries,
+                        None,
+                    );
                     if let Some(delay) = retry_delay {
                         event.action = Action::RetryingSame;
                         event.details.wait_seconds = Some(delay.as_secs());
@@ -1329,37 +1341,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     if let Some(delay) = retry_delay {
                         failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
                         drop(admission);
-                        match gateway
-                            .0
-                            .admission
-                            .wait_transient(
-                                CapacitySource {
-                                    provider_id: route.provider.id.clone(),
-                                    reset_generation,
-                                },
-                                delay,
-                                settings.max_waiting,
-                            )
-                            .await
+                        match transient_wait(
+                            &gateway,
+                            &route,
+                            reset_generation,
+                            delay,
+                            settings.max_waiting,
+                            pinned.as_deref(),
+                            &requirement,
+                        )
+                        .await
                         {
-                            Ok(()) => {}
+                            Ok(true) => {
+                                ids.insert(0, route.provider.id.clone());
+                                retry_owner = Some(route.provider.id.clone());
+                            }
+                            Ok(false) => {}
                             Err(Rejected::Stopped) => {
                                 failover.finish(super::failover::Exit::Stopped);
-                                return error(
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    code::STOPPED,
-                                    "网关已停止",
-                                );
+                                return stopped();
                             }
                             Err(_) => break,
-                        }
-                        if gateway
-                            .routing_ids(pinned.as_deref())
-                            .contains(&route.provider.id)
-                            && route.health_for(&requirement).available
-                        {
-                            ids.insert(0, route.provider.id.clone());
-                            retry_owner = Some(route.provider.id.clone());
                         }
                     }
                     continue;
@@ -1682,16 +1684,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 } else {
                     admission.permits.neutral(&settings);
                 }
-                let health = route.health_for(&requirement);
-                let retry_delay = if retry_same
-                    && (health.available
-                        || (health.state == circuit::CircuitState::Closed
-                            && health.cooldown_reason.as_deref() == Some("retry_after")))
-                {
-                    routing::transient_delay(&mut transient_retries, cooldown)
-                } else {
-                    None
-                };
+                let retry_delay = same_provider_delay(
+                    retry_same,
+                    &route.health_for(&requirement),
+                    &mut transient_retries,
+                    cooldown,
+                );
                 if let Some(delay) = retry_delay {
                     event.action = Action::RetryingSame;
                     event.details.wait_seconds = Some(delay.as_secs());
@@ -1727,38 +1725,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     // Keep the original spool, model, and response cursor untouched.
                     drop(admission);
                     request_budget.describe(None, model.as_deref(), "retry");
-                    match gateway
-                        .0
-                        .admission
-                        .wait_transient(
-                            CapacitySource {
-                                provider_id: route.provider.id.clone(),
-                                reset_generation,
-                            },
-                            delay,
-                            settings.max_waiting,
-                        )
-                        .await
+                    match transient_wait(
+                        &gateway,
+                        &route,
+                        reset_generation,
+                        delay,
+                        settings.max_waiting,
+                        pinned.as_deref(),
+                        &requirement,
+                    )
+                    .await
                     {
-                        Ok(()) => {}
+                        Ok(true) => {
+                            ids.insert(0, route.provider.id.clone());
+                            retry_owner = Some(route.provider.id.clone());
+                        }
+                        Ok(false) => {}
                         Err(Rejected::Stopped) => {
                             failover.finish(super::failover::Exit::Stopped);
-                            return error(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                code::STOPPED,
-                                "网关已停止",
-                            );
+                            return stopped();
                         }
                         Err(_) => break,
-                    }
-
-                    if gateway
-                        .routing_ids(pinned.as_deref())
-                        .contains(&route.provider.id)
-                        && route.health_for(&requirement).available
-                    {
-                        ids.insert(0, route.provider.id.clone());
-                        retry_owner = Some(route.provider.id.clone());
                     }
                 }
                 if capacity && !dedicated_search {
@@ -1994,37 +1981,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 if let Some(delay) = retry_delay {
                     failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
                     drop(admission);
-                    match gateway
-                        .0
-                        .admission
-                        .wait_transient(
-                            CapacitySource {
-                                provider_id: route.provider.id.clone(),
-                                reset_generation,
-                            },
-                            delay,
-                            settings.max_waiting,
-                        )
-                        .await
+                    match transient_wait(
+                        &gateway,
+                        &route,
+                        reset_generation,
+                        delay,
+                        settings.max_waiting,
+                        pinned.as_deref(),
+                        &requirement,
+                    )
+                    .await
                     {
-                        Ok(()) => {}
+                        Ok(true) => {
+                            ids.insert(0, route.provider.id.clone());
+                            retry_owner = Some(route.provider.id.clone());
+                        }
+                        Ok(false) => {}
                         Err(Rejected::Stopped) => {
                             failover.finish(super::failover::Exit::Stopped);
-                            return error(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                code::STOPPED,
-                                "网关已停止",
-                            );
+                            return stopped();
                         }
                         Err(_) => break,
-                    }
-                    if gateway
-                        .routing_ids(pinned.as_deref())
-                        .contains(&route.provider.id)
-                        && route.health_for(&requirement).available
-                    {
-                        ids.insert(0, route.provider.id.clone());
-                        retry_owner = Some(route.provider.id.clone());
                     }
                 } else if route.client_id == super::ClientId::Dsh && fallback != Action::TryingNext
                 {
@@ -2203,16 +2180,12 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 } else {
                     admission.permits.neutral(&settings);
                 }
-                let health = route.health_for(&requirement);
-                let retry_delay = if retry_same
-                    && (health.available
-                        || (health.state == circuit::CircuitState::Closed
-                            && health.cooldown_reason.as_deref() == Some("retry_after")))
-                {
-                    routing::transient_delay(&mut transient_retries, cooldown)
-                } else {
-                    None
-                };
+                let retry_delay = same_provider_delay(
+                    retry_same,
+                    &route.health_for(&requirement),
+                    &mut transient_retries,
+                    cooldown,
+                );
                 if let Some(delay) = retry_delay {
                     event.action = Action::RetryingSame;
                     event.details.wait_seconds = Some(delay.as_secs());
@@ -2243,38 +2216,27 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     // Keep the original spool, model, and response cursor untouched.
                     drop(admission);
                     request_budget.describe(None, model.as_deref(), "retry");
-                    match gateway
-                        .0
-                        .admission
-                        .wait_transient(
-                            CapacitySource {
-                                provider_id: route.provider.id.clone(),
-                                reset_generation,
-                            },
-                            delay,
-                            settings.max_waiting,
-                        )
-                        .await
+                    match transient_wait(
+                        &gateway,
+                        &route,
+                        reset_generation,
+                        delay,
+                        settings.max_waiting,
+                        pinned.as_deref(),
+                        &requirement,
+                    )
+                    .await
                     {
-                        Ok(()) => {}
+                        Ok(true) => {
+                            ids.insert(0, route.provider.id.clone());
+                            retry_owner = Some(route.provider.id.clone());
+                        }
+                        Ok(false) => {}
                         Err(Rejected::Stopped) => {
                             failover.finish(super::failover::Exit::Stopped);
-                            return error(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                code::STOPPED,
-                                "网关已停止",
-                            );
+                            return stopped();
                         }
                         Err(_) => break,
-                    }
-
-                    if gateway
-                        .routing_ids(pinned.as_deref())
-                        .contains(&route.provider.id)
-                        && route.health_for(&requirement).available
-                    {
-                        ids.insert(0, route.provider.id.clone());
-                        retry_owner = Some(route.provider.id.clone());
                     }
                 } else if !will_retry && !initial_capacity {
                     ids.clear();

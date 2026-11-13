@@ -957,6 +957,48 @@ fn close_code(frame: &Frame) -> Option<u16> {
     (bytes.len() >= 2).then(|| u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
+/// Usage and diagnostics state for one upstream attempt of a turn.
+#[allow(clippy::too_many_arguments)]
+fn attempt_protocol(
+    g: &Gateway,
+    request_budget: &super::wait_budget::WaitBudget,
+    rules: &[super::failure_rules::Rule],
+    provider: &str,
+    model: Option<&str>,
+    ownership: &Option<std::sync::Arc<super::compaction::Lease>>,
+    failover: &super::failover::Tracker,
+    headers: &HeaderMap,
+    received_at: i64,
+    speed: Option<String>,
+    usage_trace: Option<&crate::usage::Trace>,
+) -> super::protocol::Protocol {
+    let mut protocol = super::protocol::Protocol::new(true);
+    protocol.attach_wait_budget(request_budget);
+    protocol.attach_failure_rules(rules);
+    request_budget.describe(Some(provider), model, "headers");
+    protocol.diagnostics(g, provider, model);
+    protocol.attach_ownership(ownership.clone(), provider);
+    protocol.attach_routing_log(failover.routing());
+    protocol.request_headers(headers);
+    protocol.business_request(g, headers);
+    protocol.request_received(received_at);
+    protocol.request_speed(speed);
+    if let Some(trace) = usage_trace {
+        protocol.attach_usage(trace.attempt(provider, true, "websocket"));
+    }
+    protocol
+}
+/// Ends the traffic and wait accounting of a turn cancelled before any output,
+/// then acknowledges the cancellation to the client.
+async fn turn_cancelled(
+    client: &Peer,
+    traffic: &super::freeze::Ticket,
+    request_budget: &super::wait_budget::WaitBudget,
+) -> Result<(), Failure> {
+    traffic.finish();
+    request_budget.complete(request_budget.deadline());
+    cancellation(client).await
+}
 #[allow(clippy::too_many_arguments)]
 async fn session_once(
     g: &Gateway,
@@ -1205,20 +1247,7 @@ async fn session_once(
                 capacity_wait_owner = None;
                 failover.failure(super::failover::Failure::AccountRejected);
             }
-            ids = g.routing_ids(pinned.as_deref());
-            ids.retain(|id| {
-                g.route(id).is_some_and(|route| {
-                    !hard_denied.contains(&(id.clone(), route.provider.version))
-                })
-            });
-            routes = ids
-                .iter()
-                .filter_map(|id| {
-                    g.route(id)
-                        .filter(|r| r.accepts_protocol(uri.path()))
-                        .map(|r| (id.clone(), r))
-                })
-                .collect();
+            (ids, routes) = super::attempt::queue(g, pinned.as_deref(), &hard_denied, uri.path());
             if ids.is_empty() {
                 return Err((1013, "provider queue is empty"));
             }
@@ -1293,19 +1322,8 @@ async fn session_once(
                     failover.failure(super::failover::Failure::AccountRejected);
                     last_error = cause.map(Into::into);
                 }
-                ids = g.routing_ids(pinned.as_deref());
-                ids.retain(|id| {
-                    g.route(id)
-                        .is_some_and(|r| !hard_denied.contains(&(id.clone(), r.provider.version)))
-                });
-                routes = ids
-                    .iter()
-                    .filter_map(|id| {
-                        g.route(id)
-                            .filter(|r| r.accepts_protocol(uri.path()))
-                            .map(|r| (id.clone(), r))
-                    })
-                    .collect();
+                (ids, routes) =
+                    super::attempt::queue(g, pinned.as_deref(), &hard_denied, uri.path());
                 continue;
             }
         }
@@ -1420,29 +1438,19 @@ async fn session_once(
             .as_deref()
             .is_some_and(|id| id != admission.route.provider.id);
         previous_provider = Some(admission.route.provider.id.clone());
-        let mut attempt_protocol = super::protocol::Protocol::new(true);
-        attempt_protocol.attach_wait_budget(request_budget);
-        attempt_protocol.attach_failure_rules(&turn_rules);
-        request_budget.describe(
-            Some(&admission.route.provider.id),
+        let mut attempt_protocol = attempt_protocol(
+            g,
+            request_budget,
+            &turn_rules,
+            &admission.route.provider.id,
             current_model.as_deref(),
-            "headers",
+            &ownership,
+            &failover,
+            &headers,
+            turn_received_at,
+            value(&first).and_then(|v| crate::usage::model::speed(&v["speed"])),
+            usage_trace.as_ref(),
         );
-        attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
-        attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
-        attempt_protocol.attach_routing_log(failover.routing());
-        attempt_protocol.request_headers(&headers);
-        attempt_protocol.business_request(g, &headers);
-        attempt_protocol.request_received(turn_received_at);
-        attempt_protocol
-            .request_speed(value(&first).and_then(|v| crate::usage::model::speed(&v["speed"])));
-        if let Some(trace) = &usage_trace {
-            attempt_protocol.attach_usage(trace.attempt(
-                &admission.route.provider.id,
-                true,
-                "websocket",
-            ));
-        }
         attempt_protocol.context(
             conversation.clone(),
             (!manual).then(|| {
@@ -1948,9 +1956,7 @@ async fn session_once(
                     usage_trace = None;
                     ownership = None;
                     failover.detach();
-                    traffic.finish();
-                    request_budget.complete(request_budget.deadline());
-                    cancellation(client).await?;
+                    turn_cancelled(client, &traffic, request_budget).await?;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -2045,9 +2051,7 @@ async fn session_once(
                     usage_trace = None;
                     ownership = None;
                     failover.detach();
-                    traffic.finish();
-                    request_budget.complete(request_budget.deadline());
-                    cancellation(client).await?;
+                    turn_cancelled(client, &traffic, request_budget).await?;
                     continue;
                 }
                 result => result?,
@@ -2086,26 +2090,19 @@ async fn session_once(
             admission.commit_rpm();
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
-            let mut next = super::protocol::Protocol::new(true);
-            next.attach_wait_budget(request_budget);
-            next.attach_failure_rules(&turn_rules);
-            request_budget.describe(
-                Some(&route.provider.id),
+            let mut next = attempt_protocol(
+                g,
+                request_budget,
+                &turn_rules,
+                &route.provider.id,
                 current_model.as_deref(),
-                "headers",
-            );
-            next.diagnostics(g, &route.provider.id, current_model.as_deref());
-            next.attach_ownership(ownership.clone(), &route.provider.id);
-            next.attach_routing_log(failover.routing());
-            next.request_headers(&headers);
-            next.business_request(g, &headers);
-            next.request_received(turn_received_at);
-            next.request_speed(
+                &ownership,
+                &failover,
+                &headers,
+                turn_received_at,
                 value(&replay_frame).and_then(|v| crate::usage::model::speed(&v["speed"])),
+                usage_trace.as_ref(),
             );
-            if let Some(trace) = &usage_trace {
-                next.attach_usage(trace.attempt(&route.provider.id, true, "websocket"));
-            }
             let hints = value(&replay_frame)
                 .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
             next.context(
@@ -2150,9 +2147,7 @@ async fn session_once(
                     ownership = None;
                     failover.detach();
                     retry_pending = false;
-                    traffic.finish();
-                    request_budget.complete(request_budget.deadline());
-                    cancellation(client).await?;
+                    turn_cancelled(client, &traffic, request_budget).await?;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -2481,9 +2476,7 @@ async fn session_once(
                     .await;
                     match waited {
                         Err(TURN_CANCELLED) => {
-                            traffic.finish();
-                            request_budget.complete(request_budget.deadline());
-                            cancellation(client).await?;
+                            turn_cancelled(client, &traffic, request_budget).await?;
                             continue 'turns;
                         }
                         Err(error) => return Err(error),
@@ -2633,9 +2626,7 @@ async fn session_once(
                         turn = Some(admission)
                     }
                     Err(TURN_CANCELLED) => {
-                        traffic.finish();
-                        request_budget.complete(request_budget.deadline());
-                        cancellation(client).await?;
+                        turn_cancelled(client, &traffic, request_budget).await?;
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -2653,28 +2644,19 @@ async fn session_once(
                 rejected_frame = None;
                 terminal_error = false;
                 replay_frame = frame.clone();
-                let mut next_protocol = super::protocol::Protocol::new(true);
-                next_protocol.attach_wait_budget(request_budget);
-                next_protocol.attach_failure_rules(&turn_rules);
-                request_budget.describe(
-                    Some(&route.provider.id),
+                let mut next_protocol = attempt_protocol(
+                    g,
+                    request_budget,
+                    &turn_rules,
+                    &route.provider.id,
                     current_model.as_deref(),
-                    "headers",
+                    &ownership,
+                    &failover,
+                    &headers,
+                    turn_received_at,
+                    hints.as_ref().and_then(|h| h.speed.clone()),
+                    usage_trace.as_ref(),
                 );
-                next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
-                next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
-                next_protocol.attach_routing_log(failover.routing());
-                next_protocol.request_headers(&headers);
-                next_protocol.business_request(g, &headers);
-                next_protocol.request_received(turn_received_at);
-                next_protocol.request_speed(hints.as_ref().and_then(|h| h.speed.clone()));
-                if let Some(trace) = &usage_trace {
-                    next_protocol.attach_usage(trace.attempt(
-                        &route.provider.id,
-                        true,
-                        "websocket",
-                    ));
-                }
                 next_protocol.context(
                     conversation.clone(),
                     (!manual).then(|| {
