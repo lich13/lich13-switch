@@ -8,8 +8,8 @@ import type {
   UsageFilter,
   UsagePage,
   UsageRecord,
-  UsageState,
 } from "./usage-types";
+import { detailValue, usageState } from "./test-fixtures";
 
 const mock = vi.hoisted(() => ({ command: vi.fn() }));
 
@@ -124,19 +124,6 @@ const dashboard: Dashboard = {
   sources: { grok: 1 },
 };
 
-const usageState: UsageState = {
-  settings: {
-    recording: true,
-    autoSync: true,
-    refreshSeconds: 0,
-    multiplier: "1",
-    pricingModel: "response",
-  },
-  syncing: false,
-  reports: {},
-  error: null,
-};
-
 beforeEach(() => {
   mock.command.mockReset();
   Object.defineProperty(document, "visibilityState", {
@@ -176,14 +163,6 @@ function lastFilter(name: string): UsageFilter {
     .at(-1);
   if (!call) throw new Error(`Missing fixture command: ${name}`);
   return (call[1] as { filter: UsageFilter }).filter;
-}
-
-function detailValue(dialog: HTMLElement, label: string): HTMLElement {
-  const term = within(dialog)
-    .getAllByText(label, { selector: "dt" })
-    .find((candidate) => !candidate.closest("details"));
-  if (!term) throw new Error(`主详情区缺少字段：${label}`);
-  return term.nextElementSibling as HTMLElement;
 }
 
 it("keeps historical Grok round details separate from request counts", async () => {

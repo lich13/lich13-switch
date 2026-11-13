@@ -7,39 +7,16 @@ import type {
   UsageFilter,
   UsagePage,
   UsageRecord,
-  UsageState,
 } from "./usage-types";
+import { mock } from "./test-bridge";
+import { detailValue, usageDashboard, usageState } from "./test-fixtures";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import Usage from "./Usage";
 
 const startedAt = Date.UTC(2026, 9, 8, 2, 10, 20, 123);
 const finishedAt = startedAt + 4_321;
-const usageState: UsageState = {
-  settings: {
-    recording: true,
-    autoSync: true,
-    refreshSeconds: 0,
-    multiplier: "1",
-    pricingModel: "response",
-  },
-  syncing: false,
-  reports: {},
-  error: null,
-};
 
 function attempt(overrides: Partial<Attempt> = {}): Attempt {
   return {
@@ -106,25 +83,9 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
 }
 
 function dashboard(): Dashboard {
-  return {
-    totals: {
-      requests: records.length,
-      attempts: records.length,
-      success: records.length,
-      statusKnown: records.length,
-      sessions: 0,
-      tokens: { input: 10, output: 20, cacheRead: null, cacheWrite: null },
-      cost: "0",
-      unpriced: records.length,
-      durationMs: 0,
-      measuredOutputs: 0,
-      generationMs: 0,
-    },
-    providers: [],
-    models: [],
-    detailSince: 0,
-    sources: {},
-  };
+  return usageDashboard(records.length, {
+    tokens: { input: 10, output: 20, cacheRead: null, cacheWrite: null },
+  });
 }
 
 let records: UsageRecord[];
@@ -173,14 +134,6 @@ beforeEach(() => {
     },
   );
 });
-
-function detailValue(dialog: HTMLElement, label: string): HTMLElement {
-  const dt = within(dialog)
-    .getAllByText(label, { selector: "dt" })
-    .find((candidate) => !candidate.closest("details"));
-  if (!dt) throw new Error(`missing detail field: ${label}`);
-  return dt.nextElementSibling as HTMLElement;
-}
 
 it("uses the second-level finishedAt value for rows and the cell title", async () => {
   render(<Usage />);

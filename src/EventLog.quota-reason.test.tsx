@@ -2,19 +2,9 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
+import { serveEvents } from "./test-fixtures";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import EventLog from "./EventLog";
 
@@ -37,35 +27,8 @@ const baseRecord: EventRecord = {
 let eventRecords: EventRecord[];
 
 beforeEach(() => {
-  mock.command.mockReset();
-  mock.listeners.clear();
   eventRecords = [baseRecord];
-  mock.command.mockImplementation(
-    async (name: string, args: Record<string, unknown> = {}) => {
-      if (name === "get_gateway") {
-        return {
-          clientId: args.clientId,
-          providers: [{ id: "provider-1", name: "Fixture Provider" }],
-        };
-      }
-      if (name === "get_app_events") {
-        return {
-          items: structuredClone(eventRecords),
-          total: eventRecords.length,
-          page: 1,
-          error: null,
-        };
-      }
-      if (name === "get_app_event") {
-        return eventRecords.find((item) => item.id === args.id) ?? null;
-      }
-      return undefined;
-    },
-  );
-  Object.defineProperty(document, "visibilityState", {
-    configurable: true,
-    value: "visible",
-  });
+  serveEvents(() => eventRecords);
 });
 
 it("keeps the upstream code and shows the daily quota reason in summary and detail", async () => {

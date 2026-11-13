@@ -1,19 +1,9 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "./test-bridge";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import NotificationPermission from "./NotificationPermission";
 

@@ -15,38 +15,16 @@ import {
   type UsageFilter,
   type UsagePage,
   type UsageRecord,
-  type UsageState,
 } from "./usage-types";
+import { mock } from "./test-bridge";
+import { usageState } from "./test-fixtures";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, callback: (value: unknown) => void) => {
-    mock.listeners.set(name, callback);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import Usage from "./Usage";
 
 type Source = UsageFilter["source"];
 const timestamp = Date.UTC(2026, 9, 8, 2);
-const usageState: UsageState = {
-  settings: {
-    recording: true,
-    autoSync: true,
-    refreshSeconds: 0,
-    multiplier: "1",
-    pricingModel: "response",
-  },
-  syncing: false,
-  reports: {},
-  error: null,
-};
 
 function attempt(overrides: Partial<Attempt> = {}): Attempt {
   return {

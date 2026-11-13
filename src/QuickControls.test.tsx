@@ -6,18 +6,9 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { mock } from "./test-bridge";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  },
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 import QuickControls from "./QuickControls";
 
 const original = {

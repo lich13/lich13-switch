@@ -2,19 +2,10 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
+import { mock } from "./test-bridge";
+import { serveEvents } from "./test-fixtures";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import EventLog from "./EventLog";
 
@@ -61,37 +52,12 @@ let rawResponse: {
 } | null;
 
 beforeEach(() => {
-  mock.command.mockReset();
-  mock.listeners.clear();
   eventRecords = [structuredClone(baseRecord)];
   rawResponse = null;
-  mock.command.mockImplementation(
-    async (name: string, args: Record<string, unknown> = {}) => {
-      if (name === "get_gateway") {
-        return {
-          clientId: args.clientId,
-          providers: [{ id: "provider-1", name: "Fixture Provider" }],
-        };
-      }
-      if (name === "get_app_events") {
-        return {
-          items: structuredClone(eventRecords),
-          total: eventRecords.length,
-          page: 1,
-          error: null,
-        };
-      }
-      if (name === "get_app_event") {
-        return eventRecords.find((item) => item.id === args.id) ?? null;
-      }
-      if (name === "get_app_event_raw") return rawResponse;
-      return undefined;
-    },
+  serveEvents(
+    () => eventRecords,
+    (name) => (name === "get_app_event_raw" ? rawResponse : undefined),
   );
-  Object.defineProperty(document, "visibilityState", {
-    configurable: true,
-    value: "visible",
-  });
 });
 
 it("loads and copies the complete error, and opens policy by event ID without the shortened preview", async () => {

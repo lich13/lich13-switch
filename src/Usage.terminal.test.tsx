@@ -1,28 +1,10 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-import type {
-  Attempt,
-  Dashboard,
-  UsageFilter,
-  UsagePage,
-  UsageRecord,
-  UsageState,
-} from "./usage-types";
+import type { Attempt, UsageRecord } from "./usage-types";
+import { detailValue, serveUsage, usageDashboard } from "./test-fixtures";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import Usage from "./Usage";
 
@@ -36,19 +18,6 @@ type AttemptFixture = Omit<Attempt, "transfer"> & {
 
 type RecordFixture = Omit<UsageRecord, "attempts"> & {
   attempts: AttemptFixture[];
-};
-
-const usageState: UsageState = {
-  settings: {
-    recording: true,
-    autoSync: true,
-    refreshSeconds: 0,
-    multiplier: "1",
-    pricingModel: "response",
-  },
-  syncing: false,
-  reports: {},
-  error: null,
 };
 
 function transfer(
@@ -121,74 +90,15 @@ function record(overrides: Partial<RecordFixture> = {}): RecordFixture {
   };
 }
 
-function dashboard(): Dashboard {
-  return {
-    totals: {
-      requests: records.length,
-      attempts: records.length,
-      success: records.length,
-      statusKnown: records.length,
-      sessions: 0,
-      tokens: { input: 1_000, output: 2_000, cacheRead: 3_000, cacheWrite: 4_000 },
-      cost: "0",
-      unpriced: records.length,
-      durationMs: 0,
-      measuredOutputs: 0,
-      generationMs: 0,
-    },
-    providers: [],
-    models: [],
-    detailSince: 0,
-    sources: {},
-  };
-}
-
 let records: RecordFixture[];
 
 beforeEach(() => {
-  mock.command.mockReset();
-  mock.listeners.clear();
   records = [record()];
-  Object.defineProperty(document, "visibilityState", {
-    configurable: true,
-    value: "visible",
-  });
-  mock.command.mockImplementation(
-    async (name: string, args: Record<string, unknown> = {}) => {
-      switch (name) {
-        case "get_gateway":
-          return { providers: [{ id: "fixture-provider", name: "Fixture Provider" }] };
-        case "get_usage_state":
-          return structuredClone(usageState);
-        case "get_usage_dashboard":
-          return dashboard();
-        case "get_usage_logs": {
-          const filter = args.filter as UsageFilter;
-          const page = filter.page ?? 1;
-          const rows = records.slice((page - 1) * 20, page * 20);
-          return {
-            rows: structuredClone(rows),
-            total: records.length,
-            page,
-            detailSince: 0,
-          } satisfies UsagePage;
-        }
-        case "get_usage_detail":
-          return structuredClone(records.find((item) => item.id === args.id));
-        default:
-          throw new Error(`Unexpected fixture command: ${name}`);
-      }
-    },
+  serveUsage(
+    () => records,
+    () => usageDashboard(records.length),
   );
 });
-
-function detailValue(dialog: HTMLElement, label: string): HTMLElement {
-  const dt = within(dialog)
-    .getAllByText(label, { selector: "dt" })
-    .find((candidate) => !candidate.closest("details"));
-  if (!dt) throw new Error(`主详情区缺少字段：${label}`);
-  return dt.nextElementSibling as HTMLElement;
-}
 
 async function openFirstDetail() {
   render(<Usage />);

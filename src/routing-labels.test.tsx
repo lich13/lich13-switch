@@ -4,11 +4,9 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { EventRecord } from "./EventLog";
 import type {
   Attempt,
-  Dashboard,
   UsageFilter,
   UsagePage,
   UsageRecord,
-  UsageState,
 } from "./usage-types";
 import { gatewayDemo } from "./gateway-preview";
 import {
@@ -16,39 +14,16 @@ import {
   providerRuntimeStatus,
 } from "./provider-status";
 import type { GatewayState } from "./types";
+import { mock } from "./test-bridge";
+import { detailValue, usageDashboard, usageState } from "./test-fixtures";
 
-const mock = vi.hoisted(() => ({
-  command: vi.fn(),
-  listeners: new Map<string, (value: unknown) => void>(),
-}));
-
-vi.mock("./bridge", () => ({
-  preview: false,
-  command: mock.command,
-  subscribe: vi.fn(async (name: string, listener: (value: unknown) => void) => {
-    mock.listeners.set(name, listener);
-    return () => mock.listeners.delete(name);
-  }),
-}));
+vi.mock("./bridge", async () => (await import("./test-bridge")).bridge);
 
 import EventLog from "./EventLog";
 import Usage from "./Usage";
 
 const timestamp = Date.UTC(2026, 9, 8, 2);
 const providerId = "fixture-provider";
-
-const usageState: UsageState = {
-  settings: {
-    recording: true,
-    autoSync: true,
-    refreshSeconds: 0,
-    multiplier: "1",
-    pricingModel: "response",
-  },
-  syncing: false,
-  reports: {},
-  error: null,
-};
 
 function attempt(overrides: Partial<Attempt> = {}): Attempt {
   return {
@@ -94,33 +69,6 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   };
 }
 
-function dashboard(records: UsageRecord[]): Dashboard {
-  return {
-    totals: {
-      requests: records.length,
-      attempts: records.length,
-      success: records.length,
-      statusKnown: records.length,
-      sessions: 0,
-      tokens: {
-        input: 1_000,
-        output: 2_000,
-        cacheRead: 3_000,
-        cacheWrite: 4_000,
-      },
-      cost: "0",
-      unpriced: records.length,
-      durationMs: 0,
-      measuredOutputs: 0,
-      generationMs: 0,
-    },
-    providers: [],
-    models: [],
-    detailSince: 0,
-    sources: {},
-  };
-}
-
 const baseEvent: EventRecord = {
   id: "fixture-v0259-event",
   firstAt: 1_760_000_000,
@@ -160,7 +108,7 @@ beforeEach(() => {
         case "get_usage_state":
           return structuredClone(usageState);
         case "get_usage_dashboard":
-          return dashboard(records);
+          return usageDashboard(records.length);
         case "get_usage_logs": {
           const filter = args.filter as UsageFilter;
           const page = filter.page ?? 1;
@@ -188,14 +136,6 @@ beforeEach(() => {
     },
   );
 });
-
-function detailValue(dialog: HTMLElement, label: string): HTMLElement {
-  const dt = within(dialog)
-    .getAllByText(label, { selector: "dt" })
-    .find((candidate) => !candidate.closest("details"));
-  if (!dt) throw new Error(`主详情区缺少字段：${label}`);
-  return dt.nextElementSibling as HTMLElement;
-}
 
 async function openUsageDetail() {
   render(<Usage />);
