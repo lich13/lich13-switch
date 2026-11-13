@@ -1526,10 +1526,10 @@ fn prune_raw_ids(directory: &Path, retained: &HashSet<String>) -> std::io::Resul
 
 #[cfg(test)]
 #[path = "events_categories_tests.rs"]
-mod v0232_tests;
+mod categories_tests;
 
 #[cfg(test)]
-mod v016_tests {
+mod diagnostic_record_tests {
     use super::*;
     #[test]
     fn external_journal_identity_is_readable_but_not_executable() {

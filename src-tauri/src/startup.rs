@@ -209,4 +209,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "startup_restore_tests.rs"]
-mod v0233_tests;
+mod restore_tests;

@@ -545,7 +545,7 @@ impl Permit {
 
 #[cfg(test)]
 #[path = "circuit_deadline_tests.rs"]
-mod v0232_tests;
+mod deadline_tests;
 impl Drop for Permit {
     fn drop(&mut self) {
         if !self.complete {
@@ -785,7 +785,7 @@ mod cooldown_tests {
 }
 
 #[cfg(test)]
-mod v020_tolerance_tests {
+mod tolerance_tests {
     use super::*;
     use crate::events::{Action, Reason, Record};
 

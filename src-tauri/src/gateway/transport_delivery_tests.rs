@@ -1,7 +1,7 @@
 // 覆盖 TCP/HTTP/SSE 的交付和终态证据。
 //! v0.23 delivery regressions using synthetic protocol data and isolated TCP listeners.
 #[path = "terminal_identity_tests.rs"]
-mod v0231_terminal_tests;
+mod terminal_identity_tests;
 use super::{
     connector::BoxError,
     protocol::{Protocol, Terminal},

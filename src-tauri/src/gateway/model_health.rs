@@ -17,7 +17,7 @@ pub struct ModelHealth {
 
 #[cfg(test)]
 #[path = "model_probe_tests.rs"]
-mod v0232_tests;
+mod probe_tests;
 
 impl Models {
     pub fn circuit(&self, model: &str) -> Circuit {

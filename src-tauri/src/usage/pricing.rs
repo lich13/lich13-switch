@@ -1143,7 +1143,7 @@ fn unit_rate(
 }
 
 #[cfg(test)]
-mod v02514_tests {
+mod tests {
     use super::*;
     use serde_json::json;
     #[test]

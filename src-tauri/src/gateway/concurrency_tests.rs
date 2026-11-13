@@ -356,7 +356,7 @@ async fn http_rpm_limit_waits_in_place_instead_of_spilling_to_the_next_provider(
 #[tokio::test]
 async fn rpm_windows_are_isolated_between_codex_and_claude() {
     let (t, codex, claude, home) =
-        super::claude_v080::claude_fixture("https://shared.example.test", "fixture-key").await;
+        super::claude_tests::claude_fixture("https://shared.example.test", "fixture-key").await;
     codex
         .edit(
             Edit::SaveProvider {

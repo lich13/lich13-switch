@@ -688,7 +688,7 @@ async fn claude_capacity_uses_shared_cooldown_and_wait_budget() {
     })
     .await;
     let (_t, _codex, g, home) =
-        claude_v080::claude_fixture(&format!("http://127.0.0.1:{upstream}"), "fixture-key").await;
+        claude_tests::claude_fixture(&format!("http://127.0.0.1:{upstream}"), "fixture-key").await;
     g.edit(
         Edit::Mode {
             mode: "auto".into(),

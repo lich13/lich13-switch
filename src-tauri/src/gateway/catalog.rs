@@ -454,7 +454,7 @@ async fn fetch(
 }
 
 #[cfg(test)]
-mod v02514_tests {
+mod tests {
     use super::super::{
         model::{Edit, Store},
         ClientId, Gateway,

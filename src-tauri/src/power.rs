@@ -38,7 +38,7 @@ trait System: Send + Sync {
 struct Native;
 #[cfg(test)]
 #[path = "power_repair_tests.rs"]
-mod v023_tests;
+mod repair_tests;
 pub struct Service {
     system: Arc<dyn System>,
     lock: Mutex<()>,

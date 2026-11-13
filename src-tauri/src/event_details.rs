@@ -326,7 +326,7 @@ impl Details {
 }
 
 #[cfg(test)]
-mod v016_tests {
+mod tests {
     use super::*;
     #[test]
     fn error_details_are_bounded_and_preserve_raw_error_text_without_redaction() {

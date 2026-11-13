@@ -1525,16 +1525,16 @@ mod tests {
 
 #[cfg(test)]
 #[path = "core_token_order_tests.rs"]
-mod v016_tests;
+mod token_order_tests;
 
 #[cfg(test)]
 #[path = "auth_refresh_identity_tests.rs"]
-mod auth_refresh_v017_tests;
+mod auth_refresh_identity_tests;
 
 #[cfg(test)]
 #[path = "core_api_gateway_tests.rs"]
-mod core_api_v020_tests;
+mod api_gateway_tests;
 
 #[cfg(test)]
 #[path = "core_subscription_tests.rs"]
-mod core_subscription_v021_tests;
+mod subscription_tests;

@@ -900,7 +900,7 @@ async fn fetch(input: &Query) -> std::result::Result<Option<Data>, Failure> {
 
 #[cfg(test)]
 #[path = "quota_subscription_tests.rs"]
-mod quota_subscription_v021_tests;
+mod subscription_tests;
 
 #[cfg(test)]
 mod tests {

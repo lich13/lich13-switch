@@ -5,7 +5,7 @@
 //! is intentionally self-contained so it does not couple the v0.20 checks to
 //! the older versioned test helpers.
 #[path = "thread_retention_tests.rs"]
-mod v0212_capacity_tests;
+mod thread_retention_tests;
 use super::{
     compaction::Registry,
     model::{Provider, Store},
@@ -54,23 +54,23 @@ mod owner_connect_retry_tests;
 
 #[cfg(test)]
 #[path = "intake_admission_tests.rs"]
-mod v021_tests;
+mod intake_admission_tests;
 
 #[cfg(test)]
 #[path = "thread_history_tests.rs"]
-mod v0211_handoff_tests;
+mod thread_history_tests;
 
 #[cfg(test)]
 #[path = "request_lifecycle_tests.rs"]
-mod v0211_lifecycle_tests;
+mod request_lifecycle_tests;
 
 #[cfg(test)]
 #[path = "handoff_stream_progress_tests.rs"]
-mod v0212_tests;
+mod handoff_stream_progress_tests;
 
 #[cfg(test)]
 #[path = "handoff_delivery_tests.rs"]
-mod v0212_delivery_tests;
+mod handoff_delivery_tests;
 
 #[cfg(test)]
 #[path = "model_detour_ws_tests.rs"]

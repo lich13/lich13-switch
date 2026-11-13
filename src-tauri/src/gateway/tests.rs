@@ -1329,18 +1329,18 @@ mod revisions;
 mod models;
 
 #[path = "failover_transport_tests.rs"]
-mod v061;
+mod failover_transport_tests;
 
 #[path = "import_tests.rs"]
 mod imports;
 
 #[path = "claude_gateway_tests.rs"]
-mod v080;
+mod claude_gateway_tests;
 
 #[path = "capacity_tests.rs"]
 mod capacity;
 #[path = "claude_tests.rs"]
-mod claude_v080;
+mod claude_tests;
 
 #[path = "model_error_tests.rs"]
 mod model_errors;
@@ -1348,19 +1348,19 @@ mod model_errors;
 #[path = "quota_account_tests.rs"]
 mod quota_account;
 #[path = "quota_tests.rs"]
-mod quota_v013;
+mod quota_tests;
 
 #[path = "../events_tests.rs"]
-mod events_v013;
+mod events_tests;
 
 #[path = "websocket_reconnect_tests.rs"]
-mod v016;
+mod websocket_reconnect_tests;
 
 #[path = "capacity_retry_tests.rs"]
-mod v017;
+mod capacity_retry_tests;
 
 #[path = "compaction_handoff_tests.rs"]
-mod v019_compaction;
+mod compaction_handoff_tests;
 
 #[path = "compaction_execution_tests.rs"]
 mod compaction_execution;

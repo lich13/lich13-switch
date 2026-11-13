@@ -15,7 +15,7 @@ pub(crate) mod delivery;
 mod native;
 #[cfg(test)]
 #[path = "events_notification_scope_tests.rs"]
-mod v017_tests;
+mod notification_scope_tests;
 use native::permission;
 static ASKING: AtomicBool = AtomicBool::new(false);
 static DELIVERY: Mutex<delivery::Status> = Mutex::new(delivery::Status::Idle);
@@ -202,4 +202,4 @@ mod delivery_tests;
 
 #[cfg(test)]
 #[path = "notifications/circuit_delivery_tests.rs"]
-mod delivery_v0232_tests;
+mod circuit_delivery_tests;
