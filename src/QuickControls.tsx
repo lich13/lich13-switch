@@ -8,7 +8,6 @@ type State = {
   enabled: boolean;
   batterySleep: number;
   revision: string;
-  externalChanged?: boolean;
 };
 export default function QuickControls({
   visible,
@@ -122,7 +121,6 @@ export default function QuickControls({
               onChange={() => void toggle()}
             />
           </label>
-          {state?.externalChanged && <span role="status">外部已修改</span>}
           {readError && <span role="alert">{readError}</span>}
         </div>
       )}

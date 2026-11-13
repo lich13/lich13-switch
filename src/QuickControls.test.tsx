@@ -25,14 +25,12 @@ const original = {
   enabled: false,
   batterySleep: 7,
   helper: "ready",
-  ownership: "none",
   revision: "fixture-before",
 };
 const enabled = {
   ...original,
   enabled: true,
   batterySleep: 0,
-  ownership: "application",
   revision: "fixture-after",
 };
 
@@ -141,14 +139,10 @@ it("refreshes external changes after a repair conflict without replaying the tog
   current = {
     ...original,
     enabled: true,
-    ownership: "external",
     revision: "fixture-external",
   };
   await act(async () => {
-    mock.listeners.get("clamshell-state")?.({
-      ...current,
-      externalChanged: true,
-    });
+    mock.listeners.get("clamshell-state")?.(current);
     pending.reject({
       code: "CONFLICT",
       message: "修复期间电源状态已变化，请重新操作",
@@ -166,7 +160,7 @@ it("refreshes external changes after a repair conflict without replaying the tog
   ).toHaveLength(1);
 });
 
-it("uses the last confirmed revision and helper result when disabling application ownership", async () => {
+it("uses the last confirmed revision and helper result when disabling", async () => {
   const restored = {
     ...original,
     batterySleep: 9,

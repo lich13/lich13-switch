@@ -12,17 +12,11 @@ pub struct State {
     pub enabled: bool,
     pub battery_sleep: u16,
     pub revision: String,
-    #[serde(default)]
-    pub ownership: String,
-    #[serde(default)]
-    pub external_changed: bool,
 }
 impl State {
     fn new(supported: bool, enabled: bool, minutes: u16) -> Self {
         Self {
             helper: if supported { "ready" } else { "unsupported" }.into(),
-            ownership: if enabled { "external" } else { "none" }.into(),
-            external_changed: false,
             supported,
             enabled,
             battery_sleep: minutes,
@@ -38,7 +32,7 @@ trait System: Send + Sync {
         Err(AppError::new(code::UNSUPPORTED, "此设备不支持电源助手"))
     }
     fn read(&self) -> Result<State>;
-    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<State>;
+    fn apply(&self, enabled: bool) -> Result<State>;
 }
 struct Native;
 #[cfg(test)]
@@ -76,7 +70,7 @@ impl Service {
     }
     pub fn remove(&self) -> Result<State> {
         let _lock = self.lock.lock().unwrap();
-        // The helper restores only the fields it still owns. External settings survive removal.
+        // The helper puts back the state it remembered before removing itself.
         self.system.remove()?;
         self.state()
     }
@@ -119,17 +113,14 @@ impl Service {
         if !allowed() {
             return Ok(before);
         }
-        let before = if before.helper != "ready" {
-            let before = self.repair_for_toggle(&before)?;
+        if before.helper != "ready" {
+            let prepared = self.repair_for_toggle(&before)?;
             if !allowed() {
-                return Ok(before);
+                return Ok(prepared);
             }
-            before
-        } else {
-            before
-        };
+        }
         // Restoration belongs exclusively to the privileged helper.
-        self.system.apply(&before, enabled, before.battery_sleep)
+        self.system.apply(enabled)
     }
     fn repair_for_toggle(&self, before: &State) -> Result<State> {
         self.system.prepare()?;
@@ -137,7 +128,6 @@ impl Service {
         if before.supported != prepared.supported
             || before.enabled != prepared.enabled
             || before.battery_sleep != prepared.battery_sleep
-            || prepared.external_changed
         {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -209,11 +199,7 @@ pub(crate) fn helper_state(actual: &serde_json::Value) -> Result<State> {
         .as_u64()
         .filter(|n| *n <= 1440)
         .ok_or_else(|| AppError::new(code::POWER, "电源状态无效"))? as u16;
-    let mut state = State::new(supported, enabled, minutes);
-    state.ownership = actual["ownership"].as_str().unwrap_or("external").into();
-    state.external_changed = actual["externalChanged"].as_bool().unwrap_or(false);
-    state.revision = storage::digest(actual.to_string().as_bytes());
-    Ok(state)
+    Ok(State::new(supported, enabled, minutes))
 }
 impl System for Native {
     fn prepare(&self) -> Result<()> {
@@ -257,17 +243,16 @@ impl System for Native {
             Ok(State::new(false, false, 0))
         }
     }
-    fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<State> {
+    fn apply(&self, enabled: bool) -> Result<State> {
         #[cfg(target_os = "macos")]
         {
-            let response = crate::power_macos::request(
-                serde_json::json!({"op":"set", "enabled":enabled, "minutes":minutes, "beforeEnabled":before.enabled, "beforeSleep":before.battery_sleep,"beforeOwnership":before.ownership}),
-            )?;
+            let response =
+                crate::power_macos::request(serde_json::json!({"op":"set", "enabled":enabled}))?;
             helper_state(&response["state"])
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (before, enabled, minutes);
+            let _ = enabled;
             Err(AppError::new(code::UNSUPPORTED, "此设备不支持电池合盖控制"))
         }
     }
@@ -288,7 +273,7 @@ mod tests {
     struct MockHelper {
         current: Mutex<State>,
         replies: Mutex<VecDeque<Reply>>,
-        calls: Mutex<Vec<(State, bool, u16)>>,
+        calls: Mutex<Vec<bool>>,
         ready: AtomicBool,
         cancelled: AtomicBool,
         approvals: AtomicUsize,
@@ -325,15 +310,9 @@ mod tests {
             }
             Ok(())
         }
-        fn apply(&self, before: &State, enabled: bool, minutes: u16) -> Result<State> {
+        fn apply(&self, enabled: bool) -> Result<State> {
             let mut state = self.current.lock().unwrap();
-            if state.revision != before.revision {
-                return Err(AppError::new(code::CONFLICT, "外部状态变化"));
-            }
-            self.calls
-                .lock()
-                .unwrap()
-                .push((before.clone(), enabled, minutes));
+            self.calls.lock().unwrap().push(enabled);
             // The native tests own restoration semantics. These explicit replies
             // verify that Service accepts only the helper's authoritative result.
             let reply = self
@@ -365,14 +344,8 @@ mod tests {
         }
     }
 
-    fn state(enabled: bool, minutes: u16, ownership: &str, external_changed: bool) -> State {
-        let mut state = State::new(true, enabled, minutes);
-        state.ownership = ownership.into();
-        state.external_changed = external_changed;
-        state.revision = storage::digest(
-            format!("{enabled}:{minutes}:{ownership}:{external_changed}").as_bytes(),
-        );
-        state
+    fn state(enabled: bool, minutes: u16) -> State {
+        State::new(true, enabled, minutes)
     }
     fn fixture(initial: State) -> (tempfile::TempDir, Service, Arc<MockHelper>) {
         let dir = tempfile::tempdir().unwrap();
@@ -394,41 +367,22 @@ mod tests {
     }
 
     #[test]
-    fn root_helper_supplies_restored_minutes_including_zero() {
+    fn helper_result_is_authoritative_for_restored_minutes_including_zero() {
         for minutes in [0, 7] {
-            let original = state(false, minutes, "none", false);
-            let owned = state(true, 0, "application", false);
+            let original = state(false, minutes);
+            let owned = state(true, 0);
             let (_dir, service, helper) = fixture(original.clone());
             helper.reply(owned.clone(), None);
             helper.reply(original.clone(), None);
             assert_eq!(service.set(true, &original.revision).unwrap(), owned);
             assert_eq!(service.set(false, &owned.revision).unwrap(), original);
-            let calls = helper.calls.lock().unwrap();
-            assert_eq!(
-                calls.as_slice(),
-                &[(original, true, minutes), (owned, false, 0)]
-            );
-        }
-    }
-
-    #[test]
-    fn external_sleep_minutes_including_zero_are_passed_through_unchanged() {
-        for minutes in [0, 9] {
-            let original = state(true, minutes, "external", false);
-            let closed = state(false, minutes, "none", false);
-            let (_dir, service, helper) = fixture(original.clone());
-            helper.reply(closed.clone(), None);
-            assert_eq!(service.set(false, &original.revision).unwrap(), closed);
-            assert_eq!(
-                helper.calls.lock().unwrap().as_slice(),
-                &[(original, false, minutes)]
-            );
+            assert_eq!(helper.calls.lock().unwrap().as_slice(), &[true, false]);
         }
     }
 
     #[test]
     fn authorization_cancellation_preserves_state() {
-        let mut original = state(false, 3, "none", false);
+        let mut original = state(false, 3);
         original.helper = "missing".into();
         let (_dir, service, helper) = fixture(original.clone());
         helper.ready.store(false, Ordering::SeqCst);
@@ -444,8 +398,8 @@ mod tests {
 
     #[test]
     fn daily_toggles_reuse_authorization_but_repair_forces_it() {
-        let original = state(false, 9, "none", false);
-        let owned = state(true, 0, "application", false);
+        let original = state(false, 9);
+        let owned = state(true, 0);
         let (_dir, service, helper) = fixture(original.clone());
         helper.ready.store(false, Ordering::SeqCst);
         for _ in 0..3 {
@@ -470,55 +424,12 @@ mod tests {
     }
 
     #[test]
-    fn first_installation_with_unchanged_power_accepts_helper_revision() {
-        for (enabled, minutes) in [(false, 7), (true, 5)] {
-            let mut original = State::new(true, enabled, minutes);
-            original.helper = "missing".into();
-            let prepared = state(
-                enabled,
-                minutes,
-                if enabled { "external" } else { "none" },
-                false,
-            );
-            let actual = state(
-                !enabled,
-                if enabled { minutes } else { 0 },
-                if enabled { "none" } else { "application" },
-                false,
-            );
-            assert_ne!(original.revision, prepared.revision);
-            let (_dir, service, helper) = fixture(original.clone());
-            helper.ready.store(false, Ordering::SeqCst);
-            *helper.after_prepare.lock().unwrap() = Some(prepared.clone());
-            helper.reply(actual.clone(), None);
-
-            assert_eq!(service.set(!enabled, &original.revision).unwrap(), actual);
-            assert_eq!(
-                helper.calls.lock().unwrap().as_slice(),
-                &[(prepared, !enabled, minutes)]
-            );
-            assert_eq!(helper.prepares.load(Ordering::SeqCst), 1);
-            assert_eq!(helper.approvals.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    #[test]
     fn power_changes_during_first_installation_conflict_without_applying() {
         for (supported, enabled, minutes) in [(false, false, 7), (true, true, 7), (true, false, 9)]
         {
             let mut original = State::new(true, false, 7);
             original.helper = "missing".into();
-            let prepared = if supported {
-                state(
-                    enabled,
-                    minutes,
-                    if enabled { "external" } else { "none" },
-                    false,
-                )
-            } else {
-                State::new(false, enabled, minutes)
-            };
-            assert_ne!(original.revision, prepared.revision);
+            let prepared = State::new(supported, enabled, minutes);
             let (_dir, service, helper) = fixture(original.clone());
             helper.ready.store(false, Ordering::SeqCst);
             *helper.after_prepare.lock().unwrap() = Some(prepared.clone());
@@ -530,13 +441,12 @@ mod tests {
             assert_eq!(service.state().unwrap(), prepared);
             assert!(helper.calls.lock().unwrap().is_empty());
             assert_eq!(helper.prepares.load(Ordering::SeqCst), 1);
-            assert_eq!(helper.approvals.load(Ordering::SeqCst), 1);
         }
     }
 
     #[test]
     fn stale_revision_does_not_prepare_or_call_helper() {
-        let original = state(false, 7, "none", false);
+        let original = state(false, 7);
         let (_dir, service, helper) = fixture(original);
         assert_eq!(service.set(true, "stale").unwrap_err().code, code::CONFLICT);
         assert_eq!(helper.prepares.load(Ordering::SeqCst), 0);
@@ -544,47 +454,37 @@ mod tests {
     }
 
     #[test]
-    fn helper_partial_failure_is_returned_without_user_level_rollback() {
-        let original = state(false, 7, "none", false);
-        let external = state(false, 4, "none", true);
+    fn helper_failure_is_returned_without_user_level_rollback() {
+        let original = state(false, 7);
+        let actual = state(false, 4);
         let (_dir, service, helper) = fixture(original.clone());
-        helper.reply(external.clone(), Some(code::CONFLICT));
+        helper.reply(actual.clone(), Some(code::POWER));
         assert_eq!(
             service.set(true, &original.revision).unwrap_err().code,
-            code::CONFLICT
+            code::POWER
         );
-        assert_eq!(service.state().unwrap(), external);
+        assert_eq!(service.state().unwrap(), actual);
         assert_eq!(helper.calls.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn removal_delegates_restoration_and_preserves_external_enabled_state() {
-        for (original, mut removed) in [
-            (
-                state(true, 0, "application", false),
-                state(false, 7, "none", false),
-            ),
-            (
-                state(true, 5, "external", false),
-                state(true, 5, "external", false),
-            ),
-        ] {
-            let (_dir, service, helper) = fixture(original);
-            *helper.remove_reply.lock().unwrap() = Some(Reply {
-                state: removed.clone(),
-                error: None,
-            });
-            removed.helper = "missing".into();
-            assert_eq!(service.remove().unwrap(), removed);
-            assert_eq!(helper.removals.load(Ordering::SeqCst), 1);
-            assert!(helper.calls.lock().unwrap().is_empty());
-            assert!(!helper.ready.load(Ordering::SeqCst));
-        }
+    fn removal_delegates_restoration_to_the_helper() {
+        let (_dir, service, helper) = fixture(state(true, 0));
+        let mut removed = state(false, 7);
+        *helper.remove_reply.lock().unwrap() = Some(Reply {
+            state: removed.clone(),
+            error: None,
+        });
+        removed.helper = "missing".into();
+        assert_eq!(service.remove().unwrap(), removed);
+        assert_eq!(helper.removals.load(Ordering::SeqCst), 1);
+        assert!(helper.calls.lock().unwrap().is_empty());
+        assert!(!helper.ready.load(Ordering::SeqCst));
     }
 
     #[test]
     fn failed_removal_returns_helper_error() {
-        let original = state(true, 0, "application", false);
+        let original = state(true, 0);
         let (_dir, service, helper) = fixture(original.clone());
         *helper.remove_reply.lock().unwrap() = Some(Reply {
             state: original.clone(),
@@ -597,9 +497,9 @@ mod tests {
 
     #[test]
     fn concurrent_toggles_reserve_one_state_revision() {
-        let original = state(false, 9, "none", false);
+        let original = state(false, 9);
         let (_dir, service, helper) = fixture(original.clone());
-        helper.reply(state(true, 0, "application", false), None);
+        helper.reply(state(true, 0), None);
         let service = Arc::new(service);
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let joins: Vec<_> = (0..2)
@@ -622,15 +522,6 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(helper.calls.lock().unwrap().len(), 1);
         assert_eq!(helper.approvals.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn state_serialization_preserves_ownership_metadata() {
-        let mixed = state(true, 4, "mixed", true);
-        let value = serde_json::to_value(&mixed).unwrap();
-        assert_eq!(value["ownership"], "mixed");
-        assert_eq!(value["externalChanged"], true);
-        assert_eq!(serde_json::from_value::<State>(value).unwrap(), mixed);
     }
 
     #[test]

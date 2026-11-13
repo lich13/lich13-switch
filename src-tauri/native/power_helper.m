@@ -22,8 +22,7 @@ static NSDictionary *Approved;
 static NSDictionary *TestState;
 static BOOL TestFailWrite;
 static BOOL TestFailDirectorySync;
-static NSUInteger TestFieldWrites, TestFailFieldWrite, TestExternalAfterFieldWrite, TestFailRecordAfterFieldWrite;
-static NSDictionary *TestExternalState;
+static NSUInteger TestFieldWrites, TestFailFieldWrite;
 static NSMutableDictionary *TestFiles;
 #endif
 static NSDictionary *failure(NSString *code, NSString *message) {
@@ -133,136 +132,78 @@ static BOOL number(id value, NSInteger max) {
 static BOOL same(NSDictionary *a, NSDictionary *b) {
     return a&&b&&[a[@"enabled"] isEqual:b[@"enabled"]]&&[a[@"batterySleep"] isEqual:b[@"batterySleep"]];
 }
-// Restore authority is root-owned. Version 1 records came from this same helper;
-// user-level/script records have no verifiable ownership and are never applied.
+// The record keeps the state seen before this application first enabled the
+// setting. Records left by an interrupted release of an older helper are ignored.
 static NSDictionary *restoreRecord(void) {
     NSDictionary *r=readJSON(Restore);
-    if(!r)return nil;
-    if([r[@"version"] isEqual:@1] && number(r[@"minutes"],1440) &&
-       [r[@"expected"] isKindOfClass:NSDictionary.class]) {
-        return @{@"version":@2,@"original":@{@"enabled":@NO,@"batterySleep":r[@"minutes"]},
-                 @"expected":r[@"expected"],@"owned":@[@"enabled",@"batterySleep"],@"transaction":@"legacy-helper"};
-    }
+    if(![r[@"version"] isEqual:@2]||[r[@"release"] boolValue]||![r[@"original"] isKindOfClass:NSDictionary.class]||
+       !number(r[@"original"][@"enabled"],1)||!number(r[@"original"][@"batterySleep"],1440))return nil;
     return r;
 }
-static BOOL validRecord(NSDictionary *r) {
-    return !r || ([r[@"version"] isEqual:@2] &&
-      [r[@"original"] isKindOfClass:NSDictionary.class] &&
-      [r[@"expected"] isKindOfClass:NSDictionary.class] &&
-      number(r[@"original"][@"enabled"],1) && number(r[@"original"][@"batterySleep"],1440) &&
-      number(r[@"expected"][@"enabled"],1) && number(r[@"expected"][@"batterySleep"],1440));
-}
-static BOOL owns(NSDictionary *record, NSDictionary *actual, NSString *key) {
-    return record && ![record[@"release"] boolValue] && [record[@"owned"] containsObject:key] && ![record[@"original"][key] isEqual:record[@"expected"][key]] &&
-      [actual[key] isEqual:record[@"expected"][key]];
-}
-static NSDictionary *stateView(NSDictionary *state, NSDictionary *record) {
-    NSMutableDictionary *view=[state mutableCopy];
-    BOOL external=record&&!same(state,record[@"expected"]);
-    BOOL owned=owns(record,state,@"enabled")||owns(record,state,@"batterySleep");
-    view[@"ownership"]=owned?(external?@"mixed":@"application"):([state[@"enabled"] boolValue]?@"external":@"none");
-    view[@"externalChanged"]=@(external);
-    view[@"transaction"]=record[@"transaction"]?:@"";
-    return @{@"state":view,@"version":@1};
+static NSDictionary *stateView(NSDictionary *state) {
+    return @{@"state":state,@"version":@1};
 }
 static BOOL writeField(NSString *key, NSNumber *value) {
 #ifdef POWER_TEST
     TestFieldWrites++;
-    BOOL ok=TestFieldWrites!=TestFailFieldWrite;
-    if(ok){NSMutableDictionary *next=[TestState mutableCopy];next[key]=value;TestState=next;}
-    if(TestFieldWrites==TestExternalAfterFieldWrite)TestState=TestExternalState;
-    if(TestFieldWrites==TestFailRecordAfterFieldWrite)TestFailWrite=YES;
-    return ok;
+    if(TestFieldWrites==TestFailFieldWrite)return NO;
+    NSMutableDictionary *next=[TestState mutableCopy];next[key]=value;TestState=next;
+    return YES;
 #else
     return run(@"/usr/bin/pmset",@[@"-b",[key isEqual:@"enabled"]?@"disablesleep":@"sleep",value.stringValue],NULL);
 #endif
 }
-// Recheck the whole observed state immediately before each field write. Rollback
-// only touches a field while it still equals this transaction's write.
-static BOOL applyOwned(NSDictionary *before, NSDictionary *desired, NSMutableDictionary *written) {
-    NSMutableDictionary *expected=[before mutableCopy];
+static BOOL apply(NSDictionary *desired) {
+    NSDictionary *now=powerState();
+    if(!now)return NO;
     NSArray *keys=[desired[@"enabled"] boolValue]?@[@"batterySleep",@"enabled"]:@[@"enabled",@"batterySleep"];
-    for(NSString *key in keys){
-        if([before[key] isEqual:desired[key]])continue;
-        if(!same(powerState(),expected))return NO;
-        if(!writeField(key,desired[key]))return NO;
-        written[key]=desired[key];expected[key]=desired[key];
-        NSMutableDictionary *record=[readJSON(Restore) mutableCopy];
-        if(record){record[@"owned"]=written.allKeys;if(!writeJSON(Restore,record))return NO;}
-    }
+    for(NSString *key in keys)
+        if(![now[key] isEqual:desired[key]]&&!writeField(key,desired[key]))return NO;
     return same(powerState(),desired);
-}
-static BOOL rollbackOwned(NSDictionary *before, NSDictionary *written) {
-    BOOL ok=YES;
-    for(NSString *key in @[@"enabled",@"batterySleep"]){
-        NSDictionary *now=powerState();
-        if(written[key] && [now[key] isEqual:written[key]])ok=writeField(key,before[key])&&ok;
-    }
-    return ok;
 }
 static NSDictionary *handle(NSDictionary *request) {
     NSString *op=request[@"op"];
     NSDictionary *before=powerState();
     if(!before)return failure(@"POWER",@"无法读取系统电源状态");
-    NSDictionary *record=restoreRecord();
-#ifndef POWER_TEST
-    if([[NSFileManager defaultManager] fileExistsAtPath:Restore]&&!record)return failure(@"POWER",@"电源恢复记录无效");
-#endif
-    if(!validRecord(record))return failure(@"POWER",@"电源恢复记录无效");
-    if([op isEqual:@"state"])return stateView(before,record);
+    if([op isEqual:@"state"])return stateView(before);
     if([op isEqual:@"verifyInstall"]){
         NSString *transaction=readJSON(Manifest)[@"transaction"];
         if(![transaction isKindOfClass:NSString.class]||![request[@"transaction"] isEqual:transaction])
             return failure(@"POWER_INSTALL_VERIFY",@"没有匹配的助手安装事务");
         if(!writeJSON(InstallReady,@{@"transaction":transaction}))
             return failure(@"POWER_INSTALL_VERIFY",@"无法确认助手连接");
-        return stateView(before,record);
+        return stateView(before);
     }
     BOOL removing=[op isEqual:@"prepareRemove"];
     if(![op isEqual:@"set"]&&!removing)return failure(@"POWER_PROTOCOL",@"不支持的电源操作");
     if(!removing){
-        if(!number(request[@"enabled"],1)||!number(request[@"beforeEnabled"],1)||!number(request[@"beforeSleep"],1440))
-            return failure(@"POWER_PROTOCOL",@"电源参数无效");
+        if(!number(request[@"enabled"],1))return failure(@"POWER_PROTOCOL",@"电源参数无效");
         if(![before[@"supported"] boolValue])return failure(@"UNSUPPORTED",@"此设备不支持电池合盖控制");
-        if(!same(before,@{@"enabled":request[@"beforeEnabled"],@"batterySleep":request[@"beforeSleep"]}))
-            return failure(@"CONFLICT",@"电源状态已变化，请重新操作");
-        if(request[@"beforeOwnership"] && ![request[@"beforeOwnership"] isEqual:stateView(before,record)[@"state"][@"ownership"]])
-            return failure(@"CONFLICT",@"电源归属已变化，请重新操作");
     }
+    NSDictionary *record=restoreRecord();
     NSMutableDictionary *desired=[before mutableCopy];
-    NSDictionary *nextRecord=nil;
-    if(!removing && [request[@"enabled"] boolValue]){
+    if(!removing&&[request[@"enabled"] boolValue]){
+        // Remember the values to put back before the first change.
+        if(!record&&!writeJSON(Restore,@{@"version":@2,@"original":before}))
+            return failure(@"POWER",@"无法保存电源恢复记录");
         desired[@"enabled"]=@YES;desired[@"batterySleep"]=@0;
-        nextRecord=@{@"version":@2,@"original":before,@"expected":desired,@"owned":@[],@"transaction":NSUUID.UUID.UUIDString};
-    }else{
-        for(NSString *key in @[@"enabled",@"batterySleep"])
-            if(owns(record,before,key))desired[key]=record[@"original"][key];
-        // A user explicitly closing an externally enabled state clears only the
-        // inhibit flag. Removal itself never clears another application's flag.
-        if(!removing)desired[@"enabled"]=@NO;
-    }
-    // Persist before pmset. Even an interrupted operation retains its before/after
-    // values; subsequent explicit operations can safely retire stale ownership.
-    NSDictionary *transaction=nextRecord?:@{@"version":@2,@"release":@YES,@"original":before,@"expected":desired,@"transaction":NSUUID.UUID.UUIDString};
-    if(!writeJSON(Restore,transaction))return failure(@"POWER",@"无法保存电源恢复记录");
-    NSMutableDictionary *written=[NSMutableDictionary dictionary];
-    if(!applyOwned(before,desired,written)){
-        BOOL rolledBack=rollbackOwned(before,written);
-        if(rolledBack&&same(powerState(),before))writeJSON(Restore,record);
-        else {
-            NSMutableDictionary *remaining=[transaction mutableCopy];NSMutableArray *keys=[NSMutableArray array];
-            NSDictionary *actual=powerState();
-            for(NSString *key in written)if([actual[key] isEqual:written[key]] && ![actual[key] isEqual:before[key]])[keys addObject:key];
-            remaining[@"owned"]=keys;writeJSON(Restore,remaining);
+        if(!apply(desired)){
+            if(!record&&apply(before))writeJSON(Restore,nil);
+            return failure(@"POWER",@"无法更改电源设置，请重试");
         }
-        return failure(@"CONFLICT",@"操作期间电源状态变化，已保留外部修改，请重试");
+        return stateView(powerState());
     }
-    if(nextRecord){NSMutableDictionary *claimed=[nextRecord mutableCopy];claimed[@"owned"]=written.allKeys;nextRecord=claimed;}
-    if(!writeJSON(Restore,nextRecord)){
-        rollbackOwned(before,written);
-        return failure(@"POWER",@"电源恢复记录更新失败");
+    // Turning it off puts back the remembered sleep time; removing the helper
+    // puts back the whole remembered state.
+    NSDictionary *original=record[@"original"];
+    if(original){
+        desired[@"batterySleep"]=original[@"batterySleep"];
+        if(removing)desired[@"enabled"]=original[@"enabled"];
     }
-    return stateView(powerState(),nextRecord);
+    if(!removing)desired[@"enabled"]=@NO;
+    if(!apply(desired))return failure(@"POWER",@"无法更改电源设置，请重试");
+    if(readJSON(Restore)&&!writeJSON(Restore,nil))return failure(@"POWER",@"电源恢复记录更新失败");
+    return stateView(powerState());
 }
 static NSString *codePath(SecCodeRef code) {
     CFDictionaryRef info=NULL;if(SecCodeCopySigningInformation(code,kSecCSSigningInformation,&info)!=errSecSuccess)return nil;
@@ -355,16 +296,9 @@ static NSDictionary *testState(BOOL enabled, NSInteger minutes) {
 static void testReset(BOOL enabled, NSInteger minutes) {
     TestFiles=[NSMutableDictionary dictionary];TestState=testState(enabled,minutes);
     TestFailWrite=NO;TestFailDirectorySync=NO;TestFieldWrites=0;TestFailFieldWrite=0;
-    TestExternalAfterFieldWrite=0;TestExternalState=nil;TestFailRecordAfterFieldWrite=0;
 }
 static NSDictionary *testSet(BOOL enabled) {
-    // An old caller's default must never be used as restoration authority.
-    return handle(@{@"op":@"set",@"enabled":@(enabled),@"minutes":@1,
-                    @"beforeEnabled":TestState[@"enabled"],@"beforeSleep":TestState[@"batterySleep"]});
-}
-static BOOL testView(NSString *ownership, BOOL externalChanged) {
-    NSDictionary *view=handle(@{@"op":@"state"})[@"state"];
-    return [view[@"ownership"] isEqual:ownership]&&[view[@"externalChanged"] isEqual:@(externalChanged)];
+    return handle(@{@"op":@"set",@"enabled":@(enabled)});
 }
 int main(void) {
     @autoreleasepool {
@@ -385,176 +319,74 @@ int main(void) {
         [TestFiles removeObjectForKey:Manifest];[TestFiles removeObjectForKey:InstallReady];
         CHECK(handle(@{@"op":@"verifyInstall",@"transaction":@"fresh-install"})[@"error"]);
 
-        // A real zero remains zero, while a nonzero original is owned by root.
+        // Enabling remembers the original sleep time (including zero); disabling restores it.
         for(NSNumber *minutes in @[@0,@7]){
             testReset(NO,minutes.integerValue);
-            CHECK(testView(@"none",NO));
             CHECK(!testSet(YES)[@"error"]);
             CHECK(same(TestState,testState(YES,0)));
-            CHECK([readJSON(Restore)[@"version"] isEqual:@2]);
             CHECK([readJSON(Restore)[@"original"][@"batterySleep"] isEqual:minutes]);
-            CHECK([readJSON(Restore)[@"expected"][@"batterySleep"] isEqual:@0]);
-            CHECK(testView(@"application",NO));
             if(minutes.integerValue==0)CHECK(TestFieldWrites==1);
+            // Enabling again keeps the first remembered value.
+            CHECK(!testSet(YES)[@"error"]);
+            CHECK([readJSON(Restore)[@"original"][@"enabled"] isEqual:@NO]);
             CHECK(!testSet(NO)[@"error"]);
             CHECK(same(TestState,testState(NO,minutes.integerValue)));
-            CHECK(!readJSON(Restore));CHECK(testView(@"none",NO));
-        }
-
-        // External enable has no restoration record; closing only clears its flag.
-        for(NSNumber *minutes in @[@0,@5]){
-            testReset(YES,minutes.integerValue);
-            CHECK(testView(@"external",NO));
-            CHECK(!testSet(NO)[@"error"]);
-            CHECK(same(TestState,testState(NO,minutes.integerValue)));
-            CHECK(TestFieldWrites==1);CHECK(!readJSON(Restore));
-            testReset(YES,minutes.integerValue);
-            CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
-            CHECK(same(TestState,testState(YES,minutes.integerValue)));
-            CHECK(TestFieldWrites==0);CHECK(testView(@"external",NO));
-        }
-
-        // Taking over an already-enabled state owns sleep only; removal keeps its flag.
-        testReset(YES,5);
-        CHECK(!testSet(YES)[@"error"]);
-        CHECK(!owns(restoreRecord(),TestState,@"enabled"));
-        CHECK(owns(restoreRecord(),TestState,@"batterySleep"));
-        CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
-        CHECK(same(TestState,testState(YES,5)));CHECK(!readJSON(Restore));
-
-        // External sleep changes survive both explicit close and helper removal.
-        for(NSString *op in @[@"set",@"prepareRemove"]){
-            testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
-            TestState=testState(YES,3);CHECK(testView(@"mixed",YES));
-            NSDictionary *result=[op isEqual:@"set"]?testSet(NO):handle(@{@"op":op});
-            CHECK(!result[@"error"]);CHECK(same(TestState,testState(NO,3)));
             CHECK(!readJSON(Restore));
         }
 
-        // External close releases enabled ownership but leaves untouched sleep restorable.
-        testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
-        TestState=testState(NO,0);CHECK(testView(@"mixed",YES));
-        CHECK(!testSet(NO)[@"error"]);CHECK(same(TestState,testState(NO,7)));
-        CHECK(!readJSON(Restore));
-
-        // An expired record is rebased at the next explicit enable, including zero.
-        for(NSNumber *minutes in @[@0,@4]){
-            testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
-            NSString *previousTransaction=readJSON(Restore)[@"transaction"];
-            TestState=testState(NO,minutes.integerValue);
-            CHECK(!testSet(YES)[@"error"]);
-            CHECK(![readJSON(Restore)[@"transaction"] isEqual:previousTransaction]);
-            CHECK(same(readJSON(Restore)[@"original"],testState(NO,minutes.integerValue)));
-            CHECK(!testSet(NO)[@"error"]);
-            CHECK(same(TestState,testState(NO,minutes.integerValue)));CHECK(!readJSON(Restore));
-        }
-        testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
-        TestState=testState(NO,4);CHECK(testView(@"none",YES));
-        NSUInteger writes=TestFieldWrites;
+        // Without a record, turning off only clears the flag and removal changes nothing.
+        testReset(YES,5);
+        CHECK(!testSet(NO)[@"error"]);
+        CHECK(same(TestState,testState(NO,5)));CHECK(TestFieldWrites==1);CHECK(!readJSON(Restore));
+        testReset(YES,5);
         CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
-        CHECK(same(TestState,testState(NO,4)));CHECK(TestFieldWrites==writes);
-        CHECK(!readJSON(Restore));
+        CHECK(same(TestState,testState(YES,5)));CHECK(TestFieldWrites==0);
 
-        // Root v1 is trusted and normalized to v2 without inventing a default.
-        for(NSNumber *minutes in @[@0,@7]){
-            testReset(YES,0);
-            TestFiles[Restore]=@{@"version":@1,@"minutes":minutes,@"expected":testState(YES,0)};
-            CHECK([restoreRecord()[@"version"] isEqual:@2]);
-            CHECK(same(restoreRecord()[@"original"],testState(NO,minutes.integerValue)));
-            CHECK(testView(@"application",NO));
-            CHECK(!testSet(NO)[@"error"]);
-            CHECK(same(TestState,testState(NO,minutes.integerValue)));CHECK(!readJSON(Restore));
-        }
-
-        // Interrupted release transactions never acquire inverse ownership.
-        testReset(NO,7);
-        TestFiles[Restore]=@{@"version":@2,@"original":testState(YES,0),@"expected":testState(NO,7),
-                             @"owned":@[@"enabled",@"batterySleep"],@"transaction":@"interrupted-release",@"release":@YES};
-        CHECK(testView(@"none",NO));
+        // Enabling over an already-enabled state: off clears the flag, removal restores it.
+        testReset(YES,5);CHECK(!testSet(YES)[@"error"]);
+        CHECK(same(TestState,testState(YES,0)));
         CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
-        CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==0);
+        CHECK(same(TestState,testState(YES,5)));CHECK(!readJSON(Restore));
+        testReset(YES,5);CHECK(!testSet(YES)[@"error"]);CHECK(!testSet(NO)[@"error"]);
+        CHECK(same(TestState,testState(NO,5)));CHECK(!readJSON(Restore));
 
-        // CAS rejects an outdated request before persisting or writing a field.
-        testReset(NO,7);
-        CHECK([handle(@{@"op":@"set",@"enabled":@YES,@"beforeEnabled":@NO,@"beforeSleep":@1})[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==0);CHECK(!readJSON(Restore));
-        CHECK([handle(@{@"op":@"run",@"command":@"true"})[@"error"][@"code"] isEqual:@"POWER_PROTOCOL"]);
-        CHECK([handle(@{@"op":@"set",@"enabled":@2,@"beforeEnabled":@NO,@"beforeSleep":@7})[@"error"][@"code"] isEqual:@"POWER_PROTOCOL"]);
-
-        // Ownership CAS rejects unchanged physical values when authority changed.
-        testReset(YES,0);
-        CHECK([handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
-                        @"beforeOwnership":@"application"})[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(YES,0)));CHECK(TestFieldWrites==0);CHECK(!readJSON(Restore));
-        CHECK(!handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
-                        @"beforeOwnership":@"external"})[@"error"]);
-        CHECK(same(TestState,testState(NO,0)));CHECK(TestFieldWrites==1);
-
+        // Removal while enabled restores the remembered state.
         testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
-        NSDictionary *ownedRecord=[readJSON(Restore) copy];
-        NSUInteger ownedWrites=TestFieldWrites;
-        CHECK([handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
-                        @"beforeOwnership":@"external"})[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(YES,0)));CHECK(TestFieldWrites==ownedWrites);
-        CHECK([readJSON(Restore) isEqual:ownedRecord]);
-        CHECK(!handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
-                        @"beforeOwnership":@"application"})[@"error"]);
+        CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
         CHECK(same(TestState,testState(NO,7)));CHECK(!readJSON(Restore));
 
-        testReset(NO,7);CHECK(!testSet(YES)[@"error"]);
-        ownedWrites=TestFieldWrites;
-        [TestFiles removeObjectForKey:Restore];
-        CHECK(testView(@"external",NO));
-        CHECK([handle(@{@"op":@"set",@"enabled":@NO,@"beforeEnabled":@YES,@"beforeSleep":@0,
-                        @"beforeOwnership":@"application"})[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(YES,0)));CHECK(TestFieldWrites==ownedWrites);CHECK(!readJSON(Restore));
+        // A record written by the previous helper version still restores its original.
+        testReset(YES,0);
+        TestFiles[Restore]=@{@"version":@2,@"original":testState(NO,7),@"expected":testState(YES,0),
+                             @"owned":@[@"enabled",@"batterySleep"],@"transaction":@"fixture"};
+        CHECK(!testSet(NO)[@"error"]);
+        CHECK(same(TestState,testState(NO,7)));CHECK(!readJSON(Restore));
 
-        // A second-field failure rolls back only the first write.
+        // Interrupted release records and malformed records carry nothing to restore.
+        for(NSDictionary *stale in @[@{@"version":@2,@"original":testState(YES,0),@"release":@YES},
+                                     @{@"version":@2,@"original":@{}},@{@"version":@1,@"minutes":@7}]){
+            testReset(NO,7);TestFiles[Restore]=stale;
+            CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
+            CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==0);CHECK(!readJSON(Restore));
+        }
+
+        CHECK([handle(@{@"op":@"run",@"command":@"true"})[@"error"][@"code"] isEqual:@"POWER_PROTOCOL"]);
+        CHECK([handle(@{@"op":@"set",@"enabled":@2})[@"error"][@"code"] isEqual:@"POWER_PROTOCOL"]);
+
+        // A failed second write puts the first one back and drops the new record.
         testReset(NO,7);TestFailFieldWrite=2;
-        CHECK([testSet(YES)[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==3);CHECK(!readJSON(Restore));
+        CHECK([testSet(YES)[@"error"][@"code"] isEqual:@"POWER"]);
+        CHECK(same(TestState,testState(NO,7)));CHECK(!readJSON(Restore));
 
-        // CAS between writes preserves an external sleep value through rollback.
-        testReset(NO,7);TestExternalAfterFieldWrite=1;TestExternalState=testState(NO,4);
-        CHECK([testSet(YES)[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(NO,4)));CHECK(TestFieldWrites==1);
-        CHECK(!testSet(YES)[@"error"]);CHECK(!testSet(NO)[@"error"]);
-        CHECK(same(TestState,testState(NO,4)));
-
-        // A simultaneous external enable must not be claimed by a failed transaction.
-        testReset(NO,7);TestExternalAfterFieldWrite=1;TestExternalState=testState(YES,0);
-        CHECK([testSet(YES)[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(YES,7)));
-        CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
-        CHECK(same(TestState,testState(YES,7)));
-
-        // Field-conditional rollback also protects a value changed after a write.
-        testReset(YES,4);
-        CHECK(rollbackOwned(testState(NO,7),@{@"enabled":@YES,@"batterySleep":@0}));
-        CHECK(same(TestState,testState(NO,4)));CHECK(TestFieldWrites==1);
-
-        // Persistence failures never make a field write before the root record exists.
+        // Nothing is written to pmset before the record is saved.
         testReset(NO,7);TestFailWrite=YES;
         CHECK([testSet(YES)[@"error"][@"code"] isEqual:@"POWER"]);
-        CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==0);CHECK(!readJSON(Restore));
-        TestFailWrite=NO;CHECK(!testSet(YES)[@"error"]);
-        TestFailWrite=YES;writes=TestFieldWrites;
-        CHECK(handle(@{@"op":@"prepareRemove"})[@"error"]);
-        CHECK(testSet(NO)[@"error"]);CHECK(same(TestState,testState(YES,0)));
-        CHECK(TestFieldWrites==writes);CHECK(readJSON(Restore));
-        TestFailWrite=NO;CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
-        CHECK(same(TestState,testState(NO,7)));CHECK(!readJSON(Restore));
-
-        // A record update failure after the second field rolls back both writes.
-        testReset(NO,7);TestFailRecordAfterFieldWrite=2;
-        CHECK([testSet(YES)[@"error"][@"code"] isEqual:@"CONFLICT"]);
-        CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==4);
-        TestFailWrite=NO;CHECK(!handle(@{@"op":@"prepareRemove"})[@"error"]);
-        CHECK(same(TestState,testState(NO,7)));
-
-        testReset(NO,7);TestFiles[Restore]=@{@"version":@2,@"original":@{},@"expected":@{}};
-        CHECK([testSet(YES)[@"error"][@"code"] isEqual:@"POWER"]);
         CHECK(same(TestState,testState(NO,7)));CHECK(TestFieldWrites==0);
+        // A record that cannot be cleared is reported and kept for the next attempt.
+        TestFailWrite=NO;CHECK(!testSet(YES)[@"error"]);
+        TestFailWrite=YES;CHECK(testSet(NO)[@"error"]);CHECK(readJSON(Restore));
+        TestFailWrite=NO;CHECK(!testSet(NO)[@"error"]);
+        CHECK(same(TestState,testState(NO,7)));CHECK(!readJSON(Restore));
         puts("power helper transaction tests passed (simulated)");
     }return 0;
 }
