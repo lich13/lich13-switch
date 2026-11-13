@@ -270,6 +270,299 @@ pub(super) fn capacity_message(status: StatusCode, body: &[u8]) -> bool {
 pub(super) fn capacity_delay(settings: &Settings, retry: Option<Duration>) -> Duration {
     retry.unwrap_or(Duration::from_secs(settings.capacity_retry_seconds))
 }
+/// Everything the relay task owns once the response head has been accepted.
+struct Relay {
+    active: Active,
+    traffic: super::freeze::Ticket,
+    slot: super::admission::Slot,
+    protocol: super::protocol::Protocol,
+    g: Gateway,
+    route: Route,
+    model: Option<String>,
+    permits: super::health_settlement::Permits,
+    cfg: Settings,
+    status: StatusCode,
+    attempted: usize,
+    /// Frames read while inspecting the start of the response.
+    prefix: Vec<(hyper::body::Frame<Bytes>, bool, bool)>,
+    request_budget: super::wait_budget::WaitBudget,
+    sender: tokio::sync::mpsc::Sender<ForwardFrame>,
+    activity: std::sync::Arc<super::wire_progress::Activity>,
+    shutdown: Option<watch::Receiver<bool>>,
+    ended: bool,
+    failed: bool,
+    delivery: std::sync::Arc<super::protocol::Delivery>,
+    dedicated_search: bool,
+    body: WireBody,
+    inspected_bytes: u64,
+    neutral: bool,
+    operation: crate::usage::model::Operation,
+}
+/// Relays the inspected prefix and the rest of the upstream body to the
+/// client, settling usage, health and delivery when the stream ends.
+async fn relay(relay: Relay) {
+    let Relay {
+        active,
+        traffic,
+        slot,
+        mut protocol,
+        g,
+        route,
+        model,
+        mut permits,
+        cfg,
+        status,
+        attempted,
+        prefix,
+        request_budget,
+        sender,
+        activity,
+        mut shutdown,
+        ended,
+        failed,
+        delivery,
+        dedicated_search,
+        mut body,
+        mut inspected_bytes,
+        neutral,
+        operation,
+    } = relay;
+    let mut active = Some(active);
+    let traffic = traffic;
+    // The concurrency slot is held until the response has been relayed.
+    let _slot = slot;
+    remember(&protocol, &g, &route, model.as_deref());
+    observe_protocol(
+        &protocol,
+        &mut permits,
+        &cfg,
+        &g,
+        &route,
+        model.as_deref(),
+        Some(status.as_u16()),
+        attempted,
+    );
+    let mut disconnected = false;
+    let prefix_len = prefix.len();
+    for (index, (frame, terminal, business)) in prefix.into_iter().enumerate() {
+        tokio::select! {
+            biased;
+            _ = request_budget.cancelled() => { protocol.finish(Some(status.as_u16()), code::CANCELLED); permits.neutral(&cfg); let _ = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await; return; }
+            _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); return; }
+            result = send_frame(&sender, Ok(frame), terminal, ended && !failed && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; break; } }
+        }
+        protocol.output_handed(business);
+    }
+    if ended {
+        if failed && !disconnected {
+            // Preserve the received prefix, then expose the transport failure.
+            // A clean EOF here would hide an incomplete generation.
+            disconnected = send_error_frame(
+                &sender,
+                &mut protocol,
+                &activity,
+                &mut shutdown,
+                status.as_u16(),
+                cfg.idle_seconds,
+            )
+            .await;
+        }
+        drop(sender);
+        if disconnected {
+            protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
+        } else {
+            finish_delivery(
+                &delivery,
+                &mut protocol,
+                &activity,
+                &mut shutdown,
+                status.as_u16(),
+                cfg.idle_seconds,
+            )
+            .await;
+        }
+        if protocol.succeeded() && !dedicated_search {
+            g.persist_success(&route.provider).await;
+        }
+        return;
+    }
+    loop {
+        if disconnected || sender.is_closed() {
+            disconnected = true;
+            DownstreamEnd::Closed.record(&delivery, &mut protocol);
+            active.take();
+            permits.neutral(&cfg);
+            usage_tail(&mut body, &mut protocol, &mut shutdown).await;
+            break;
+        }
+        // Backpressure is awaited separately. Only time spent polling the
+        // upstream measures its silence; completed events do not cut off tails.
+        let limit = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
+        let next = tokio::select! {
+            biased;
+            _ = request_budget.cancelled() => {
+                protocol.finish(Some(status.as_u16()), code::CANCELLED);
+                permits.neutral(&cfg);
+                disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await;
+                break;
+            }
+            _ = request_budget.wait() => {
+                protocol.timeout("retry_budget", cfg.retry_budget_seconds);
+                protocol.finish(Some(status.as_u16()), code::FIRST_BYTE_TIMEOUT);
+                disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await;
+                break;
+            }
+            _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
+            _ = sender.closed(), if !disconnected => { disconnected = true; continue; }
+            frame = request_budget.response(limit, operation == crate::usage::model::Operation::Compaction, body.frame()) => frame,
+        };
+        match next {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    let skipped = inspected_bytes.min(data.len() as u64) as usize;
+                    inspected_bytes -= skipped as u64;
+                    if skipped < data.len() {
+                        protocol.feed(&data[skipped..]);
+                    }
+                }
+                let complete = body.is_end_stream();
+                if complete {
+                    protocol.finish(
+                        Some(status.as_u16()),
+                        if neutral { code::HTTP } else { code::OK },
+                    );
+                }
+                remember(&protocol, &g, &route, model.as_deref());
+                observe_protocol(
+                    &protocol,
+                    &mut permits,
+                    &cfg,
+                    &g,
+                    &route,
+                    model.as_deref(),
+                    Some(status.as_u16()),
+                    attempted,
+                );
+                if !disconnected {
+                    tokio::select! {
+                        biased;
+                        _ = request_budget.cancelled() => { protocol.finish(Some(status.as_u16()), code::CANCELLED); permits.neutral(&cfg); disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await; break; }
+                        _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
+                        result = send_frame(&sender, Ok(frame), protocol.terminal_observed(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; } }
+                    }
+                    if !disconnected {
+                        protocol.output_handed(protocol.business_observed());
+                    }
+                }
+                if complete {
+                    break;
+                }
+            }
+            Ok(None) => {
+                protocol.finish(
+                    Some(status.as_u16()),
+                    if neutral { code::HTTP } else { code::OK },
+                );
+                // EOF may finish a JSON value or an SSE event without a
+                // trailing newline. All preceding body frames were acknowledged.
+                delivery.handed(0, protocol.terminal_observed());
+                protocol.output_handed(protocol.business_observed());
+                break;
+            }
+            result => {
+                let category = if result.is_err() {
+                    code::STREAM_TIMEOUT
+                } else {
+                    code::STREAM_INTERRUPTED
+                };
+                if result.is_err() {
+                    protocol.timeout("stream_idle", cfg.idle_seconds);
+                }
+                protocol.finish(Some(status.as_u16()), category);
+                if !disconnected && protocol.transport_failure() {
+                    disconnected = send_error_frame(
+                        &sender,
+                        &mut protocol,
+                        &activity,
+                        &mut shutdown,
+                        status.as_u16(),
+                        cfg.idle_seconds,
+                    )
+                    .await;
+                }
+                break;
+            }
+        }
+    }
+    // Close the body channel before waiting: Hyper must see its end in
+    // order to flush the final chunk/trailers. Socket completion is local
+    // write evidence, never an acknowledgement by the client.
+    traffic.finishing();
+    drop(body);
+    drop(sender);
+    if disconnected {
+        protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
+    } else {
+        finish_delivery(
+            &delivery,
+            &mut protocol,
+            &activity,
+            &mut shutdown,
+            status.as_u16(),
+            cfg.idle_seconds,
+        )
+        .await;
+    }
+    if disconnected {
+        return;
+    }
+    remember(&protocol, &g, &route, model.as_deref());
+    observe_protocol(
+        &protocol,
+        &mut permits,
+        &cfg,
+        &g,
+        &route,
+        model.as_deref(),
+        Some(status.as_u16()),
+        attempted,
+    );
+    if protocol.succeeded() && !dedicated_search {
+        g.persist_success(&route.provider).await;
+    }
+}
+/// The client-facing body: frames from the relay task, with delivery marked
+/// before each frame is yielded.
+fn delivered(
+    mut receiver: tokio::sync::mpsc::Receiver<ForwardFrame>,
+    output_delivery: std::sync::Arc<super::protocol::Delivery>,
+    empty: bool,
+) -> WireBody {
+    let guard = DeliveryGuard {
+        delivery: output_delivery.clone(),
+        complete: empty,
+    };
+    let output = async_stream::stream! {
+        let mut guard = guard;
+        while let Some((frame, terminal, complete, ack)) = receiver.recv().await {
+            let bytes = frame.as_ref().ok().and_then(|f| f.data_ref()).map_or(0, Bytes::len);
+            output_delivery.handed(bytes, terminal);
+            if frame.is_err() {
+                guard.complete = true;
+                output_delivery.event("response_body_aborted_upstream");
+                output_delivery.settle();
+            } else if complete {
+                guard.complete = true;
+                output_delivery.body_complete();
+            }
+            let _ = ack.send(());
+            yield frame;
+        }
+        guard.complete = true;
+        output_delivery.body_complete();
+    };
+    StreamBody::new(output).boxed_unsync()
+}
 fn stopped() -> Response<WireBody> {
     error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
 }
@@ -2265,9 +2558,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 super::failover::Exit::Forwarded
             });
-            let Admission {
-                mut permits, slot, ..
-            } = admission;
+            let Admission { permits, slot, .. } = admission;
             let g = gateway.clone();
             let cfg = settings.clone();
             let neutral = status.as_u16() >= 400;
@@ -2288,248 +2579,49 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .get::<std::sync::Arc<super::wire_progress::Activity>>()
                 .cloned()
                 .unwrap_or_default();
-            let (sender, mut receiver) = tokio::sync::mpsc::channel::<ForwardFrame>(2);
+            let (sender, receiver) = tokio::sync::mpsc::channel::<ForwardFrame>(2);
             let empty = ended && !failed && prefix.is_empty();
             if empty {
                 output_delivery.body_complete();
             }
-            let mut shutdown = gateway
+            let shutdown = gateway
                 .request_state()
                 .shutdown
                 .as_ref()
                 .map(watch::Sender::subscribe);
             let request_budget = request_budget.clone();
-            tokio::spawn(async move {
-                let mut active = Some(active);
-                let traffic = traffic;
-                // The concurrency slot is held until the response has been relayed.
-                let _slot = slot;
-                remember(&protocol, &g, &route, model.as_deref());
-                observe_protocol(
-                    &protocol,
-                    &mut permits,
-                    &cfg,
-                    &g,
-                    &route,
-                    model.as_deref(),
-                    Some(status.as_u16()),
-                    attempted,
-                );
-                let mut disconnected = false;
-                let prefix_len = prefix.len();
-                for (index, (frame, terminal, business)) in prefix.into_iter().enumerate() {
-                    tokio::select! {
-                        biased;
-                        _ = request_budget.cancelled() => { protocol.finish(Some(status.as_u16()), code::CANCELLED); permits.neutral(&cfg); let _ = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await; return; }
-                        _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); return; }
-                        result = send_frame(&sender, Ok(frame), terminal, ended && !failed && index + 1 == prefix_len, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; break; } }
-                    }
-                    protocol.output_handed(business);
-                }
-                if ended {
-                    if failed && !disconnected {
-                        // Preserve the received prefix, then expose the transport failure.
-                        // A clean EOF here would hide an incomplete generation.
-                        disconnected = send_error_frame(
-                            &sender,
-                            &mut protocol,
-                            &activity,
-                            &mut shutdown,
-                            status.as_u16(),
-                            cfg.idle_seconds,
-                        )
-                        .await;
-                    }
-                    drop(sender);
-                    if disconnected {
-                        protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
-                    } else {
-                        finish_delivery(
-                            &delivery,
-                            &mut protocol,
-                            &activity,
-                            &mut shutdown,
-                            status.as_u16(),
-                            cfg.idle_seconds,
-                        )
-                        .await;
-                    }
-                    if protocol.succeeded() && !dedicated_search {
-                        g.persist_success(&route.provider).await;
-                    }
-                    return;
-                }
-                loop {
-                    if disconnected || sender.is_closed() {
-                        disconnected = true;
-                        DownstreamEnd::Closed.record(&delivery, &mut protocol);
-                        active.take();
-                        permits.neutral(&cfg);
-                        usage_tail(&mut body, &mut protocol, &mut shutdown).await;
-                        break;
-                    }
-                    // Backpressure is awaited separately. Only time spent polling the
-                    // upstream measures its silence; completed events do not cut off tails.
-                    let limit = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
-                    let next = tokio::select! {
-                        biased;
-                        _ = request_budget.cancelled() => {
-                            protocol.finish(Some(status.as_u16()), code::CANCELLED);
-                            permits.neutral(&cfg);
-                            disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await;
-                            break;
-                        }
-                        _ = request_budget.wait() => {
-                            protocol.timeout("retry_budget", cfg.retry_budget_seconds);
-                            protocol.finish(Some(status.as_u16()), code::FIRST_BYTE_TIMEOUT);
-                            disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await;
-                            break;
-                        }
-                        _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
-                        _ = sender.closed(), if !disconnected => { disconnected = true; continue; }
-                        frame = request_budget.response(limit, operation == crate::usage::model::Operation::Compaction, body.frame()) => frame,
-                    };
-                    match next {
-                        Ok(Some(Ok(frame))) => {
-                            if let Some(data) = frame.data_ref() {
-                                let skipped = inspected_bytes.min(data.len() as u64) as usize;
-                                inspected_bytes -= skipped as u64;
-                                if skipped < data.len() {
-                                    protocol.feed(&data[skipped..]);
-                                }
-                            }
-                            let complete = body.is_end_stream();
-                            if complete {
-                                protocol.finish(
-                                    Some(status.as_u16()),
-                                    if neutral { code::HTTP } else { code::OK },
-                                );
-                            }
-                            remember(&protocol, &g, &route, model.as_deref());
-                            observe_protocol(
-                                &protocol,
-                                &mut permits,
-                                &cfg,
-                                &g,
-                                &route,
-                                model.as_deref(),
-                                Some(status.as_u16()),
-                                attempted,
-                            );
-                            if !disconnected {
-                                tokio::select! {
-                                    biased;
-                                    _ = request_budget.cancelled() => { protocol.finish(Some(status.as_u16()), code::CANCELLED); permits.neutral(&cfg); disconnected = send_error_frame(&sender, &mut protocol, &activity, &mut shutdown, status.as_u16(), cfg.idle_seconds).await; break; }
-                                    _ = stopping(&mut shutdown) => { protocol.finish(Some(status.as_u16()), code::GATEWAY_STOPPED); permits.neutral(&cfg); break; }
-                                    result = send_frame(&sender, Ok(frame), protocol.terminal_observed(), complete, &activity, cfg.idle_seconds) => { if let Err(reason) = result { reason.record(&delivery, &mut protocol); disconnected = true; } }
-                                }
-                                if !disconnected {
-                                    protocol.output_handed(protocol.business_observed());
-                                }
-                            }
-                            if complete {
-                                break;
-                            }
-                        }
-                        Ok(None) => {
-                            protocol.finish(
-                                Some(status.as_u16()),
-                                if neutral { code::HTTP } else { code::OK },
-                            );
-                            // EOF may finish a JSON value or an SSE event without a
-                            // trailing newline. All preceding body frames were acknowledged.
-                            delivery.handed(0, protocol.terminal_observed());
-                            protocol.output_handed(protocol.business_observed());
-                            break;
-                        }
-                        result => {
-                            let category = if result.is_err() {
-                                code::STREAM_TIMEOUT
-                            } else {
-                                code::STREAM_INTERRUPTED
-                            };
-                            if result.is_err() {
-                                protocol.timeout("stream_idle", cfg.idle_seconds);
-                            }
-                            protocol.finish(Some(status.as_u16()), category);
-                            if !disconnected && protocol.transport_failure() {
-                                disconnected = send_error_frame(
-                                    &sender,
-                                    &mut protocol,
-                                    &activity,
-                                    &mut shutdown,
-                                    status.as_u16(),
-                                    cfg.idle_seconds,
-                                )
-                                .await;
-                            }
-                            break;
-                        }
-                    }
-                }
-                // Close the body channel before waiting: Hyper must see its end in
-                // order to flush the final chunk/trailers. Socket completion is local
-                // write evidence, never an acknowledgement by the client.
-                traffic.finishing();
-                drop(body);
-                drop(sender);
-                if disconnected {
-                    protocol.finish(Some(status.as_u16()), code::CLIENT_DISCONNECTED);
-                } else {
-                    finish_delivery(
-                        &delivery,
-                        &mut protocol,
-                        &activity,
-                        &mut shutdown,
-                        status.as_u16(),
-                        cfg.idle_seconds,
-                    )
-                    .await;
-                }
-                if disconnected {
-                    return;
-                }
-                remember(&protocol, &g, &route, model.as_deref());
-                observe_protocol(
-                    &protocol,
-                    &mut permits,
-                    &cfg,
-                    &g,
-                    &route,
-                    model.as_deref(),
-                    Some(status.as_u16()),
-                    attempted,
-                );
-                if protocol.succeeded() && !dedicated_search {
-                    g.persist_success(&route.provider).await;
-                }
-            });
+            tokio::spawn(relay(Relay {
+                active,
+                traffic,
+                slot,
+                protocol,
+                g,
+                route,
+                model,
+                permits,
+                cfg,
+                status,
+                attempted,
+                prefix,
+                request_budget,
+                sender,
+                activity,
+                shutdown,
+                ended,
+                failed,
+                delivery,
+                dedicated_search,
+                body,
+                inspected_bytes,
+                neutral,
+                operation,
+            }));
             // Hyper may drop a Content-Length body immediately after its last frame,
             // without polling it again for None. Mark that frame before yielding it.
-            let guard = DeliveryGuard {
-                delivery: output_delivery.clone(),
-                complete: empty,
-            };
-            let output = async_stream::stream! {
-                let mut guard = guard;
-                while let Some((frame, terminal, complete, ack)) = receiver.recv().await {
-                    let bytes = frame.as_ref().ok().and_then(|f| f.data_ref()).map_or(0, Bytes::len);
-                    output_delivery.handed(bytes, terminal);
-                    if frame.is_err() {
-                        guard.complete = true;
-                        output_delivery.event("response_body_aborted_upstream");
-                        output_delivery.settle();
-                    } else if complete {
-                        guard.complete = true;
-                        output_delivery.body_complete();
-                    }
-                    let _ = ack.send(());
-                    yield frame;
-                }
-                guard.complete = true;
-                output_delivery.body_complete();
-            };
-            return Response::from_parts(response_parts, StreamBody::new(output).boxed_unsync());
+            return Response::from_parts(
+                response_parts,
+                delivered(receiver, output_delivery, empty),
+            );
         }
         failover.finish(if ordinary_attempts > settings.max_retries {
             super::failover::Exit::AttemptsExhausted
