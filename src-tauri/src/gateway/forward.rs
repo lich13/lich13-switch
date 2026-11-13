@@ -563,6 +563,120 @@ fn delivered(
     };
     StreamBody::new(output).boxed_unsync()
 }
+/// Why no upstream request was built for a candidate.
+enum Unbuilt {
+    /// The provider cannot take this request; try the next candidate.
+    Skip,
+    Reject(Box<Response<WireBody>>),
+}
+/// The request sent to one provider: the replayed body (with the model
+/// rewritten when the provider maps it), the provider's address and its
+/// credentials. Also returns the mapped upstream model, if any.
+async fn upstream_request(
+    route: &Route,
+    parts: &hyper::http::request::Parts,
+    replay: &Replay,
+    model: Option<&str>,
+    operation: crate::usage::model::Operation,
+    request_budget: &super::wait_budget::WaitBudget,
+    websocket: bool,
+) -> Result<(Request<WireBody>, Option<String>), Unbuilt> {
+    let uri = match route.target(&parts.uri) {
+        Ok(uri) => uri,
+        Err(_) => return Err(Unbuilt::Skip),
+    };
+    let upstream_model = route
+        .dsh_models
+        .as_ref()
+        .and_then(|mapping| model.and_then(|m| mapping.resolve(m)))
+        .map(str::to_owned);
+    let mapped = if let Some(upstream_model) = upstream_model
+        .as_ref()
+        .filter(|upstream| Some(upstream.as_str()) != model)
+    {
+        match replay
+            .mapped_model(
+                parts
+                    .headers
+                    .get(header::CONTENT_ENCODING)
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("identity"),
+                upstream_model,
+            )
+            .await
+        {
+            Ok(body) => Some(body),
+            Err(_) => {
+                return Err(Unbuilt::Reject(Box::new(error(
+                    StatusCode::BAD_REQUEST,
+                    code::CONFIG,
+                    "DSH 模型映射需要有效的 JSON 请求",
+                ))))
+            }
+        }
+    } else {
+        None
+    };
+    let mapped_length = mapped.as_ref().map(|b| b.len());
+    let mut request_body = mapped.map(replay::full).unwrap_or_else(|| replay.body());
+    if operation == crate::usage::model::Operation::Compaction {
+        let budget = request_budget.clone();
+        let identity = budget.deadline();
+        let mut dispatched = false;
+        request_body = request_body
+            .map_frame(move |frame| {
+                // Hyper polls the upload only after acquiring a connection.
+                // Queueing and connection setup retain their original budget.
+                if !dispatched {
+                    dispatched = true;
+                    budget.compaction_execution(identity, true);
+                }
+                frame
+            })
+            .boxed_unsync();
+    }
+    let mut upstream = Request::new(request_body);
+    *upstream.method_mut() = parts.method.clone();
+    *upstream.uri_mut() = uri;
+    *upstream.headers_mut() = parts.headers.clone();
+    clean_headers(upstream.headers_mut(), websocket);
+    upstream.headers_mut().remove(header::HOST);
+    upstream.headers_mut().remove(header::AUTHORIZATION);
+    upstream.headers_mut().remove("x-api-key");
+    upstream.headers_mut().remove("x-goog-api-key");
+    let Ok(auth) = header::HeaderValue::from_str(&format!("Bearer {}", route.provider.token))
+    else {
+        return Err(Unbuilt::Skip);
+    };
+    upstream.headers_mut().insert(header::AUTHORIZATION, auth);
+    if let Some(connection) = &route.grok {
+        if connection
+            .authenticate(upstream.headers_mut(), &route.provider.token)
+            .is_err()
+        {
+            return Err(Unbuilt::Reject(Box::new(error(
+                StatusCode::BAD_GATEWAY,
+                code::GROK_AUTH,
+                "供应商认证配置无效",
+            ))));
+        }
+    }
+    if let Some(length) = mapped_length {
+        upstream.headers_mut().remove(header::CONTENT_ENCODING);
+        upstream.headers_mut().remove(header::TRAILER);
+        upstream
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, length.into());
+    } else if !replay.has_trailers() {
+        upstream.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            header::HeaderValue::from(replay.length),
+        );
+    } else {
+        upstream.headers_mut().remove(header::CONTENT_LENGTH);
+    }
+    Ok((upstream, upstream_model))
+}
 fn stopped() -> Response<WireBody> {
     error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
 }
@@ -1353,101 +1467,21 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             }
             let reset_generation = admission.reset_generation;
             ids.retain(|id| id != &route.provider.id);
-            let uri = match route.target(&parts.uri) {
-                Ok(uri) => uri,
-                Err(_) => continue,
-            };
-            let upstream_model = route
-                .dsh_models
-                .as_ref()
-                .and_then(|mapping| model.as_deref().and_then(|m| mapping.resolve(m)))
-                .map(str::to_owned);
-            let mapped = if let Some(upstream_model) = upstream_model
-                .as_ref()
-                .filter(|upstream| Some(upstream.as_str()) != model.as_deref())
+            let (upstream, upstream_model) = match upstream_request(
+                &route,
+                &parts,
+                &replay,
+                model.as_deref(),
+                operation,
+                &request_budget,
+                websocket,
+            )
+            .await
             {
-                match replay
-                    .mapped_model(
-                        parts
-                            .headers
-                            .get(header::CONTENT_ENCODING)
-                            .and_then(|h| h.to_str().ok())
-                            .unwrap_or("identity"),
-                        upstream_model,
-                    )
-                    .await
-                {
-                    Ok(body) => Some(body),
-                    Err(_) => {
-                        return error(
-                            StatusCode::BAD_REQUEST,
-                            code::CONFIG,
-                            "DSH 模型映射需要有效的 JSON 请求",
-                        )
-                    }
-                }
-            } else {
-                None
+                Ok(built) => built,
+                Err(Unbuilt::Skip) => continue,
+                Err(Unbuilt::Reject(response)) => return *response,
             };
-            let mapped_length = mapped.as_ref().map(|b| b.len());
-            let mut request_body = mapped.map(replay::full).unwrap_or_else(|| replay.body());
-            if operation == crate::usage::model::Operation::Compaction {
-                let budget = request_budget.clone();
-                let identity = budget.deadline();
-                let mut dispatched = false;
-                request_body = request_body
-                    .map_frame(move |frame| {
-                        // Hyper polls the upload only after acquiring a connection.
-                        // Queueing and connection setup retain their original budget.
-                        if !dispatched {
-                            dispatched = true;
-                            budget.compaction_execution(identity, true);
-                        }
-                        frame
-                    })
-                    .boxed_unsync();
-            }
-            let mut upstream = Request::new(request_body);
-            *upstream.method_mut() = parts.method.clone();
-            *upstream.uri_mut() = uri;
-            *upstream.headers_mut() = parts.headers.clone();
-            clean_headers(upstream.headers_mut(), websocket);
-            upstream.headers_mut().remove(header::HOST);
-            upstream.headers_mut().remove(header::AUTHORIZATION);
-            upstream.headers_mut().remove("x-api-key");
-            upstream.headers_mut().remove("x-goog-api-key");
-            let Ok(auth) =
-                header::HeaderValue::from_str(&format!("Bearer {}", route.provider.token))
-            else {
-                continue;
-            };
-            upstream.headers_mut().insert(header::AUTHORIZATION, auth);
-            if let Some(connection) = &route.grok {
-                if connection
-                    .authenticate(upstream.headers_mut(), &route.provider.token)
-                    .is_err()
-                {
-                    return error(
-                        StatusCode::BAD_GATEWAY,
-                        code::GROK_AUTH,
-                        "供应商认证配置无效",
-                    );
-                }
-            }
-            if let Some(length) = mapped_length {
-                upstream.headers_mut().remove(header::CONTENT_ENCODING);
-                upstream.headers_mut().remove(header::TRAILER);
-                upstream
-                    .headers_mut()
-                    .insert(header::CONTENT_LENGTH, length.into());
-            } else if !replay.has_trailers() {
-                upstream.headers_mut().insert(
-                    header::CONTENT_LENGTH,
-                    header::HeaderValue::from(replay.length),
-                );
-            } else {
-                upstream.headers_mut().remove(header::CONTENT_LENGTH);
-            }
             admission.commit_rpm();
             attempted = attempted.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
