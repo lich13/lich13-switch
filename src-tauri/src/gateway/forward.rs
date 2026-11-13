@@ -969,6 +969,1925 @@ async fn transient_wait(
     Ok(gateway.routing_ids(pinned).contains(&route.provider.id)
         && route.health_for(requirement).available)
 }
+/// How an attempt ends when it has no response to relay.
+enum End {
+    /// Go around the attempt loop again.
+    Again,
+    /// Leave the loop; the request is answered from what the attempts left.
+    Stop,
+    Reply(Box<Response<WireBody>>),
+}
+impl End {
+    fn reply(response: Response<WireBody>) -> Self {
+        Self::Reply(Box::new(response))
+    }
+}
+/// Leaves the attempt loop the way `End` says.
+macro_rules! end {
+    ($end:expr) => {
+        match $end {
+            End::Again => continue,
+            End::Stop => break,
+            End::Reply(response) => return *response,
+        }
+    };
+}
+/// Takes the result of a stage, or leaves the attempt loop the way it ended.
+macro_rules! step {
+    ($stage:expr) => {
+        match $stage {
+            Ok(value) => value,
+            Err(end) => end!(end),
+        }
+    };
+}
+/// One provider's turn at the request, from admission to its response head.
+struct Attempt {
+    admission: Admission,
+    route: Route,
+    protocol: super::protocol::Protocol,
+    reset_generation: u64,
+    /// This attempt went to a different provider than the previous one.
+    rerouted: bool,
+    started: Instant,
+    search_deadline: tokio::time::Instant,
+}
+/// The start of an accepted response, read before anything reaches the client.
+struct Opening {
+    status: StatusCode,
+    parts: hyper::http::response::Parts,
+    body: WireBody,
+    /// Each frame with whether a terminal event and business output were seen by then.
+    prefix: Vec<(hyper::body::Frame<Bytes>, bool, bool)>,
+    prefix_bytes: usize,
+    ended: bool,
+    failed: bool,
+    failure_kind: &'static str,
+    /// The start was spooled to disk; `body` replays it before the rest.
+    preinspected: bool,
+    inspected_bytes: u64,
+}
+/// One HTTP request across its attempts: what was planned for it, the queue it
+/// still has, and what the attempts so far have left behind.
+struct Exchange<'a> {
+    gateway: &'a Gateway,
+    settings: &'a Settings,
+    mode: &'a str,
+    parts: &'a hyper::http::request::Parts,
+    replay: &'a Replay,
+    request_budget: &'a super::wait_budget::WaitBudget,
+    websocket: bool,
+    active: Active,
+    traffic: super::freeze::Ticket,
+    downstream_upgrade: Option<hyper::upgrade::OnUpgrade>,
+    plan: Plan,
+    ids: Vec<String>,
+    routes: std::collections::HashMap<String, Route>,
+    failover: super::failover::Tracker,
+    wait_budget: Budget,
+    last: Option<Response<WireBody>>,
+    last_error: Option<super::health_settlement::Reported>,
+    last_category: &'static str,
+    attempted: usize,
+    ordinary_attempts: usize,
+    capacity_protected: bool,
+    previous_provider: Option<String>,
+    capacity_pending: bool,
+    capacity_wait_owner: Option<String>,
+    hard_denied: std::collections::HashSet<(String, String)>,
+    capacity_retry_after: Option<Duration>,
+    rpm_retry_after: Option<Duration>,
+    capacity_sources: Vec<CapacitySource>,
+    transient_retries: u8,
+    retry_owner: Option<String>,
+    search_fallback: bool,
+}
+impl Exchange<'_> {
+    /// The queue is empty: waits out a pending capacity cooldown and rebuilds
+    /// the queue, or stops.
+    async fn await_capacity(&mut self) -> End {
+        if self.capacity_pending && self.ordinary_attempts <= self.settings.max_retries {
+            let delay = capacity_delay(self.settings, self.capacity_retry_after);
+            self.failover.wait(
+                if self.capacity_retry_after.is_some() {
+                    super::failover::WaitKind::RetryAfter
+                } else {
+                    super::failover::WaitKind::CapacityRetry
+                },
+                delay.as_secs(),
+            );
+            let owner_route = self
+                .capacity_wait_owner
+                .as_deref()
+                .or_else(|| {
+                    self.last_error
+                        .as_ref()
+                        .and_then(|e| e.provider_id.as_deref())
+                })
+                .and_then(|id| self.routes.get(id));
+            self.request_budget
+                .describe(None, self.plan.model.as_deref(), "capacity");
+            let waited = self
+                .gateway
+                .wait_capacity_checked(
+                    &self.capacity_sources,
+                    delay,
+                    self.settings.max_waiting,
+                    self.capacity_wait_owner.is_some(),
+                    owner_route,
+                    self.last_error.as_deref(),
+                )
+                .await;
+            match waited {
+                Ok(true) => {
+                    if let Some(route) = owner_route {
+                        self.hard_denied
+                            .insert((route.provider.id.clone(), route.provider.version.clone()));
+                    }
+                    self.capacity_wait_owner = None;
+                    self.failover
+                        .failure(super::failover::Failure::AccountRejected);
+                }
+                Ok(false) => {}
+                Err(Rejected::Stopped) => {
+                    self.failover.finish(super::failover::Exit::Stopped);
+                    return End::reply(stopped());
+                }
+                Err(_) => return End::Stop,
+            }
+
+            (self.ids, self.routes) = super::attempt::queue(
+                self.gateway,
+                self.plan.pinned.as_deref(),
+                &self.hard_denied,
+                self.parts.uri.path(),
+            );
+            if self.ids.is_empty() {
+                return End::Stop;
+            }
+            self.retry_owner = self
+                .capacity_wait_owner
+                .take()
+                .filter(|owner| self.ids.contains(owner));
+            self.capacity_pending = false;
+            self.capacity_retry_after = None;
+            self.capacity_sources.clear();
+            return End::Again;
+        }
+        End::Stop
+    }
+    /// The providers this attempt may be admitted to, and whether a provider
+    /// that takes new threads was passed over for not serving the model.
+    async fn candidates(&mut self) -> Result<(Vec<Route>, bool), End> {
+        let mut candidates: Vec<_> = self
+            .ids
+            .iter()
+            .filter_map(|id| self.routes.get(id).cloned())
+            .collect();
+        if self.plan.dedicated_search {
+            candidates.retain(|route| route.provider.search_only == self.search_fallback);
+            if candidates.is_empty() {
+                return Err(End::Stop);
+            }
+            if self.search_fallback {
+                self.wait_budget.search_fallback();
+            }
+        }
+        let mut observed_candidates = candidates.clone();
+        observed_candidates.extend(
+            self.gateway
+                .routing_ids(self.plan.pinned.as_deref())
+                .iter()
+                .filter_map(|id| self.gateway.route(id))
+                .filter(|r| !r.accepts_protocol(self.parts.uri.path())),
+        );
+        let matches_model = candidates.iter().any(|r| {
+            self.plan
+                .requirement
+                .allows(r.provider.allowed_models.as_deref())
+        });
+        let new_thread_model_denied = self.plan.ownership.as_ref().is_some_and(|lease| {
+            lease.admission_policy().0 == super::compaction::Intake::NewThread
+        }) && candidates.iter().any(|r| {
+            r.provider.take_new_threads
+                && !self
+                    .plan
+                    .requirement
+                    .allows(r.provider.allowed_models.as_deref())
+        });
+        if matches_model {
+            candidates.retain(|r| {
+                self.plan
+                    .requirement
+                    .allows(r.provider.allowed_models.as_deref())
+            });
+        }
+        self.wait_budget.capacity_owner = None;
+        if self.plan.dedicated_search && self.search_fallback {
+            // Search backups do not inherit generation intake policies.
+        } else if let Some(owner) = self.retry_owner.take() {
+            candidates.retain(|route| route.provider.id == owner);
+        } else if let Some(lease) = self
+            .plan
+            .ownership
+            .as_ref()
+            .filter(|_| self.plan.pinned.is_none())
+        {
+            candidates = if self.attempted > 0 || !self.hard_denied.is_empty() {
+                lease.candidates_after_failure(candidates, &self.plan.requirement)
+            } else {
+                lease.candidates_for_admission(
+                    candidates,
+                    &self.plan.requirement,
+                    &mut self.wait_budget,
+                )
+            };
+        } else if self.gateway.client_id() == super::ClientId::Codex
+            && self.mode == "auto"
+            && self.plan.pinned.is_none()
+            && !self.plan.auxiliary
+        {
+            candidates = super::compaction::unidentified_candidates(candidates);
+        }
+        if self.plan.dedicated_search && !self.search_fallback {
+            candidates.truncate(1);
+            if candidates
+                .first()
+                .is_some_and(|route| !route.health_for(&self.plan.requirement).available)
+            {
+                self.search_fallback = true;
+                return Err(End::Again);
+            }
+        }
+        // A second request entering during its owner's capacity cooldown must
+        // wait as well. Read the reset generation before the health snapshot.
+        if self.attempted == 0 && candidates.len() == 1 {
+            let owner = &candidates[0];
+            let source = self.gateway.0.admission.capacity_source(&owner.provider.id);
+            let health = owner.health_for(&self.plan.requirement);
+            if self.plan.established_capacity_owner.as_deref() == Some(&owner.provider.id)
+                && routing::capacity_cooling(&health)
+            {
+                self.wait_budget.protect_capacity();
+                self.failover
+                    .wait(super::failover::WaitKind::CapacityRetry, health.retry_in);
+                let cause = self.gateway.capacity_cause(
+                    &owner.provider.id,
+                    self.plan.model.as_deref(),
+                    &health,
+                );
+                match self
+                    .gateway
+                    .wait_capacity_checked(
+                        &[source],
+                        Duration::from_secs(health.retry_in),
+                        self.settings.max_waiting,
+                        true,
+                        Some(owner),
+                        cause.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(true) => {
+                        self.hard_denied
+                            .insert((owner.provider.id.clone(), owner.provider.version.clone()));
+                        self.failover
+                            .failure(super::failover::Failure::AccountRejected);
+                        self.last = Some(error(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            code::HTTP,
+                            "本次额度查询确认耗尽，没有可用的替代供应商",
+                        ));
+                        self.last_category = code::HTTP;
+                        self.last_error = cause.map(Into::into);
+                    }
+                    Ok(false) => {}
+                    Err(Rejected::Stopped) => return Err(End::reply(stopped())),
+                    Err(_) => {
+                        return Err(End::reply(error(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            code::CAPACITY,
+                            "等待队列已满",
+                        )))
+                    }
+                }
+                (self.ids, self.routes) = super::attempt::queue(
+                    self.gateway,
+                    self.plan.pinned.as_deref(),
+                    &self.hard_denied,
+                    self.parts.uri.path(),
+                );
+                return Err(End::Again);
+            }
+        }
+        let stage = if self.plan.unknown_affinity {
+            super::failover::Stage::UnknownOwner
+        } else if self.plan.pinned.is_some() {
+            super::failover::Stage::CursorPinned
+        } else if self.attempted > 0 || !self.hard_denied.is_empty() {
+            super::failover::Stage::FailureFallback
+        } else if self.plan.ownership.as_ref().is_some_and(|l| l.handoff) {
+            super::failover::Stage::ProactiveHandoff
+        } else {
+            super::failover::Stage::Initial
+        };
+        self.failover.candidates(
+            self.gateway,
+            stage,
+            &observed_candidates,
+            &candidates,
+            &self.plan.requirement,
+            self.parts.uri.path(),
+        );
+        if matches_model
+            && !candidates.iter().any(|r| {
+                self.plan
+                    .requirement
+                    .allows(r.provider.allowed_models.as_deref())
+            })
+        {
+            if self.attempted > 0 {
+                if self.capacity_pending {
+                    self.ids.clear();
+                    return Err(End::Again);
+                }
+                return Err(End::Stop);
+            }
+            self.failover
+                .finish(super::failover::Exit::NoEligibleProvider);
+            self.gateway.record_policy_rejection(
+                self.plan.model.as_deref(),
+                false,
+                super::compaction::rejection_reason(
+                    self.plan.thread.as_deref(),
+                    self.plan.hints.as_ref().ok(),
+                ),
+            );
+            return Err(End::reply(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                code::NO_ELIGIBLE_PROVIDER,
+                "没有符合线程接管策略的供应商",
+            )));
+        }
+        if self.gateway.client_id() == super::ClientId::Codex
+            && self.mode == "auto"
+            && !self.plan.dedicated_search
+            && self.plan.pinned.is_none()
+            && !self.plan.auxiliary
+        {
+            let (intake, owner) = self
+                .plan
+                .ownership
+                .as_ref()
+                .map_or((super::compaction::Intake::Ordinary, None), |lease| {
+                    lease.admission_policy()
+                });
+            self.wait_budget.set_intake(intake, owner);
+        }
+        if self.attempted > 0 || !self.hard_denied.is_empty() {
+            // Admission rechecks policy atomically. Its proactive priority gate
+            // must also yield to the failure queue, without dropping the claim.
+            self.wait_budget.handoff_owner = None;
+        }
+        Ok((candidates, new_thread_model_denied))
+    }
+    /// Takes a slot at one of the candidates.
+    async fn admit(&mut self, candidates: &[Route]) -> Result<Admission, End> {
+        let admission = match self
+            .gateway
+            .0
+            .admission
+            .acquire_for_immediate(
+                candidates,
+                self.mode == "manual" && !(self.plan.dedicated_search && self.search_fallback),
+                self.settings.max_waiting,
+                &mut self.wait_budget,
+                &self.plan.requirement,
+                self.capacity_pending,
+            )
+            .await
+            .inspect_err(|reason| self.failover.rejected(reason))
+        {
+            Ok(value) => value,
+            Err(Rejected::Full | Rejected::Timeout) => {
+                if self.attempted > 0 {
+                    if self.capacity_pending {
+                        self.ids.clear();
+                        return Err(End::Again);
+                    }
+                    return Err(End::Stop);
+                }
+                let mut response = error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    code::CAPACITY,
+                    "供应商并发已满，等待队列已满或等待超时",
+                );
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, header::HeaderValue::from_static("5"));
+                return Err(End::reply(response));
+            }
+            Err(Rejected::Cooling(seconds)) => {
+                if self.attempted > 0 {
+                    if self.capacity_pending {
+                        self.ids.clear();
+                        return Err(End::Again);
+                    }
+                    return Err(End::Stop);
+                }
+                let mut response = error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code::PROVIDERS_COOLING_DOWN,
+                    "供应商正在冷却或恢复探测，请稍后重试",
+                );
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, seconds.max(1).into());
+                return Err(End::reply(response));
+            }
+            Err(Rejected::RateLimited(seconds)) => {
+                self.rpm_retry_after = Some(Duration::from_secs(seconds.max(1)));
+                if self.attempted > 0 {
+                    self.last_category = code::RPM_LIMIT;
+                    return Err(End::Stop);
+                }
+                let mut response = error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    code::RPM_LIMIT,
+                    "供应商已达到 RPM 上限，等待后重试",
+                );
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, seconds.max(1).into());
+                return Err(End::reply(response));
+            }
+            Err(Rejected::Stopped) => {
+                return Err(End::reply(stopped()));
+            }
+            Err(Rejected::Model) => {
+                if self.attempted > 0 {
+                    if self.capacity_pending {
+                        self.ids.clear();
+                        return Err(End::Again);
+                    }
+                    return Err(End::Stop);
+                }
+                return Err(End::reply(error(
+                    StatusCode::BAD_REQUEST,
+                    self.plan.requirement.code(),
+                    if self.gateway.client_id() == super::ClientId::Dsh {
+                        "没有供应商配置此 DSH 模型映射，请编辑 Flash / Pro 映射"
+                    } else {
+                        self.plan.requirement.message()
+                    },
+                )));
+            }
+            Err(Rejected::Policy) => {
+                if self.attempted > 0 {
+                    if self.capacity_pending {
+                        self.ids.clear();
+                        return Err(End::Again);
+                    }
+                    return Err(End::Stop);
+                }
+                self.gateway.record_policy_rejection(
+                    self.plan.model.as_deref(),
+                    false,
+                    super::compaction::rejection_reason(
+                        self.plan.thread.as_deref(),
+                        self.plan.hints.as_ref().ok(),
+                    ),
+                );
+                return Err(End::reply(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code::NO_ELIGIBLE_PROVIDER,
+                    "没有符合线程接管策略的供应商",
+                )));
+            }
+            Err(Rejected::Unavailable | Rejected::Reconnect) => {
+                if self.capacity_pending {
+                    self.ids.clear();
+                    return Err(End::Again);
+                }
+                return Err(End::Stop);
+            }
+        };
+        Ok(admission)
+    }
+    /// Settles the admitted provider's endpoint and the thread's claim on it.
+    async fn endpoint(&mut self, admission: &mut Admission) -> Result<Route, End> {
+        let route = match self
+            .gateway
+            .endpoint_route(
+                admission.route.clone(),
+                self.plan.thread.as_deref(),
+                self.plan
+                    .hints
+                    .as_ref()
+                    .ok()
+                    .and_then(|h| h.previous_response_id.as_deref()),
+                self.plan
+                    .ownership
+                    .as_ref()
+                    .is_some_and(|lease| lease.handoff || lease.establishing())
+                    || self.plan.hints.as_ref().is_ok_and(|h| h.first_turn),
+            )
+            .await
+        {
+            Ok(route) => route,
+            Err(reason) => {
+                self.failover
+                    .finish(super::failover::Exit::AdmissionRejected);
+                admission.permits.neutral(self.settings);
+                return Err(End::reply(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &reason.code,
+                    &reason.message,
+                )));
+            }
+        };
+        let owner_admitted = self.plan.ownership.as_ref().map_or(Ok(true), |lease| {
+            lease.admit_request(
+                self.gateway,
+                &route.provider,
+                &self.plan.requirement,
+                self.plan.pinned.is_some(),
+            )
+        });
+        let owner_admitted = match owner_admitted {
+            Ok(value) => value,
+            Err(e) => {
+                admission.permits.neutral(self.settings);
+                return Err(End::reply(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &e.code,
+                    &e.message,
+                )));
+            }
+        };
+        if !owner_admitted {
+            admission.permits.neutral(self.settings);
+            if self.gateway.0.compaction.error().is_some() {
+                return Err(End::reply(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code::CONVERSATION_OWNERSHIP,
+                    "线程归属记录暂不可用",
+                )));
+            }
+            return Err(End::Again);
+        }
+        if self.plan.unknown_affinity {
+            self.plan.pinned = Some(route.provider.id.clone());
+            self.wait_budget.pin_provider();
+        }
+        self.ids.retain(|id| id != &route.provider.id);
+        Ok(route)
+    }
+    /// Counts the attempt and prepares the protocol observer for it.
+    fn begin(
+        &mut self,
+        mut admission: Admission,
+        route: Route,
+        upstream_model: Option<String>,
+        new_thread_model_denied: bool,
+    ) -> Attempt {
+        let reset_generation = admission.reset_generation;
+        admission.commit_rpm();
+        self.attempted = self.attempted.saturating_add(1);
+        self.ordinary_attempts = self.ordinary_attempts.saturating_add(1);
+        let rerouted = self
+            .previous_provider
+            .as_deref()
+            .is_some_and(|id| id != admission.route.provider.id);
+        self.previous_provider = Some(admission.route.provider.id.clone());
+        let started = Instant::now();
+        let mut protocol = super::protocol::Protocol::new(self.plan.stream_hint);
+        protocol.attach_wait_budget(self.request_budget);
+        protocol.attach_failure_rules(&self.settings.custom_failure_rules);
+        self.request_budget.describe(
+            Some(&route.provider.id),
+            self.plan.model.as_deref(),
+            "headers",
+        );
+        protocol.set_operation(self.plan.operation);
+        protocol.diagnostics(self.gateway, &route.provider.id, self.plan.model.as_deref());
+        protocol.attach_ownership(self.plan.ownership.clone(), &route.provider.id);
+        protocol.attach_routing_log(self.failover.routing());
+        protocol.request_headers(&self.parts.headers);
+        if !routing::resource(&self.parts.method, self.parts.uri.path()) {
+            protocol.business_request(self.gateway, &self.parts.headers);
+        }
+        protocol.request_speed(self.plan.hints.as_ref().ok().and_then(|h| h.speed.clone()));
+        protocol.thread_identity(self.plan.thread_identity);
+        if let Some(at) = self.parts.extensions.get::<ReceivedAt>() {
+            protocol.request_received(at.0);
+        }
+        if let Some(delivery) = self
+            .parts
+            .extensions
+            .get::<std::sync::Arc<super::protocol::Delivery>>()
+        {
+            protocol.set_delivery(delivery.clone());
+        }
+        if let Some(trace) = &self.plan.usage_trace {
+            let mut attempt = trace.attempt(
+                &route.provider.id,
+                self.plan.stream_hint,
+                if self.websocket { "websocket" } else { "http" },
+            );
+            attempt.upstream_model(upstream_model.clone());
+            protocol.attach_usage(attempt);
+        }
+        protocol.context(
+            self.plan.thread.clone(),
+            (self.gateway.client_id() == super::ClientId::Codex
+                && self.mode == "auto"
+                && (self.plan.responses
+                    || (self.plan.owned_search && self.plan.ownership.is_some())))
+            .then(|| {
+                admission
+                    .handoff_wait
+                    .or(
+                        (new_thread_model_denied && !route.provider.take_new_threads)
+                            .then_some(crate::usage::model::RoutingDecision::NewThreadModelDenied),
+                    )
+                    .unwrap_or_else(|| {
+                        super::compaction::decision(
+                            self.plan.thread.as_deref(),
+                            self.plan.hints.as_ref().ok(),
+                            self.plan.continuation,
+                            self.plan.ownership.as_deref(),
+                            &route.provider.id,
+                        )
+                    })
+            }),
+        );
+        if self.gateway.client_id() == super::ClientId::Codex
+            && self.mode == "auto"
+            && (self.plan.responses || (self.plan.owned_search && self.plan.ownership.is_some()))
+        {
+            protocol.routing_evidence(self.plan.hints.as_ref().ok());
+        }
+        protocol.watch_lifecycle(
+            self.gateway
+                .request_state()
+                .shutdown
+                .as_ref()
+                .map(watch::Sender::subscribe),
+            None,
+        );
+        let search_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        Attempt {
+            admission,
+            route,
+            protocol,
+            reset_generation,
+            rerouted,
+            started,
+            search_deadline,
+        }
+    }
+    /// The request never got a response head: the connection failed.
+    async fn unreached(
+        &mut self,
+        attempt: Attempt,
+        e: &(dyn std::error::Error + Send + Sync + 'static),
+    ) -> End {
+        let Attempt {
+            mut admission,
+            route,
+            mut protocol,
+            reset_generation,
+            ..
+        } = attempt;
+        self.failover.failure(super::failover::Failure::Transport);
+        let category = connector::classify(e);
+        self.last_category = match category {
+            Some(connector::ConnectError::Tls) => code::TLS,
+            _ => code::NETWORK,
+        };
+        // Use the same owner and budget as 5xx for connection failures,
+        // including a peer closing before response headers arrive.
+        // Header timeouts still use the separate no-replay boundary.
+        let retry_same = !self.plan.dedicated_search
+            && matches!(
+                category,
+                None | Some(
+                    connector::ConnectError::TargetConnect | connector::ConnectError::TargetTimeout
+                )
+            )
+            && !self.plan.unknown_affinity
+            && self.ordinary_attempts <= self.settings.max_retries
+            && ((route.client_id == super::ClientId::Codex
+                && (self.plan.pinned.as_deref() == Some(&route.provider.id)
+                    || self
+                        .plan
+                        .ownership
+                        .as_ref()
+                        .is_some_and(|lease| lease.owns(&route.provider.id))))
+                || self.plan.fixed_dsh.as_deref() == Some(&route.provider.id));
+        protocol.finish(None, self.last_category);
+        let mut event = admission.permits.prepare_report(
+            self.gateway,
+            &route,
+            self.plan.model.as_deref(),
+            Reason::Network,
+            super::attempt::retained_fallback(
+                self.gateway,
+                &route.provider.id,
+                &self.ids,
+                &self.routes,
+                &self.plan.requirement,
+                self.parts.uri.path(),
+                self.plan.ownership.as_deref(),
+                self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                super::attempt::may_fail_over(
+                    self.mode == "manual",
+                    self.plan.pinned.as_deref(),
+                    self.plan.unknown_affinity,
+                    self.ordinary_attempts,
+                    self.settings.max_retries,
+                ),
+            ),
+            None,
+            self.attempted,
+            crate::events::Details {
+                phase: Some(crate::events::Phase::Connect),
+                local_code: Some(connector::diagnostic_code(e).into()),
+                counted_failure: Some(true),
+                ..Default::default()
+            },
+        );
+        if self.plan.dedicated_search {
+            admission.permits.neutral(self.settings);
+        } else {
+            admission.permits.failure(self.settings, None);
+        }
+        let retry_delay = super::attempt::same_provider_delay(
+            retry_same,
+            &route.health_for(&self.plan.requirement),
+            &mut self.transient_retries,
+            None,
+        );
+        if let Some(delay) = retry_delay {
+            event.action = Action::RetryingSame;
+            event.details.wait_seconds = Some(delay.as_secs());
+        }
+        self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
+            super::health_settlement::publish(self.gateway, event)
+        }));
+        if let Some(delay) = retry_delay {
+            self.failover
+                .wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
+            drop(admission);
+            match transient_wait(
+                self.gateway,
+                &route,
+                reset_generation,
+                delay,
+                self.settings.max_waiting,
+                self.plan.pinned.as_deref(),
+                &self.plan.requirement,
+            )
+            .await
+            {
+                Ok(true) => {
+                    self.ids.insert(0, route.provider.id.clone());
+                    self.retry_owner = Some(route.provider.id.clone());
+                }
+                Ok(false) => {}
+                Err(Rejected::Stopped) => {
+                    self.failover.finish(super::failover::Exit::Stopped);
+                    return End::reply(stopped());
+                }
+                Err(_) => return End::Stop,
+            }
+        }
+        End::Again
+    }
+    /// No response head arrived in time.
+    fn headers_timeout(&mut self, attempt: Attempt) -> End {
+        let Attempt {
+            mut admission,
+            route,
+            mut protocol,
+            ..
+        } = attempt;
+        self.failover.failure(super::failover::Failure::Transport);
+        let retry_dsh = self.plan.dedicated_search
+            || route.client_id == super::ClientId::Dsh
+                && super::attempt::retained_fallback(
+                    self.gateway,
+                    &route.provider.id,
+                    &self.ids,
+                    &self.routes,
+                    &self.plan.requirement,
+                    self.parts.uri.path(),
+                    self.plan.ownership.as_deref(),
+                    false,
+                    super::attempt::may_fail_over(
+                        self.mode == "manual",
+                        self.plan.pinned.as_deref(),
+                        self.plan.unknown_affinity,
+                        self.ordinary_attempts,
+                        self.settings.max_retries,
+                    ),
+                ) == Action::TryingNext;
+        protocol.timeout(
+            "response_headers",
+            if self.plan.dedicated_search {
+                30
+            } else {
+                self.settings.first_byte_seconds
+            },
+        );
+        protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
+        self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
+            admission.permits.report(
+                self.gateway,
+                &route,
+                self.plan.model.as_deref(),
+                Reason::Network,
+                if retry_dsh {
+                    Action::TryingNext
+                } else {
+                    Action::Returned
+                },
+                None,
+                self.attempted,
+                crate::events::Details {
+                    phase: Some(crate::events::Phase::Headers),
+                    local_code: Some(code::FIRST_BYTE_TIMEOUT.into()),
+                    counted_failure: Some(true),
+                    ..protocol.observation.error.clone()
+                },
+            )
+        }));
+        if self.plan.dedicated_search {
+            admission.permits.neutral(self.settings);
+        } else {
+            admission.permits.failure(self.settings, None);
+        }
+        if retry_dsh {
+            self.last_category = code::FIRST_BYTE_TIMEOUT;
+            return End::Again;
+        }
+        self.failover.finish(super::failover::Exit::ReplayUnsafe);
+        // The HTTP client already owns the request. Not seeing headers
+        // cannot establish that its body never reached the provider.
+        End::reply(error(
+            StatusCode::GATEWAY_TIMEOUT,
+            code::FIRST_BYTE_TIMEOUT,
+            "上游首字节超时，请求可能已开始处理，未自动重放",
+        ))
+    }
+    /// The provider accepted a WebSocket upgrade: joins the two sockets.
+    fn tunnel(mut self, attempt: Attempt, mut response: Response<Incoming>) -> Response<WireBody> {
+        let Attempt {
+            mut admission,
+            route,
+            mut protocol,
+            rerouted,
+            ..
+        } = attempt;
+        let status = response.status();
+        let (active, traffic) = (self.active, self.traffic);
+        self.failover.finish(super::failover::Exit::Forwarded);
+        admission.permits.success(self.settings);
+        let Admission { permits, slot, .. } = admission;
+        let upstream_upgrade = hyper::upgrade::on(&mut response);
+        let (mut response_parts, _) = response.into_parts();
+        clean_headers(&mut response_parts.headers, true);
+        let downstream = self.downstream_upgrade.expect("upgrade exists");
+        let g = self.gateway.clone();
+        let cfg = self.settings.clone();
+        let provider_for_tunnel = route.provider.clone();
+        tokio::spawn(async move {
+            let _active = active;
+            let _traffic = traffic;
+            let _slot = slot;
+            let mut permits = permits;
+            let connected = tokio::try_join!(upstream_upgrade, downstream);
+            if let Ok((a, b)) = connected {
+                // Opaque tunnel preserves every data/control/close frame, including binary payloads.
+                let result =
+                    tokio::io::copy_bidirectional(&mut TokioIo::new(a), &mut TokioIo::new(b)).await;
+                protocol.finish(
+                    Some(101),
+                    if result.is_ok() {
+                        code::OK
+                    } else {
+                        code::STREAM_INTERRUPTED
+                    },
+                );
+                if protocol.succeeded() {
+                    g.persist_success(&provider_for_tunnel).await;
+                }
+                permits.neutral(&cfg);
+            }
+        });
+        if rerouted {
+            self.gateway.record(
+                Some(&route.provider.id),
+                self.plan.model.as_deref(),
+                Reason::Failover,
+                Action::Routed,
+                Some(status.as_u16()),
+                Some(self.attempted.min(u32::MAX as usize) as u32),
+            );
+        }
+        Response::from_parts(response_parts, replay::empty())
+    }
+    /// The provider answered with an error status.
+    async fn rejected(&mut self, attempt: Attempt, response: Response<Incoming>) -> End {
+        let Attempt {
+            mut admission,
+            route,
+            mut protocol,
+            reset_generation,
+            ..
+        } = attempt;
+        let status = response.status();
+        let cooldown = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(circuit::retry_after);
+        let (mut response_parts, body) = response.into_parts();
+        clean_headers(&mut response_parts.headers, false);
+        let captured = Replay::capture_observed(
+            body,
+            self.gateway.0.spool.path(),
+            Some(Duration::from_secs(self.settings.idle_seconds)),
+            |bytes| protocol.feed(bytes),
+        )
+        .await;
+        if captured
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<std::io::Error>())
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::TimedOut)
+        {
+            protocol.timeout("error_body_idle", self.settings.idle_seconds);
+        }
+        let decoded = match &captured {
+            Ok(body) => {
+                let encoded = body.prefix(2 * 1024 * 1024).await.unwrap_or_default();
+                protocol.finish(Some(status.as_u16()), code::HTTP);
+                let encoding = response_parts
+                    .headers
+                    .get(header::CONTENT_ENCODING)
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("identity");
+                replay::decode_prefix(&encoded, encoding, 128 * 1024).unwrap_or_default()
+            }
+            _ => {
+                protocol.finish(Some(status.as_u16()), code::STREAM_INTERRUPTED);
+                Vec::new()
+            }
+        };
+        let (classified, server_retry) = super::failure_policy::http_with_rules(
+            status.as_u16(),
+            &response_parts.headers,
+            &decoded,
+            &self.settings.custom_failure_rules,
+        );
+        let mut cooldown = cooldown
+            .max(server_retry)
+            .max(protocol.observation.retry_after);
+        let compact_error = self.plan.ownership.as_ref().is_some_and(|lease| {
+            lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
+        }) && protocol.observation.compaction_incompatible;
+        if compact_error {
+            if let Some(owner) = self
+                .plan
+                .ownership
+                .as_ref()
+                .and_then(|lease| lease.owner.as_ref())
+                .filter(|owner| self.ids.contains(owner))
+            {
+                self.retry_owner = Some(owner.clone());
+            }
+        }
+        let model_error = protocol.observation.terminal
+            == Some(super::protocol::Terminal::ModelUnavailable)
+            || super::failure_policy::model_http(status.as_u16(), &decoded);
+        let mut details = if protocol.observation.error.raw.is_some() {
+            protocol.observation.error.clone()
+        } else {
+            classified
+        };
+        if details == crate::events::Details::default() {
+            details = protocol.observation.error.clone();
+        }
+        if route.client_id == super::ClientId::Dsh
+            && !model_error
+            && matches!(status.as_u16(), 401..=403)
+        {
+            details.health_scope = Some(crate::events::HealthScope::Provider);
+        }
+        let policy = super::failure_policy::decision(Some(status.as_u16()), &details);
+        let hard_rejection = policy.hard;
+        if hard_rejection {
+            self.hard_denied
+                .insert((route.provider.id.clone(), route.provider.version.clone()));
+        }
+        let capacity = !model_error && !hard_rejection && policy.temporary;
+        let wait_same =
+            capacity && self.plan.established_capacity_owner.as_deref() == Some(&route.provider.id);
+        if capacity && !self.websocket && !self.plan.dedicated_search {
+            self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
+            self.capacity_protected = true;
+            self.wait_budget.protect_capacity();
+        }
+        let retryable = compact_error || model_error || hard_rejection || policy.retryable;
+        let retry_same = circuit::is_server_error(status.as_u16())
+            && !compact_error
+            && !model_error
+            && !capacity
+            && !hard_rejection
+            && !self.plan.unknown_affinity
+            && self.ordinary_attempts <= self.settings.max_retries
+            && ((route.client_id == super::ClientId::Codex
+                && (self.plan.pinned.as_deref() == Some(&route.provider.id)
+                    || self
+                        .plan
+                        .ownership
+                        .as_ref()
+                        .is_some_and(|lease| lease.owns(&route.provider.id))))
+                || self.plan.fixed_dsh.as_deref() == Some(&route.provider.id));
+        self.failover.failure(if hard_rejection {
+            super::failover::Failure::AccountRejected
+        } else if model_error {
+            super::failover::Failure::ModelUnavailable
+        } else if status == StatusCode::TOO_MANY_REQUESTS || capacity {
+            super::failover::Failure::RateLimit
+        } else if compact_error {
+            super::failover::Failure::Protocol
+        } else {
+            super::failover::Failure::UpstreamService
+        });
+        let will_retry = retryable
+            && ((self.plan.dedicated_search
+                && self
+                    .ids
+                    .iter()
+                    .any(|id| self.routes.get(id).is_some_and(|r| r.provider.search_only)))
+                || super::attempt::retained_fallback(
+                    self.gateway,
+                    &route.provider.id,
+                    &self.ids,
+                    &self.routes,
+                    &self.plan.requirement,
+                    self.parts.uri.path(),
+                    self.plan.ownership.as_deref(),
+                    self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                    super::attempt::may_fail_over(
+                        self.mode == "manual",
+                        self.plan.pinned.as_deref(),
+                        self.plan.unknown_affinity,
+                        self.ordinary_attempts,
+                        self.settings.max_retries,
+                    ),
+                ) == Action::TryingNext);
+        let reason = if compact_error {
+            Reason::ProtocolError
+        } else {
+            policy.reason
+        };
+        details.phase = Some(crate::events::Phase::Response);
+        details.counted_failure = Some(!compact_error && policy.counted_failure);
+        details.wait_seconds =
+            cooldown.map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
+        protocol.finish(
+            Some(status.as_u16()),
+            if captured.is_ok() {
+                code::HTTP
+            } else {
+                code::STREAM_INTERRUPTED
+            },
+        );
+        let mut event = admission.permits.prepare_report(
+            self.gateway,
+            &route,
+            self.plan.model.as_deref(),
+            reason,
+            if wait_same {
+                Action::RetryingSame
+            } else if will_retry {
+                Action::TryingNext
+            } else if capacity {
+                Action::Waiting
+            } else {
+                Action::Returned
+            },
+            Some(status.as_u16()),
+            self.attempted,
+            details,
+        );
+        if model_error || compact_error {
+            admission.permits.neutral(self.settings);
+        } else if capacity {
+            admission.permits.capacity_limited(self.settings, cooldown);
+        } else if hard_rejection {
+            admission.permits.failure(self.settings, cooldown);
+        } else if status == StatusCode::TOO_MANY_REQUESTS {
+            admission.permits.rate_limited(self.settings, cooldown);
+        } else if retryable {
+            admission.permits.failure(self.settings, cooldown);
+        } else {
+            admission.permits.neutral(self.settings);
+        }
+        let retry_delay = super::attempt::same_provider_delay(
+            retry_same,
+            &route.health_for(&self.plan.requirement),
+            &mut self.transient_retries,
+            cooldown,
+        );
+        if let Some(delay) = retry_delay {
+            event.action = Action::RetryingSame;
+            event.details.wait_seconds = Some(delay.as_secs());
+        }
+        self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
+            super::health_settlement::publish(self.gateway, event)
+        }));
+        if capacity {
+            cooldown = cooldown.max(Some(Duration::from_secs(
+                route.health_for(&self.plan.requirement).retry_in,
+            )));
+        }
+        if !retryable {
+            self.ids.clear();
+        }
+        if let Ok(body) = captured {
+            self.last = Some(Response::from_parts(response_parts, body.body()));
+        }
+        self.last_category = code::HTTP;
+        if !retryable {
+            self.failover
+                .finish(super::failover::Exit::PermanentRejection);
+            return End::reply(self.last.take().unwrap_or_else(|| {
+                error(
+                    StatusCode::BAD_GATEWAY,
+                    code::UPSTREAM_BODY,
+                    "上游错误响应读取失败",
+                )
+            }));
+        }
+        if let Some(delay) = retry_delay {
+            self.failover
+                .wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
+            // Release the failed attempt before registering a bounded wait.
+            // Keep the original spool, model, and response cursor untouched.
+            drop(admission);
+            self.request_budget
+                .describe(None, self.plan.model.as_deref(), "retry");
+            match transient_wait(
+                self.gateway,
+                &route,
+                reset_generation,
+                delay,
+                self.settings.max_waiting,
+                self.plan.pinned.as_deref(),
+                &self.plan.requirement,
+            )
+            .await
+            {
+                Ok(true) => {
+                    self.ids.insert(0, route.provider.id.clone());
+                    self.retry_owner = Some(route.provider.id.clone());
+                }
+                Ok(false) => {}
+                Err(Rejected::Stopped) => {
+                    self.failover.finish(super::failover::Exit::Stopped);
+                    return End::reply(stopped());
+                }
+                Err(_) => return End::Stop,
+            }
+        }
+        if capacity && !self.plan.dedicated_search {
+            if wait_same {
+                self.capacity_wait_owner = Some(route.provider.id.clone());
+                self.ids.clear();
+            }
+            self.capacity_pending = true;
+            self.capacity_sources.push(CapacitySource {
+                provider_id: route.provider.id.clone(),
+                reset_generation,
+            });
+            self.capacity_retry_after = self.capacity_retry_after.max(cooldown);
+        }
+        End::Again
+    }
+    /// Reads the start of an accepted response until it shows output, a
+    /// terminal outcome or a failure.
+    async fn opening(
+        &mut self,
+        attempt: &mut Attempt,
+        response: Response<Incoming>,
+        stream: bool,
+    ) -> Opening {
+        let status = response.status();
+        let protocol = &mut attempt.protocol;
+        let (started, search_deadline) = (attempt.started, attempt.search_deadline);
+        let (mut response_parts, body) = response.into_parts();
+        let mut body = body
+            .map_err(|error| Box::new(error) as BoxError)
+            .boxed_unsync();
+        clean_headers(&mut response_parts.headers, false);
+        let mut first_deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.settings.first_byte_seconds)
+                .saturating_sub(started.elapsed());
+        if self.plan.dedicated_search {
+            first_deadline = search_deadline;
+        }
+        // Buffer through initialization and heartbeats until effective output or a
+        // terminal outcome (or bounded JSON); preserve
+        // the original frames and encoding exactly, including comments/trailers.
+        let json = response_parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.to_ascii_lowercase().contains("json"));
+        let mut preinspected = false;
+        let mut inspected_bytes = 0u64;
+        let mut prefix = Vec::new();
+        let mut prefix_bytes = 0;
+        let mut ended = false;
+        let mut failed = false;
+        let mut failure_kind = code::FIRST_BYTE_TIMEOUT;
+        loop {
+            match self
+                .request_budget
+                .response(
+                    first_deadline,
+                    self.plan.operation == crate::usage::model::Operation::Compaction,
+                    body.frame(),
+                )
+                .await
+            {
+                Ok(Some(Ok(frame))) => {
+                    if let Some(bytes) = frame.data_ref() {
+                        prefix_bytes += bytes.len();
+                        protocol.feed(bytes);
+                        if !stream
+                            && !json
+                            && !bytes.is_empty()
+                            && !protocol.possible_bare_capacity()
+                        {
+                            protocol.effective_output();
+                        }
+                        if !self.plan.dedicated_search && !bytes.is_empty() {
+                            first_deadline = tokio::time::Instant::now()
+                                + Duration::from_secs(self.settings.idle_seconds);
+                        }
+                    }
+                    prefix.push((
+                        frame,
+                        protocol.terminal().is_some(),
+                        protocol.business_observed(),
+                    ));
+                    if body.is_end_stream() {
+                        ended = true;
+                    }
+                    if !ended
+                        && (prefix_bytes >= 2 * 1024 * 1024 || prefix.len() >= 4096)
+                        && !protocol.search_content_observed()
+                        && protocol.terminal().is_none()
+                    {
+                        let frames = std::mem::take(&mut prefix);
+                        let mut observed = prefix_bytes;
+                        let captured = {
+                            let upstream = &mut body;
+                            let remainder = async_stream::try_stream! {
+                                for (frame, _, _) in frames { yield frame; }
+                                while let Some(frame) = upstream.frame().await { yield frame.map_err(std::io::Error::other)?; }
+                            };
+                            let mut remainder = StreamBody::new(Box::pin(remainder))
+                                .map_err(|error: std::io::Error| error);
+                            Replay::capture_until(
+                                &mut remainder,
+                                self.gateway.0.spool.path(),
+                                Some(Duration::from_secs(self.settings.idle_seconds)),
+                                |bytes| {
+                                    if observed > 0 {
+                                        observed = observed.saturating_sub(bytes.len());
+                                    } else {
+                                        protocol.feed(bytes);
+                                    }
+                                    stream
+                                        && (protocol.search_content_observed()
+                                            || protocol.terminal().is_some())
+                                },
+                            )
+                            .await
+                        };
+                        ended = body.is_end_stream();
+                        match captured {
+                            Ok(spooled) => {
+                                inspected_bytes = spooled.length;
+                                let mut buffered = spooled.body();
+                                let mut upstream = body;
+                                body = StreamBody::new(async_stream::try_stream! {
+                                    while let Some(frame) = buffered.frame().await { yield frame?; }
+                                    while let Some(frame) = upstream.frame().await { yield frame?; }
+                                })
+                                .boxed_unsync();
+                                preinspected = true;
+                            }
+                            Err(_) => {
+                                failed = true;
+                                failure_kind = code::UPSTREAM_BODY;
+                            }
+                        }
+                        break;
+                    }
+                    if ended
+                        || (!stream && !json && !protocol.possible_bare_capacity())
+                        || (stream
+                            && (protocol.search_content_observed()
+                                || protocol.terminal().is_some()))
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    ended = true;
+                    break;
+                }
+                result => {
+                    failed = true;
+                    failure_kind = if result.is_err() && prefix_bytes != 0 {
+                        code::STREAM_TIMEOUT
+                    } else if result.is_err() {
+                        code::FIRST_BYTE_TIMEOUT
+                    } else {
+                        code::STREAM_INTERRUPTED
+                    };
+                    break;
+                }
+            }
+        }
+        if failed {
+            if failure_kind.ends_with("TIMEOUT") {
+                protocol.timeout(
+                    if prefix_bytes == 0 {
+                        "first_byte"
+                    } else {
+                        "first_event_idle"
+                    },
+                    if prefix_bytes == 0 {
+                        self.settings.first_byte_seconds
+                    } else {
+                        self.settings.idle_seconds
+                    },
+                );
+            }
+            protocol.finish(Some(status.as_u16()), failure_kind);
+        }
+        Opening {
+            status,
+            parts: response_parts,
+            body,
+            prefix,
+            prefix_bytes,
+            ended,
+            failed,
+            failure_kind,
+            preinspected,
+            inspected_bytes,
+        }
+    }
+    /// The response broke off before any output, where a replay is still safe.
+    async fn interrupted(
+        &mut self,
+        attempt: Attempt,
+        status: StatusCode,
+        failure_kind: &'static str,
+    ) -> End {
+        let Attempt {
+            mut admission,
+            route,
+            protocol,
+            reset_generation,
+            ..
+        } = attempt;
+        self.failover.failure(super::failover::Failure::Transport);
+        let fallback = super::attempt::retained_fallback(
+            self.gateway,
+            &route.provider.id,
+            &self.ids,
+            &self.routes,
+            &self.plan.requirement,
+            self.parts.uri.path(),
+            self.plan.ownership.as_deref(),
+            self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+            super::attempt::may_fail_over(
+                self.mode == "manual",
+                self.plan.pinned.as_deref(),
+                self.plan.unknown_affinity,
+                self.ordinary_attempts,
+                self.settings.max_retries,
+            ),
+        );
+        let mut event = admission.permits.prepare_report(
+            self.gateway,
+            &route,
+            self.plan.model.as_deref(),
+            Reason::Network,
+            fallback,
+            Some(status.as_u16()),
+            self.attempted,
+            crate::events::Details {
+                phase: Some(crate::events::Phase::Response),
+                local_code: Some(failure_kind.into()),
+                counted_failure: Some(true),
+                ..protocol.observation.error.clone()
+            },
+        );
+        if self.plan.dedicated_search {
+            admission.permits.neutral(self.settings);
+        } else {
+            admission.permits.failure(self.settings, None);
+        }
+        let retry_delay = if failure_kind == code::STREAM_INTERRUPTED
+            && self.plan.fixed_dsh.as_deref() == Some(&route.provider.id)
+            && !self.plan.unknown_affinity
+            && self.ordinary_attempts <= self.settings.max_retries
+            && route.health_for(&self.plan.requirement).available
+        {
+            routing::transient_delay(&mut self.transient_retries, None)
+        } else {
+            None
+        };
+        if let Some(delay) = retry_delay {
+            event.action = Action::RetryingSame;
+            event.details.wait_seconds = Some(delay.as_secs());
+        }
+        self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
+            super::health_settlement::publish(self.gateway, event)
+        }));
+        self.last_category = failure_kind;
+        if let Some(delay) = retry_delay {
+            self.failover
+                .wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
+            drop(admission);
+            match transient_wait(
+                self.gateway,
+                &route,
+                reset_generation,
+                delay,
+                self.settings.max_waiting,
+                self.plan.pinned.as_deref(),
+                &self.plan.requirement,
+            )
+            .await
+            {
+                Ok(true) => {
+                    self.ids.insert(0, route.provider.id.clone());
+                    self.retry_owner = Some(route.provider.id.clone());
+                }
+                Ok(false) => {}
+                Err(Rejected::Stopped) => {
+                    self.failover.finish(super::failover::Exit::Stopped);
+                    return End::reply(stopped());
+                }
+                Err(_) => return End::Stop,
+            }
+        } else if route.client_id == super::ClientId::Dsh && fallback != Action::TryingNext {
+            self.failover.finish(super::failover::Exit::ReplayUnsafe);
+            return End::reply(error(
+                if failure_kind.ends_with("TIMEOUT") {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                failure_kind,
+                if failure_kind.ends_with("TIMEOUT") {
+                    "上游响应超时"
+                } else {
+                    "上游响应流中断"
+                },
+            ));
+        }
+        End::Again
+    }
+    /// Settles a response whose start is itself a rejection; any other
+    /// response goes on to the client.
+    async fn initial_rejection(
+        &mut self,
+        attempt: Attempt,
+        opening: &mut Opening,
+    ) -> Result<Attempt, End> {
+        let Attempt {
+            mut admission,
+            route,
+            mut protocol,
+            reset_generation,
+            rerouted,
+            started,
+            search_deadline,
+        } = attempt;
+        let (status, failed) = (opening.status, opening.failed);
+        opening.ended |= failed;
+        if opening.ended {
+            protocol.finish(
+                Some(status.as_u16()),
+                if status.is_success() {
+                    code::OK
+                } else {
+                    code::HTTP
+                },
+            );
+            if protocol.terminal_observed() {
+                if let Some((_, terminal, business)) = opening.prefix.last_mut() {
+                    *terminal = true;
+                    *business = true;
+                }
+            }
+        }
+        let before_output = !protocol.observation.meter.content_seen
+            && !protocol.observation.search_content
+            && !protocol.observation.opaque_output;
+        let initial_model_error = before_output
+            && protocol.terminal() == Some(super::protocol::Terminal::ModelUnavailable);
+        let initial_compact_error = protocol.observation.compaction_incompatible
+            && self.plan.ownership.as_ref().is_some_and(|lease| {
+                lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
+            });
+        if initial_compact_error {
+            if let Some(owner) = self
+                .plan
+                .ownership
+                .as_ref()
+                .and_then(|lease| lease.owner.as_ref())
+                .filter(|owner| self.ids.contains(owner))
+            {
+                self.retry_owner = Some(owner.clone());
+            }
+        }
+        let policy =
+            super::failure_policy::decision(Some(status.as_u16()), &protocol.observation.error);
+        let initial_hard_rejection = before_output && policy.hard;
+        if initial_hard_rejection {
+            self.hard_denied
+                .insert((route.provider.id.clone(), route.provider.version.clone()));
+        }
+        let initial_capacity = before_output
+            && !initial_hard_rejection
+            && !self.websocket
+            && !initial_model_error
+            && policy.temporary;
+        // This whole prefix is still private to the gateway. A body frame
+        // can contain both generated deltas and a terminal service error;
+        // observing those deltas is not proof that the client received them.
+        let initial_service_error = (before_output || protocol.explicit_failure())
+            && protocol.observation.error.error_basis
+                == Some(crate::events::ErrorBasis::ServiceError);
+        let initial_other_error = before_output && !failed && protocol.explicit_failure();
+        let wait_same = initial_capacity
+            && self.plan.established_capacity_owner.as_deref() == Some(&route.provider.id);
+        if initial_model_error
+            || initial_capacity
+            || initial_compact_error
+            || initial_hard_rejection
+            || initial_service_error
+            || initial_other_error
+        {
+            self.failover.failure(if initial_hard_rejection {
+                super::failover::Failure::AccountRejected
+            } else if initial_capacity {
+                super::failover::Failure::RateLimit
+            } else if initial_model_error {
+                super::failover::Failure::ModelUnavailable
+            } else if initial_service_error {
+                super::failover::Failure::UpstreamService
+            } else {
+                super::failover::Failure::Protocol
+            });
+            let mut cooldown = opening
+                .parts
+                .headers
+                .get(header::RETRY_AFTER)
+                .and_then(|h| h.to_str().ok())
+                .and_then(circuit::retry_after)
+                .max(protocol.observation.retry_after);
+            if initial_capacity && !self.plan.dedicated_search {
+                if wait_same {
+                    self.capacity_wait_owner = Some(route.provider.id.clone());
+                    self.ids.clear();
+                }
+                self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
+                self.capacity_protected = true;
+                self.wait_budget.protect_capacity();
+
+                self.capacity_pending = true;
+                self.capacity_sources.push(CapacitySource {
+                    provider_id: route.provider.id.clone(),
+                    reset_generation,
+                });
+                self.capacity_retry_after = self.capacity_retry_after.max(cooldown);
+            }
+            protocol.finish(Some(status.as_u16()), code::HTTP);
+            let retry_same = initial_service_error
+                && !self.plan.unknown_affinity
+                && self.ordinary_attempts <= self.settings.max_retries
+                && (self.plan.pinned.as_deref() == Some(&route.provider.id)
+                    || self
+                        .plan
+                        .ownership
+                        .as_ref()
+                        .is_some_and(|lease| lease.owns(&route.provider.id))
+                    || self.plan.fixed_dsh.as_deref() == Some(&route.provider.id));
+            let will_retry = policy.retryable
+                && ((self.plan.dedicated_search
+                    && self
+                        .ids
+                        .iter()
+                        .any(|id| self.routes.get(id).is_some_and(|r| r.provider.search_only)))
+                    || super::attempt::retained_fallback(
+                        self.gateway,
+                        &route.provider.id,
+                        &self.ids,
+                        &self.routes,
+                        &self.plan.requirement,
+                        self.parts.uri.path(),
+                        self.plan.ownership.as_deref(),
+                        self.gateway.client_id() == super::ClientId::Codex && !self.plan.auxiliary,
+                        super::attempt::may_fail_over(
+                            self.mode == "manual",
+                            self.plan.pinned.as_deref(),
+                            self.plan.unknown_affinity,
+                            self.ordinary_attempts,
+                            self.settings.max_retries,
+                        ),
+                    ) == Action::TryingNext);
+            let mut details = protocol.observation.error.clone();
+            details.phase = Some(crate::events::Phase::Response);
+            details.counted_failure = Some(!initial_compact_error && policy.counted_failure);
+            details.wait_seconds =
+                cooldown.map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
+            let mut event = admission.permits.prepare_report(
+                self.gateway,
+                &route,
+                self.plan.model.as_deref(),
+                if initial_compact_error {
+                    Reason::ProtocolError
+                } else {
+                    policy.reason
+                },
+                if wait_same {
+                    Action::RetryingSame
+                } else if will_retry {
+                    Action::TryingNext
+                } else if initial_capacity {
+                    Action::Waiting
+                } else {
+                    Action::Returned
+                },
+                Some(status.as_u16()),
+                self.attempted,
+                details,
+            );
+            if initial_capacity {
+                admission.permits.capacity_limited(self.settings, cooldown);
+            } else if initial_hard_rejection || initial_service_error {
+                admission.permits.failure(self.settings, cooldown);
+            } else {
+                admission.permits.neutral(self.settings);
+            }
+            let retry_delay = super::attempt::same_provider_delay(
+                retry_same,
+                &route.health_for(&self.plan.requirement),
+                &mut self.transient_retries,
+                cooldown,
+            );
+            if let Some(delay) = retry_delay {
+                event.action = Action::RetryingSame;
+                event.details.wait_seconds = Some(delay.as_secs());
+            }
+            self.last_error = Some(self.failover.report_failure(Some(&protocol), || {
+                super::health_settlement::publish(self.gateway, event)
+            }));
+            if initial_capacity {
+                cooldown = cooldown.max(Some(Duration::from_secs(
+                    route.health_for(&self.plan.requirement).retry_in,
+                )));
+                self.capacity_retry_after = self.capacity_retry_after.max(cooldown);
+            }
+            // Rejected initialization frames are never a successful client response.
+            // The upstream payload remains available in the error log.
+            self.last = Some(error(
+                StatusCode::BAD_GATEWAY,
+                code::UPSTREAM_REJECTED,
+                "上游业务请求失败，已结束本次重试",
+            ));
+            if !policy.retryable && !initial_compact_error {
+                self.failover
+                    .finish(super::failover::Exit::PermanentRejection);
+                return Err(End::reply(self.last.take().unwrap()));
+            }
+            if let Some(delay) = retry_delay {
+                self.failover
+                    .wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
+                // Release the failed attempt before registering a bounded wait.
+                // Keep the original spool, model, and response cursor untouched.
+                drop(admission);
+                self.request_budget
+                    .describe(None, self.plan.model.as_deref(), "retry");
+                match transient_wait(
+                    self.gateway,
+                    &route,
+                    reset_generation,
+                    delay,
+                    self.settings.max_waiting,
+                    self.plan.pinned.as_deref(),
+                    &self.plan.requirement,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        self.ids.insert(0, route.provider.id.clone());
+                        self.retry_owner = Some(route.provider.id.clone());
+                    }
+                    Ok(false) => {}
+                    Err(Rejected::Stopped) => {
+                        self.failover.finish(super::failover::Exit::Stopped);
+                        return Err(End::reply(stopped()));
+                    }
+                    Err(_) => return Err(End::Stop),
+                }
+            } else if !will_retry && !initial_capacity {
+                self.ids.clear();
+            }
+            self.last_category = if initial_hard_rejection || initial_service_error {
+                code::UPSTREAM_REJECTED
+            } else if initial_capacity {
+                code::CAPACITY
+            } else if initial_model_error {
+                code::MODEL_UNAVAILABLE
+            } else {
+                code::UPSTREAM_REJECTED
+            };
+            return Err(End::Again);
+        }
+        Ok(Attempt {
+            admission,
+            route,
+            protocol,
+            reset_generation,
+            rerouted,
+            started,
+            search_deadline,
+        })
+    }
+    /// Starts the relay task for an accepted response and returns its head.
+    fn hand_over(mut self, attempt: Attempt, opening: Opening) -> Response<WireBody> {
+        let Attempt {
+            admission,
+            route,
+            protocol,
+            rerouted,
+            ..
+        } = attempt;
+        let Opening {
+            status,
+            parts: response_parts,
+            body,
+            prefix,
+            mut ended,
+            failed,
+            failure_kind,
+            preinspected,
+            inspected_bytes,
+            ..
+        } = opening;
+        if preinspected {
+            ended = false;
+        }
+        let replay_unsafe = failed && failure_kind == code::FIRST_BYTE_TIMEOUT;
+        if replay_unsafe {
+            self.failover.failure(super::failover::Failure::Transport);
+            protocol.associate_failure(self.failover.failure_generation());
+        }
+        self.failover.finish(if replay_unsafe {
+            super::failover::Exit::ReplayUnsafe
+        } else {
+            super::failover::Exit::Forwarded
+        });
+        let Admission { permits, slot, .. } = admission;
+        let g = self.gateway.clone();
+        let cfg = self.settings.clone();
+        let neutral = status.as_u16() >= 400;
+        if rerouted {
+            self.gateway.record(
+                Some(&route.provider.id),
+                self.plan.model.as_deref(),
+                Reason::Failover,
+                Action::Routed,
+                Some(status.as_u16()),
+                Some(self.attempted.min(u32::MAX as usize) as u32),
+            );
+        }
+        let delivery = protocol.delivery();
+        let output_delivery = delivery.clone();
+        let activity = self
+            .parts
+            .extensions
+            .get::<std::sync::Arc<super::wire_progress::Activity>>()
+            .cloned()
+            .unwrap_or_default();
+        let (sender, receiver) = tokio::sync::mpsc::channel::<ForwardFrame>(2);
+        let empty = ended && !failed && prefix.is_empty();
+        if empty {
+            output_delivery.body_complete();
+        }
+        let shutdown = self
+            .gateway
+            .request_state()
+            .shutdown
+            .as_ref()
+            .map(watch::Sender::subscribe);
+        tokio::spawn(relay(Relay {
+            active: self.active,
+            traffic: self.traffic,
+            slot,
+            protocol,
+            g,
+            route,
+            model: self.plan.model,
+            permits,
+            cfg,
+            status,
+            attempted: self.attempted,
+            prefix,
+            request_budget: self.request_budget.clone(),
+            sender,
+            activity,
+            shutdown,
+            ended,
+            failed,
+            delivery,
+            dedicated_search: self.plan.dedicated_search,
+            body,
+            inspected_bytes,
+            neutral,
+            operation: self.plan.operation,
+        }));
+        // Hyper may drop a Content-Length body immediately after its last frame,
+        // without polling it again for None. Mark that frame before yielding it.
+        Response::from_parts(response_parts, delivered(receiver, output_delivery, empty))
+    }
+    /// No attempt produced a response to relay.
+    fn exhausted(mut self) -> Response<WireBody> {
+        self.failover
+            .finish(if self.ordinary_attempts > self.settings.max_retries {
+                super::failover::Exit::AttemptsExhausted
+            } else {
+                super::failover::Exit::NoEligibleProvider
+            });
+        self.gateway.record_final(
+            self.last_error.as_ref(),
+            self.failover.failure_reported(),
+            self.previous_provider.as_deref(),
+            self.plan.model.as_deref(),
+            self.last.as_ref().map(|r| r.status().as_u16()),
+            self.attempted,
+        );
+        self.last.unwrap_or_else(|| {
+            if self.last_category == code::RPM_LIMIT {
+                let mut response = error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    code::RPM_LIMIT,
+                    "供应商已达到 RPM 上限，等待后重试",
+                );
+                response.headers_mut().insert(
+                    header::RETRY_AFTER,
+                    self.rpm_retry_after
+                        .unwrap_or(Duration::from_secs(1))
+                        .as_secs()
+                        .max(1)
+                        .into(),
+                );
+                response
+            } else {
+                error(
+                    if self.attempted == 0 {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    },
+                    self.last_category,
+                    if self.attempted == 0 {
+                        "没有可用供应商，请检查队列和熔断状态"
+                    } else {
+                        "所有可用供应商均请求失败"
+                    },
+                )
+            }
+        })
+    }
+}
 async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<WireBody> {
     let (settings, mode, mut ids, token, running) = {
         let s = gateway.request_state();
@@ -1074,26 +2993,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     request_budget.begin();
     request_budget.attach_traffic(&traffic);
     let forwarding = async {
-        let Plan {
-            hints,
-            stream_hint,
-            model,
-            mut pinned,
-            unknown_affinity,
-            continuation,
-            operation,
-            requirement,
-            fixed_dsh,
-            responses,
-            thread,
-            thread_identity,
-            auxiliary,
-            owned_search,
-            ownership,
-            dedicated_search,
-            established_capacity_owner,
-            usage_trace,
-        } = match plan(
+        let plan = match plan(
             &gateway, &parts, &replay, &mode, websocket, &mut ids, &routes,
         )
         .await
@@ -1101,474 +3001,86 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             Ok(plan) => plan,
             Err(response) => return *response,
         };
-        let mut failover = super::failover::Tracker::new(usage_trace.clone());
+        let mut failover = super::failover::Tracker::new(plan.usage_trace.clone());
         failover.attach_wait_budget(&request_budget);
-        if gateway.client_id() == super::ClientId::Codex && mode == "auto" && responses {
+        if gateway.client_id() == super::ClientId::Codex && mode == "auto" && plan.responses {
             failover.diagnostics(&gateway);
             if let Some(log) = failover.routing() {
                 log.pending(
                     &parts.headers,
-                    hints.as_ref().ok(),
-                    ownership.as_deref(),
-                    continuation,
+                    plan.hints.as_ref().ok(),
+                    plan.ownership.as_deref(),
+                    plan.continuation,
                 );
             }
         }
-        let mut last = None;
-        let mut last_error: Option<super::health_settlement::Reported> = None;
-        let mut attempted = 0usize;
-        let mut ordinary_attempts = 0usize;
-        let mut capacity_protected = false;
-        let mut previous_provider: Option<String> = None;
-        let mut last_category = code::NO_PROVIDER;
-        request_budget.describe(pinned.as_deref(), model.as_deref(), "admission");
+        request_budget.describe(plan.pinned.as_deref(), plan.model.as_deref(), "admission");
         let mut wait_budget = Budget::new(settings.queue_seconds);
         wait_budget.traffic = Some(traffic.clone());
-        wait_budget.follow(ownership.as_deref());
-        if pinned.is_some() || unknown_affinity {
+        wait_budget.follow(plan.ownership.as_deref());
+        if plan.pinned.is_some() || plan.unknown_affinity {
             wait_budget.pin_provider();
         }
-        let mut capacity_pending = false;
-        let mut capacity_wait_owner: Option<String> = None;
-        let mut hard_denied = std::collections::HashSet::new();
-        let mut capacity_retry_after: Option<Duration> = None;
-        let mut rpm_retry_after: Option<Duration> = None;
-        let mut capacity_sources = Vec::new();
-        let mut transient_retries = 0;
-        let mut retry_owner: Option<String> = None;
-        let mut search_fallback = false;
-        while dedicated_search || ordinary_attempts <= settings.max_retries {
-            traffic.waiting();
-            search_fallback |= attempted > 0;
+        let mut cx = Exchange {
+            gateway: &gateway,
+            settings: &settings,
+            mode: &mode,
+            parts: &parts,
+            replay: &replay,
+            request_budget: &request_budget,
+            websocket,
+            active,
+            traffic,
+            downstream_upgrade,
+            plan,
+            ids,
+            routes,
+            failover,
+            wait_budget,
+            last: None,
+            last_error: None,
+            last_category: code::NO_PROVIDER,
+            attempted: 0,
+            ordinary_attempts: 0,
+            capacity_protected: false,
+            previous_provider: None,
+            capacity_pending: false,
+            capacity_wait_owner: None,
+            hard_denied: std::collections::HashSet::new(),
+            capacity_retry_after: None,
+            rpm_retry_after: None,
+            capacity_sources: Vec::new(),
+            transient_retries: 0,
+            retry_owner: None,
+            search_fallback: false,
+        };
+        while cx.plan.dedicated_search || cx.ordinary_attempts <= cx.settings.max_retries {
+            cx.traffic.waiting();
+            cx.search_fallback |= cx.attempted > 0;
             // An unknown previous_response_id has no safe owner to replay against;
             // preserve the existing one-attempt rule instead of silently
             // repeating the request on an arbitrary provider.
-            if !dedicated_search
-                && ((unknown_affinity && !capacity_protected)
-                    || (gateway.client_id() == super::ClientId::Claude && continuation))
-                && attempted > 0
+            if !cx.plan.dedicated_search
+                && ((cx.plan.unknown_affinity && !cx.capacity_protected)
+                    || (cx.gateway.client_id() == super::ClientId::Claude && cx.plan.continuation))
+                && cx.attempted > 0
             {
                 break;
             }
-            if ids.is_empty() {
-                if capacity_pending && ordinary_attempts <= settings.max_retries {
-                    let delay = capacity_delay(&settings, capacity_retry_after);
-                    failover.wait(
-                        if capacity_retry_after.is_some() {
-                            super::failover::WaitKind::RetryAfter
-                        } else {
-                            super::failover::WaitKind::CapacityRetry
-                        },
-                        delay.as_secs(),
-                    );
-                    let owner_route = capacity_wait_owner
-                        .as_deref()
-                        .or_else(|| last_error.as_ref().and_then(|e| e.provider_id.as_deref()))
-                        .and_then(|id| routes.get(id));
-                    request_budget.describe(None, model.as_deref(), "capacity");
-                    let waited = gateway
-                        .wait_capacity_checked(
-                            &capacity_sources,
-                            delay,
-                            settings.max_waiting,
-                            capacity_wait_owner.is_some(),
-                            owner_route,
-                            last_error.as_deref(),
-                        )
-                        .await;
-                    match waited {
-                        Ok(true) => {
-                            if let Some(route) = owner_route {
-                                hard_denied.insert((
-                                    route.provider.id.clone(),
-                                    route.provider.version.clone(),
-                                ));
-                            }
-                            capacity_wait_owner = None;
-                            failover.failure(super::failover::Failure::AccountRejected);
-                        }
-                        Ok(false) => {}
-                        Err(Rejected::Stopped) => {
-                            failover.finish(super::failover::Exit::Stopped);
-                            return stopped();
-                        }
-                        Err(_) => break,
-                    }
-
-                    (ids, routes) = super::attempt::queue(
-                        &gateway,
-                        pinned.as_deref(),
-                        &hard_denied,
-                        parts.uri.path(),
-                    );
-                    if ids.is_empty() {
-                        break;
-                    }
-                    retry_owner = capacity_wait_owner
-                        .take()
-                        .filter(|owner| ids.contains(owner));
-                    capacity_pending = false;
-                    capacity_retry_after = None;
-                    capacity_sources.clear();
-                    continue;
-                }
-                break;
+            if cx.ids.is_empty() {
+                end!(cx.await_capacity().await)
             }
-            let mut candidates: Vec<_> = ids
-                .iter()
-                .filter_map(|id| routes.get(id).cloned())
-                .collect();
-            if dedicated_search {
-                candidates.retain(|route| route.provider.search_only == search_fallback);
-                if candidates.is_empty() {
-                    break;
-                }
-                if search_fallback {
-                    wait_budget.search_fallback();
-                }
-            }
-            let mut observed_candidates = candidates.clone();
-            observed_candidates.extend(
-                gateway
-                    .routing_ids(pinned.as_deref())
-                    .iter()
-                    .filter_map(|id| gateway.route(id))
-                    .filter(|r| !r.accepts_protocol(parts.uri.path())),
-            );
-            let matches_model = candidates
-                .iter()
-                .any(|r| requirement.allows(r.provider.allowed_models.as_deref()));
-            let new_thread_model_denied = ownership.as_ref().is_some_and(|lease| {
-                lease.admission_policy().0 == super::compaction::Intake::NewThread
-            }) && candidates.iter().any(|r| {
-                r.provider.take_new_threads
-                    && !requirement.allows(r.provider.allowed_models.as_deref())
-            });
-            if matches_model {
-                candidates.retain(|r| requirement.allows(r.provider.allowed_models.as_deref()));
-            }
-            wait_budget.capacity_owner = None;
-            if dedicated_search && search_fallback {
-                // Search backups do not inherit generation intake policies.
-            } else if let Some(owner) = retry_owner.take() {
-                candidates.retain(|route| route.provider.id == owner);
-            } else if let Some(lease) = ownership.as_ref().filter(|_| pinned.is_none()) {
-                candidates = if attempted > 0 || !hard_denied.is_empty() {
-                    lease.candidates_after_failure(candidates, &requirement)
-                } else {
-                    lease.candidates_for_admission(candidates, &requirement, &mut wait_budget)
-                };
-            } else if gateway.client_id() == super::ClientId::Codex
-                && mode == "auto"
-                && pinned.is_none()
-                && !auxiliary
-            {
-                candidates = super::compaction::unidentified_candidates(candidates);
-            }
-            if dedicated_search && !search_fallback {
-                candidates.truncate(1);
-                if candidates
-                    .first()
-                    .is_some_and(|route| !route.health_for(&requirement).available)
-                {
-                    search_fallback = true;
-                    continue;
-                }
-            }
-            // A second request entering during its owner's capacity cooldown must
-            // wait as well. Read the reset generation before the health snapshot.
-            if attempted == 0 && candidates.len() == 1 {
-                let owner = &candidates[0];
-                let source = gateway.0.admission.capacity_source(&owner.provider.id);
-                let health = owner.health_for(&requirement);
-                if established_capacity_owner.as_deref() == Some(&owner.provider.id)
-                    && routing::capacity_cooling(&health)
-                {
-                    wait_budget.protect_capacity();
-                    failover.wait(super::failover::WaitKind::CapacityRetry, health.retry_in);
-                    let cause =
-                        gateway.capacity_cause(&owner.provider.id, model.as_deref(), &health);
-                    match gateway
-                        .wait_capacity_checked(
-                            &[source],
-                            Duration::from_secs(health.retry_in),
-                            settings.max_waiting,
-                            true,
-                            Some(owner),
-                            cause.as_ref(),
-                        )
-                        .await
-                    {
-                        Ok(true) => {
-                            hard_denied.insert((
-                                owner.provider.id.clone(),
-                                owner.provider.version.clone(),
-                            ));
-                            failover.failure(super::failover::Failure::AccountRejected);
-                            last = Some(error(
-                                StatusCode::TOO_MANY_REQUESTS,
-                                code::HTTP,
-                                "本次额度查询确认耗尽，没有可用的替代供应商",
-                            ));
-                            last_category = code::HTTP;
-                            last_error = cause.map(Into::into);
-                        }
-                        Ok(false) => {}
-                        Err(Rejected::Stopped) => return stopped(),
-                        Err(_) => {
-                            return error(
-                                StatusCode::TOO_MANY_REQUESTS,
-                                code::CAPACITY,
-                                "等待队列已满",
-                            )
-                        }
-                    }
-                    (ids, routes) = super::attempt::queue(
-                        &gateway,
-                        pinned.as_deref(),
-                        &hard_denied,
-                        parts.uri.path(),
-                    );
-                    continue;
-                }
-            }
-            let stage = if unknown_affinity {
-                super::failover::Stage::UnknownOwner
-            } else if pinned.is_some() {
-                super::failover::Stage::CursorPinned
-            } else if attempted > 0 || !hard_denied.is_empty() {
-                super::failover::Stage::FailureFallback
-            } else if ownership.as_ref().is_some_and(|l| l.handoff) {
-                super::failover::Stage::ProactiveHandoff
-            } else {
-                super::failover::Stage::Initial
-            };
-            failover.candidates(
-                &gateway,
-                stage,
-                &observed_candidates,
-                &candidates,
-                &requirement,
-                parts.uri.path(),
-            );
-            if matches_model
-                && !candidates
-                    .iter()
-                    .any(|r| requirement.allows(r.provider.allowed_models.as_deref()))
-            {
-                if attempted > 0 {
-                    if capacity_pending {
-                        ids.clear();
-                        continue;
-                    }
-                    break;
-                }
-                failover.finish(super::failover::Exit::NoEligibleProvider);
-                gateway.record_policy_rejection(
-                    model.as_deref(),
-                    false,
-                    super::compaction::rejection_reason(thread.as_deref(), hints.as_ref().ok()),
-                );
-                return error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    code::NO_ELIGIBLE_PROVIDER,
-                    "没有符合线程接管策略的供应商",
-                );
-            }
-            if gateway.client_id() == super::ClientId::Codex
-                && mode == "auto"
-                && !dedicated_search
-                && pinned.is_none()
-                && !auxiliary
-            {
-                let (intake, owner) = ownership
-                    .as_ref()
-                    .map_or((super::compaction::Intake::Ordinary, None), |lease| {
-                        lease.admission_policy()
-                    });
-                wait_budget.set_intake(intake, owner);
-            }
-            if attempted > 0 || !hard_denied.is_empty() {
-                // Admission rechecks policy atomically. Its proactive priority gate
-                // must also yield to the failure queue, without dropping the claim.
-                wait_budget.handoff_owner = None;
-            }
-            let mut admission = match gateway
-                .0
-                .admission
-                .acquire_for_immediate(
-                    &candidates,
-                    mode == "manual" && !(dedicated_search && search_fallback),
-                    settings.max_waiting,
-                    &mut wait_budget,
-                    &requirement,
-                    capacity_pending,
-                )
-                .await
-                .inspect_err(|reason| failover.rejected(reason))
-            {
-                Ok(value) => value,
-                Err(Rejected::Full | Rejected::Timeout) => {
-                    if attempted > 0 {
-                        if capacity_pending {
-                            ids.clear();
-                            continue;
-                        }
-                        break;
-                    }
-                    let mut response = error(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        code::CAPACITY,
-                        "供应商并发已满，等待队列已满或等待超时",
-                    );
-                    response
-                        .headers_mut()
-                        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("5"));
-                    return response;
-                }
-                Err(Rejected::Cooling(seconds)) => {
-                    if attempted > 0 {
-                        if capacity_pending {
-                            ids.clear();
-                            continue;
-                        }
-                        break;
-                    }
-                    let mut response = error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        code::PROVIDERS_COOLING_DOWN,
-                        "供应商正在冷却或恢复探测，请稍后重试",
-                    );
-                    response
-                        .headers_mut()
-                        .insert(header::RETRY_AFTER, seconds.max(1).into());
-                    return response;
-                }
-                Err(Rejected::RateLimited(seconds)) => {
-                    rpm_retry_after = Some(Duration::from_secs(seconds.max(1)));
-                    if attempted > 0 {
-                        last_category = code::RPM_LIMIT;
-                        break;
-                    }
-                    let mut response = error(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        code::RPM_LIMIT,
-                        "供应商已达到 RPM 上限，等待后重试",
-                    );
-                    response
-                        .headers_mut()
-                        .insert(header::RETRY_AFTER, seconds.max(1).into());
-                    return response;
-                }
-                Err(Rejected::Stopped) => {
-                    return stopped();
-                }
-                Err(Rejected::Model) => {
-                    if attempted > 0 {
-                        if capacity_pending {
-                            ids.clear();
-                            continue;
-                        }
-                        break;
-                    }
-                    return error(
-                        StatusCode::BAD_REQUEST,
-                        requirement.code(),
-                        if gateway.client_id() == super::ClientId::Dsh {
-                            "没有供应商配置此 DSH 模型映射，请编辑 Flash / Pro 映射"
-                        } else {
-                            requirement.message()
-                        },
-                    );
-                }
-                Err(Rejected::Policy) => {
-                    if attempted > 0 {
-                        if capacity_pending {
-                            ids.clear();
-                            continue;
-                        }
-                        break;
-                    }
-                    gateway.record_policy_rejection(
-                        model.as_deref(),
-                        false,
-                        super::compaction::rejection_reason(thread.as_deref(), hints.as_ref().ok()),
-                    );
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        code::NO_ELIGIBLE_PROVIDER,
-                        "没有符合线程接管策略的供应商",
-                    );
-                }
-                Err(Rejected::Unavailable | Rejected::Reconnect) => {
-                    if capacity_pending {
-                        ids.clear();
-                        continue;
-                    }
-                    break;
-                }
-            };
-            let route = match gateway
-                .endpoint_route(
-                    admission.route.clone(),
-                    thread.as_deref(),
-                    hints
-                        .as_ref()
-                        .ok()
-                        .and_then(|h| h.previous_response_id.as_deref()),
-                    ownership
-                        .as_ref()
-                        .is_some_and(|lease| lease.handoff || lease.establishing())
-                        || hints.as_ref().is_ok_and(|h| h.first_turn),
-                )
-                .await
-            {
-                Ok(route) => route,
-                Err(reason) => {
-                    failover.finish(super::failover::Exit::AdmissionRejected);
-                    admission.permits.neutral(&settings);
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        &reason.code,
-                        &reason.message,
-                    );
-                }
-            };
-            let owner_admitted = ownership.as_ref().map_or(Ok(true), |lease| {
-                lease.admit_request(&gateway, &route.provider, &requirement, pinned.is_some())
-            });
-            let owner_admitted = match owner_admitted {
-                Ok(value) => value,
-                Err(e) => {
-                    admission.permits.neutral(&settings);
-                    return error(StatusCode::SERVICE_UNAVAILABLE, &e.code, &e.message);
-                }
-            };
-            if !owner_admitted {
-                admission.permits.neutral(&settings);
-                if gateway.0.compaction.error().is_some() {
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        code::CONVERSATION_OWNERSHIP,
-                        "线程归属记录暂不可用",
-                    );
-                }
-                continue;
-            }
-            if unknown_affinity {
-                pinned = Some(route.provider.id.clone());
-                wait_budget.pin_provider();
-            }
-            let reset_generation = admission.reset_generation;
-            ids.retain(|id| id != &route.provider.id);
+            let (candidates, new_thread_model_denied) = step!(cx.candidates().await);
+            let mut admission = step!(cx.admit(&candidates).await);
+            let route = step!(cx.endpoint(&mut admission).await);
             let (upstream, upstream_model) = match upstream_request(
                 &route,
-                &parts,
-                &replay,
-                model.as_deref(),
-                operation,
-                &request_budget,
-                websocket,
+                cx.parts,
+                cx.replay,
+                cx.plan.model.as_deref(),
+                cx.plan.operation,
+                cx.request_budget,
+                cx.websocket,
             )
             .await
             {
@@ -1576,273 +3088,24 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 Err(Unbuilt::Skip) => continue,
                 Err(Unbuilt::Reject(response)) => return *response,
             };
-            admission.commit_rpm();
-            attempted = attempted.saturating_add(1);
-            ordinary_attempts = ordinary_attempts.saturating_add(1);
-            let rerouted = previous_provider
-                .as_deref()
-                .is_some_and(|id| id != admission.route.provider.id);
-            previous_provider = Some(admission.route.provider.id.clone());
-            let started = Instant::now();
-            let mut protocol = super::protocol::Protocol::new(stream_hint);
-            protocol.attach_wait_budget(&request_budget);
-            protocol.attach_failure_rules(&settings.custom_failure_rules);
-            request_budget.describe(Some(&route.provider.id), model.as_deref(), "headers");
-            protocol.set_operation(operation);
-            protocol.diagnostics(&gateway, &route.provider.id, model.as_deref());
-            protocol.attach_ownership(ownership.clone(), &route.provider.id);
-            protocol.attach_routing_log(failover.routing());
-            protocol.request_headers(&parts.headers);
-            if !routing::resource(&parts.method, parts.uri.path()) {
-                protocol.business_request(&gateway, &parts.headers);
-            }
-            protocol.request_speed(hints.as_ref().ok().and_then(|h| h.speed.clone()));
-            protocol.thread_identity(thread_identity);
-            if let Some(at) = parts.extensions.get::<ReceivedAt>() {
-                protocol.request_received(at.0);
-            }
-            if let Some(delivery) = parts
-                .extensions
-                .get::<std::sync::Arc<super::protocol::Delivery>>()
-            {
-                protocol.set_delivery(delivery.clone());
-            }
-            if let Some(trace) = &usage_trace {
-                let mut attempt = trace.attempt(
-                    &route.provider.id,
-                    stream_hint,
-                    if websocket { "websocket" } else { "http" },
-                );
-                attempt.upstream_model(upstream_model.clone());
-                protocol.attach_usage(attempt);
-            }
-            protocol.context(
-                thread.clone(),
-                (gateway.client_id() == super::ClientId::Codex
-                    && mode == "auto"
-                    && (responses || (owned_search && ownership.is_some())))
-                .then(|| {
-                    admission
-                        .handoff_wait
-                        .or(
-                            (new_thread_model_denied && !route.provider.take_new_threads)
-                                .then_some(
-                                    crate::usage::model::RoutingDecision::NewThreadModelDenied,
-                                ),
-                        )
-                        .unwrap_or_else(|| {
-                            super::compaction::decision(
-                                thread.as_deref(),
-                                hints.as_ref().ok(),
-                                continuation,
-                                ownership.as_deref(),
-                                &route.provider.id,
-                            )
-                        })
-                }),
-            );
-            if gateway.client_id() == super::ClientId::Codex
-                && mode == "auto"
-                && (responses || (owned_search && ownership.is_some()))
-            {
-                protocol.routing_evidence(hints.as_ref().ok());
-            }
-            protocol.watch_lifecycle(
-                gateway
-                    .request_state()
-                    .shutdown
-                    .as_ref()
-                    .map(watch::Sender::subscribe),
-                None,
-            );
-            let search_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-            let deadline = if dedicated_search {
-                search_deadline
+            let mut attempt = cx.begin(admission, route, upstream_model, new_thread_model_denied);
+            let deadline = if cx.plan.dedicated_search {
+                attempt.search_deadline
             } else {
-                tokio::time::Instant::now() + Duration::from_secs(settings.first_byte_seconds)
+                tokio::time::Instant::now() + Duration::from_secs(cx.settings.first_byte_seconds)
             };
-            let response = request_budget
+            let response = cx
+                .request_budget
                 .response(
                     deadline,
-                    operation == crate::usage::model::Operation::Compaction,
-                    route.client.request(upstream),
+                    cx.plan.operation == crate::usage::model::Operation::Compaction,
+                    attempt.route.client.request(upstream),
                 )
                 .await;
-            let mut response = match response {
+            let response = match response {
                 Ok(Ok(response)) => response,
-                Ok(Err(e)) => {
-                    failover.failure(super::failover::Failure::Transport);
-                    let category = connector::classify(&e);
-                    last_category = match category {
-                        Some(connector::ConnectError::Tls) => code::TLS,
-                        _ => code::NETWORK,
-                    };
-                    // Use the same owner and budget as 5xx for connection failures,
-                    // including a peer closing before response headers arrive.
-                    // Header timeouts still use the separate no-replay boundary.
-                    let retry_same = !dedicated_search
-                        && matches!(
-                            category,
-                            None | Some(
-                                connector::ConnectError::TargetConnect
-                                    | connector::ConnectError::TargetTimeout
-                            )
-                        )
-                        && !unknown_affinity
-                        && ordinary_attempts <= settings.max_retries
-                        && ((route.client_id == super::ClientId::Codex
-                            && (pinned.as_deref() == Some(&route.provider.id)
-                                || ownership
-                                    .as_ref()
-                                    .is_some_and(|lease| lease.owns(&route.provider.id))))
-                            || fixed_dsh.as_deref() == Some(&route.provider.id));
-                    protocol.finish(None, last_category);
-                    let mut event = admission.permits.prepare_report(
-                        &gateway,
-                        &route,
-                        model.as_deref(),
-                        Reason::Network,
-                        super::attempt::retained_fallback(
-                            &gateway,
-                            &route.provider.id,
-                            &ids,
-                            &routes,
-                            &requirement,
-                            parts.uri.path(),
-                            ownership.as_deref(),
-                            gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            super::attempt::may_fail_over(
-                                mode == "manual",
-                                pinned.as_deref(),
-                                unknown_affinity,
-                                ordinary_attempts,
-                                settings.max_retries,
-                            ),
-                        ),
-                        None,
-                        attempted,
-                        crate::events::Details {
-                            phase: Some(crate::events::Phase::Connect),
-                            local_code: Some(connector::diagnostic_code(&e).into()),
-                            counted_failure: Some(true),
-                            ..Default::default()
-                        },
-                    );
-                    if dedicated_search {
-                        admission.permits.neutral(&settings);
-                    } else {
-                        admission.permits.failure(&settings, None);
-                    }
-                    let retry_delay = super::attempt::same_provider_delay(
-                        retry_same,
-                        &route.health_for(&requirement),
-                        &mut transient_retries,
-                        None,
-                    );
-                    if let Some(delay) = retry_delay {
-                        event.action = Action::RetryingSame;
-                        event.details.wait_seconds = Some(delay.as_secs());
-                    }
-                    last_error = Some(failover.report_failure(Some(&protocol), || {
-                        super::health_settlement::publish(&gateway, event)
-                    }));
-                    if let Some(delay) = retry_delay {
-                        failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
-                        drop(admission);
-                        match transient_wait(
-                            &gateway,
-                            &route,
-                            reset_generation,
-                            delay,
-                            settings.max_waiting,
-                            pinned.as_deref(),
-                            &requirement,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                ids.insert(0, route.provider.id.clone());
-                                retry_owner = Some(route.provider.id.clone());
-                            }
-                            Ok(false) => {}
-                            Err(Rejected::Stopped) => {
-                                failover.finish(super::failover::Exit::Stopped);
-                                return stopped();
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    continue;
-                }
-                Err(_) => {
-                    failover.failure(super::failover::Failure::Transport);
-                    let retry_dsh = dedicated_search
-                        || route.client_id == super::ClientId::Dsh
-                            && super::attempt::retained_fallback(
-                                &gateway,
-                                &route.provider.id,
-                                &ids,
-                                &routes,
-                                &requirement,
-                                parts.uri.path(),
-                                ownership.as_deref(),
-                                false,
-                                super::attempt::may_fail_over(
-                                    mode == "manual",
-                                    pinned.as_deref(),
-                                    unknown_affinity,
-                                    ordinary_attempts,
-                                    settings.max_retries,
-                                ),
-                            ) == Action::TryingNext;
-                    protocol.timeout(
-                        "response_headers",
-                        if dedicated_search {
-                            30
-                        } else {
-                            settings.first_byte_seconds
-                        },
-                    );
-                    protocol.finish(None, code::FIRST_BYTE_TIMEOUT);
-                    last_error = Some(failover.report_failure(Some(&protocol), || {
-                        admission.permits.report(
-                            &gateway,
-                            &route,
-                            model.as_deref(),
-                            Reason::Network,
-                            if retry_dsh {
-                                Action::TryingNext
-                            } else {
-                                Action::Returned
-                            },
-                            None,
-                            attempted,
-                            crate::events::Details {
-                                phase: Some(crate::events::Phase::Headers),
-                                local_code: Some(code::FIRST_BYTE_TIMEOUT.into()),
-                                counted_failure: Some(true),
-                                ..protocol.observation.error.clone()
-                            },
-                        )
-                    }));
-                    if dedicated_search {
-                        admission.permits.neutral(&settings);
-                    } else {
-                        admission.permits.failure(&settings, None);
-                    }
-                    if retry_dsh {
-                        last_category = code::FIRST_BYTE_TIMEOUT;
-                        continue;
-                    }
-                    failover.finish(super::failover::Exit::ReplayUnsafe);
-                    // The HTTP client already owns the request. Not seeing headers
-                    // cannot establish that its body never reached the provider.
-                    return error(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        code::FIRST_BYTE_TIMEOUT,
-                        "上游首字节超时，请求可能已开始处理，未自动重放",
-                    );
-                }
+                Ok(Err(e)) => end!(cx.unreached(attempt, &e).await),
+                Err(_) => end!(cx.headers_timeout(attempt)),
             };
             let status = response.status();
             let stream = response
@@ -1859,938 +3122,33 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 .get(header::CONTENT_ENCODING)
                 .and_then(|h| h.to_str().ok())
                 .unwrap_or("");
-            protocol.response(status.as_u16(), stream, encoding);
-            protocol.response_headers(response.headers());
-            if status == StatusCode::SWITCHING_PROTOCOLS && websocket {
-                failover.finish(super::failover::Exit::Forwarded);
-                admission.permits.success(&settings);
-                let Admission { permits, slot, .. } = admission;
-                let upstream_upgrade = hyper::upgrade::on(&mut response);
-                let (mut response_parts, _) = response.into_parts();
-                clean_headers(&mut response_parts.headers, true);
-                let downstream = downstream_upgrade.expect("upgrade exists");
-                let g = gateway.clone();
-                let cfg = settings.clone();
-                let provider_for_tunnel = route.provider.clone();
-                tokio::spawn(async move {
-                    let _active = active;
-                    let _traffic = traffic;
-                    let _slot = slot;
-                    let mut permits = permits;
-                    let connected = tokio::try_join!(upstream_upgrade, downstream);
-                    if let Ok((a, b)) = connected {
-                        // Opaque tunnel preserves every data/control/close frame, including binary payloads.
-                        let result = tokio::io::copy_bidirectional(
-                            &mut TokioIo::new(a),
-                            &mut TokioIo::new(b),
-                        )
-                        .await;
-                        protocol.finish(
-                            Some(101),
-                            if result.is_ok() {
-                                code::OK
-                            } else {
-                                code::STREAM_INTERRUPTED
-                            },
-                        );
-                        if protocol.succeeded() {
-                            g.persist_success(&provider_for_tunnel).await;
-                        }
-                        permits.neutral(&cfg);
-                    }
-                });
-                if rerouted {
-                    gateway.record(
-                        Some(&route.provider.id),
-                        model.as_deref(),
-                        Reason::Failover,
-                        Action::Routed,
-                        Some(status.as_u16()),
-                        Some(attempted.min(u32::MAX as usize) as u32),
-                    );
-                }
-                return Response::from_parts(response_parts, replay::empty());
+            attempt.protocol.response(status.as_u16(), stream, encoding);
+            attempt.protocol.response_headers(response.headers());
+            if status == StatusCode::SWITCHING_PROTOCOLS && cx.websocket {
+                return cx.tunnel(attempt, response);
             }
             if status.as_u16() >= 400 {
-                let cooldown = response
-                    .headers()
-                    .get(header::RETRY_AFTER)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(circuit::retry_after);
-                let (mut response_parts, body) = response.into_parts();
-                clean_headers(&mut response_parts.headers, false);
-                let captured = Replay::capture_observed(
-                    body,
-                    gateway.0.spool.path(),
-                    Some(Duration::from_secs(settings.idle_seconds)),
-                    |bytes| protocol.feed(bytes),
-                )
-                .await;
-                if captured
-                    .as_ref()
-                    .err()
-                    .and_then(|e| e.downcast_ref::<std::io::Error>())
-                    .is_some_and(|e| e.kind() == std::io::ErrorKind::TimedOut)
-                {
-                    protocol.timeout("error_body_idle", settings.idle_seconds);
-                }
-                let decoded = match &captured {
-                    Ok(body) => {
-                        let encoded = body.prefix(2 * 1024 * 1024).await.unwrap_or_default();
-                        protocol.finish(Some(status.as_u16()), code::HTTP);
-                        let encoding = response_parts
-                            .headers
-                            .get(header::CONTENT_ENCODING)
-                            .and_then(|h| h.to_str().ok())
-                            .unwrap_or("identity");
-                        replay::decode_prefix(&encoded, encoding, 128 * 1024).unwrap_or_default()
-                    }
-                    _ => {
-                        protocol.finish(Some(status.as_u16()), code::STREAM_INTERRUPTED);
-                        Vec::new()
-                    }
-                };
-                let (classified, server_retry) = super::failure_policy::http_with_rules(
-                    status.as_u16(),
-                    &response_parts.headers,
-                    &decoded,
-                    &settings.custom_failure_rules,
-                );
-                let mut cooldown = cooldown
-                    .max(server_retry)
-                    .max(protocol.observation.retry_after);
-                let compact_error = ownership.as_ref().is_some_and(|lease| {
-                    lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
-                }) && protocol.observation.compaction_incompatible;
-                if compact_error {
-                    if let Some(owner) = ownership
-                        .as_ref()
-                        .and_then(|lease| lease.owner.as_ref())
-                        .filter(|owner| ids.contains(owner))
-                    {
-                        retry_owner = Some(owner.clone());
-                    }
-                }
-                let model_error = protocol.observation.terminal
-                    == Some(super::protocol::Terminal::ModelUnavailable)
-                    || super::failure_policy::model_http(status.as_u16(), &decoded);
-                let mut details = if protocol.observation.error.raw.is_some() {
-                    protocol.observation.error.clone()
-                } else {
-                    classified
-                };
-                if details == crate::events::Details::default() {
-                    details = protocol.observation.error.clone();
-                }
-                if route.client_id == super::ClientId::Dsh
-                    && !model_error
-                    && matches!(status.as_u16(), 401..=403)
-                {
-                    details.health_scope = Some(crate::events::HealthScope::Provider);
-                }
-                let policy = super::failure_policy::decision(Some(status.as_u16()), &details);
-                let hard_rejection = policy.hard;
-                if hard_rejection {
-                    hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
-                }
-                let capacity = !model_error && !hard_rejection && policy.temporary;
-                let wait_same =
-                    capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
-                if capacity && !websocket && !dedicated_search {
-                    ordinary_attempts = ordinary_attempts.saturating_sub(1);
-                    capacity_protected = true;
-                    wait_budget.protect_capacity();
-                }
-                let retryable = compact_error || model_error || hard_rejection || policy.retryable;
-                let retry_same = circuit::is_server_error(status.as_u16())
-                    && !compact_error
-                    && !model_error
-                    && !capacity
-                    && !hard_rejection
-                    && !unknown_affinity
-                    && ordinary_attempts <= settings.max_retries
-                    && ((route.client_id == super::ClientId::Codex
-                        && (pinned.as_deref() == Some(&route.provider.id)
-                            || ownership
-                                .as_ref()
-                                .is_some_and(|lease| lease.owns(&route.provider.id))))
-                        || fixed_dsh.as_deref() == Some(&route.provider.id));
-                failover.failure(if hard_rejection {
-                    super::failover::Failure::AccountRejected
-                } else if model_error {
-                    super::failover::Failure::ModelUnavailable
-                } else if status == StatusCode::TOO_MANY_REQUESTS || capacity {
-                    super::failover::Failure::RateLimit
-                } else if compact_error {
-                    super::failover::Failure::Protocol
-                } else {
-                    super::failover::Failure::UpstreamService
-                });
-                let will_retry = retryable
-                    && ((dedicated_search
-                        && ids
-                            .iter()
-                            .any(|id| routes.get(id).is_some_and(|r| r.provider.search_only)))
-                        || super::attempt::retained_fallback(
-                            &gateway,
-                            &route.provider.id,
-                            &ids,
-                            &routes,
-                            &requirement,
-                            parts.uri.path(),
-                            ownership.as_deref(),
-                            gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            super::attempt::may_fail_over(
-                                mode == "manual",
-                                pinned.as_deref(),
-                                unknown_affinity,
-                                ordinary_attempts,
-                                settings.max_retries,
-                            ),
-                        ) == Action::TryingNext);
-                let reason = if compact_error {
-                    Reason::ProtocolError
-                } else {
-                    policy.reason
-                };
-                details.phase = Some(crate::events::Phase::Response);
-                details.counted_failure = Some(!compact_error && policy.counted_failure);
-                details.wait_seconds =
-                    cooldown.map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
-                protocol.finish(
-                    Some(status.as_u16()),
-                    if captured.is_ok() {
-                        code::HTTP
-                    } else {
-                        code::STREAM_INTERRUPTED
-                    },
-                );
-                let mut event = admission.permits.prepare_report(
-                    &gateway,
-                    &route,
-                    model.as_deref(),
-                    reason,
-                    if wait_same {
-                        Action::RetryingSame
-                    } else if will_retry {
-                        Action::TryingNext
-                    } else if capacity {
-                        Action::Waiting
-                    } else {
-                        Action::Returned
-                    },
-                    Some(status.as_u16()),
-                    attempted,
-                    details,
-                );
-                if model_error || compact_error {
-                    admission.permits.neutral(&settings);
-                } else if capacity {
-                    admission.permits.capacity_limited(&settings, cooldown);
-                } else if hard_rejection {
-                    admission.permits.failure(&settings, cooldown);
-                } else if status == StatusCode::TOO_MANY_REQUESTS {
-                    admission.permits.rate_limited(&settings, cooldown);
-                } else if retryable {
-                    admission.permits.failure(&settings, cooldown);
-                } else {
-                    admission.permits.neutral(&settings);
-                }
-                let retry_delay = super::attempt::same_provider_delay(
-                    retry_same,
-                    &route.health_for(&requirement),
-                    &mut transient_retries,
-                    cooldown,
-                );
-                if let Some(delay) = retry_delay {
-                    event.action = Action::RetryingSame;
-                    event.details.wait_seconds = Some(delay.as_secs());
-                }
-                last_error = Some(failover.report_failure(Some(&protocol), || {
-                    super::health_settlement::publish(&gateway, event)
-                }));
-                if capacity {
-                    cooldown = cooldown.max(Some(Duration::from_secs(
-                        route.health_for(&requirement).retry_in,
-                    )));
-                }
-                if !retryable {
-                    ids.clear();
-                }
-                if let Ok(body) = captured {
-                    last = Some(Response::from_parts(response_parts, body.body()));
-                }
-                last_category = code::HTTP;
-                if !retryable {
-                    failover.finish(super::failover::Exit::PermanentRejection);
-                    return last.unwrap_or_else(|| {
-                        error(
-                            StatusCode::BAD_GATEWAY,
-                            code::UPSTREAM_BODY,
-                            "上游错误响应读取失败",
-                        )
-                    });
-                }
-                if let Some(delay) = retry_delay {
-                    failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
-                    // Release the failed attempt before registering a bounded wait.
-                    // Keep the original spool, model, and response cursor untouched.
-                    drop(admission);
-                    request_budget.describe(None, model.as_deref(), "retry");
-                    match transient_wait(
-                        &gateway,
-                        &route,
-                        reset_generation,
-                        delay,
-                        settings.max_waiting,
-                        pinned.as_deref(),
-                        &requirement,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            ids.insert(0, route.provider.id.clone());
-                            retry_owner = Some(route.provider.id.clone());
-                        }
-                        Ok(false) => {}
-                        Err(Rejected::Stopped) => {
-                            failover.finish(super::failover::Exit::Stopped);
-                            return stopped();
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if capacity && !dedicated_search {
-                    if wait_same {
-                        capacity_wait_owner = Some(route.provider.id.clone());
-                        ids.clear();
-                    }
-                    capacity_pending = true;
-                    capacity_sources.push(CapacitySource {
-                        provider_id: route.provider.id.clone(),
-                        reset_generation,
-                    });
-                    capacity_retry_after = capacity_retry_after.max(cooldown);
-                }
-                continue;
+                end!(cx.rejected(attempt, response).await)
             }
-            let (mut response_parts, body) = response.into_parts();
-            let mut body = body
-                .map_err(|error| Box::new(error) as BoxError)
-                .boxed_unsync();
-            clean_headers(&mut response_parts.headers, false);
-            let mut first_deadline = tokio::time::Instant::now()
-                + Duration::from_secs(settings.first_byte_seconds)
-                    .saturating_sub(started.elapsed());
-            if dedicated_search {
-                first_deadline = search_deadline;
-            }
-            // Buffer through initialization and heartbeats until effective output or a
-            // terminal outcome (or bounded JSON); preserve
-            // the original frames and encoding exactly, including comments/trailers.
-            let json = response_parts
-                .headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.to_ascii_lowercase().contains("json"));
-            let mut preinspected = false;
-            let mut inspected_bytes = 0u64;
-            let mut prefix = Vec::new();
-            let mut prefix_bytes = 0;
-            let mut ended = false;
-            let mut failed = false;
-            let mut failure_kind = code::FIRST_BYTE_TIMEOUT;
-            loop {
-                match request_budget
-                    .response(
-                        first_deadline,
-                        operation == crate::usage::model::Operation::Compaction,
-                        body.frame(),
-                    )
-                    .await
-                {
-                    Ok(Some(Ok(frame))) => {
-                        if let Some(bytes) = frame.data_ref() {
-                            prefix_bytes += bytes.len();
-                            protocol.feed(bytes);
-                            if !stream
-                                && !json
-                                && !bytes.is_empty()
-                                && !protocol.possible_bare_capacity()
-                            {
-                                protocol.effective_output();
-                            }
-                            if !dedicated_search && !bytes.is_empty() {
-                                first_deadline = tokio::time::Instant::now()
-                                    + Duration::from_secs(settings.idle_seconds);
-                            }
-                        }
-                        prefix.push((
-                            frame,
-                            protocol.terminal().is_some(),
-                            protocol.business_observed(),
-                        ));
-                        if body.is_end_stream() {
-                            ended = true;
-                        }
-                        if !ended
-                            && (prefix_bytes >= 2 * 1024 * 1024 || prefix.len() >= 4096)
-                            && !protocol.search_content_observed()
-                            && protocol.terminal().is_none()
-                        {
-                            let frames = std::mem::take(&mut prefix);
-                            let mut observed = prefix_bytes;
-                            let captured = {
-                                let upstream = &mut body;
-                                let remainder = async_stream::try_stream! {
-                                    for (frame, _, _) in frames { yield frame; }
-                                    while let Some(frame) = upstream.frame().await { yield frame.map_err(std::io::Error::other)?; }
-                                };
-                                let mut remainder = StreamBody::new(Box::pin(remainder))
-                                    .map_err(|error: std::io::Error| error);
-                                Replay::capture_until(
-                                    &mut remainder,
-                                    gateway.0.spool.path(),
-                                    Some(Duration::from_secs(settings.idle_seconds)),
-                                    |bytes| {
-                                        if observed > 0 {
-                                            observed = observed.saturating_sub(bytes.len());
-                                        } else {
-                                            protocol.feed(bytes);
-                                        }
-                                        stream
-                                            && (protocol.search_content_observed()
-                                                || protocol.terminal().is_some())
-                                    },
-                                )
-                                .await
-                            };
-                            ended = body.is_end_stream();
-                            match captured {
-                                Ok(replay) => {
-                                    inspected_bytes = replay.length;
-                                    let mut buffered = replay.body();
-                                    let mut upstream = body;
-                                    body = StreamBody::new(async_stream::try_stream! {
-                                        while let Some(frame) = buffered.frame().await { yield frame?; }
-                                        while let Some(frame) = upstream.frame().await { yield frame?; }
-                                    }).boxed_unsync();
-                                    preinspected = true;
-                                }
-                                Err(_) => {
-                                    failed = true;
-                                    failure_kind = code::UPSTREAM_BODY;
-                                }
-                            }
-                            break;
-                        }
-                        if ended
-                            || (!stream && !json && !protocol.possible_bare_capacity())
-                            || (stream
-                                && (protocol.search_content_observed()
-                                    || protocol.terminal().is_some()))
-                        {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        ended = true;
-                        break;
-                    }
-                    result => {
-                        failed = true;
-                        failure_kind = if result.is_err() && prefix_bytes != 0 {
-                            code::STREAM_TIMEOUT
-                        } else if result.is_err() {
-                            code::FIRST_BYTE_TIMEOUT
-                        } else {
-                            code::STREAM_INTERRUPTED
-                        };
-                        break;
-                    }
-                }
-            }
-            if failed {
-                if failure_kind.ends_with("TIMEOUT") {
-                    protocol.timeout(
-                        if prefix_bytes == 0 {
-                            "first_byte"
-                        } else {
-                            "first_event_idle"
-                        },
-                        if prefix_bytes == 0 {
-                            settings.first_byte_seconds
-                        } else {
-                            settings.idle_seconds
-                        },
-                    );
-                }
-                protocol.finish(Some(status.as_u16()), failure_kind);
-            }
-            if failed
-                && (dedicated_search
-                    || route.client_id == super::ClientId::Dsh
+            let mut opening = cx.opening(&mut attempt, response, stream).await;
+            if opening.failed
+                && (cx.plan.dedicated_search
+                    || attempt.route.client_id == super::ClientId::Dsh
                     || super::attempt::transport_retry(
-                        prefix_bytes != 0,
-                        protocol.transport_failure(),
-                        failure_kind,
+                        opening.prefix_bytes != 0,
+                        attempt.protocol.transport_failure(),
+                        opening.failure_kind,
                     ))
             {
-                failover.failure(super::failover::Failure::Transport);
-                let fallback = super::attempt::retained_fallback(
-                    &gateway,
-                    &route.provider.id,
-                    &ids,
-                    &routes,
-                    &requirement,
-                    parts.uri.path(),
-                    ownership.as_deref(),
-                    gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                    super::attempt::may_fail_over(
-                        mode == "manual",
-                        pinned.as_deref(),
-                        unknown_affinity,
-                        ordinary_attempts,
-                        settings.max_retries,
-                    ),
-                );
-                let mut event = admission.permits.prepare_report(
-                    &gateway,
-                    &route,
-                    model.as_deref(),
-                    Reason::Network,
-                    fallback,
-                    Some(status.as_u16()),
-                    attempted,
-                    crate::events::Details {
-                        phase: Some(crate::events::Phase::Response),
-                        local_code: Some(failure_kind.into()),
-                        counted_failure: Some(true),
-                        ..protocol.observation.error.clone()
-                    },
-                );
-                if dedicated_search {
-                    admission.permits.neutral(&settings);
-                } else {
-                    admission.permits.failure(&settings, None);
-                }
-                let retry_delay = if failure_kind == code::STREAM_INTERRUPTED
-                    && fixed_dsh.as_deref() == Some(&route.provider.id)
-                    && !unknown_affinity
-                    && ordinary_attempts <= settings.max_retries
-                    && route.health_for(&requirement).available
-                {
-                    routing::transient_delay(&mut transient_retries, None)
-                } else {
-                    None
-                };
-                if let Some(delay) = retry_delay {
-                    event.action = Action::RetryingSame;
-                    event.details.wait_seconds = Some(delay.as_secs());
-                }
-                last_error = Some(failover.report_failure(Some(&protocol), || {
-                    super::health_settlement::publish(&gateway, event)
-                }));
-                last_category = failure_kind;
-                if let Some(delay) = retry_delay {
-                    failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
-                    drop(admission);
-                    match transient_wait(
-                        &gateway,
-                        &route,
-                        reset_generation,
-                        delay,
-                        settings.max_waiting,
-                        pinned.as_deref(),
-                        &requirement,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            ids.insert(0, route.provider.id.clone());
-                            retry_owner = Some(route.provider.id.clone());
-                        }
-                        Ok(false) => {}
-                        Err(Rejected::Stopped) => {
-                            failover.finish(super::failover::Exit::Stopped);
-                            return stopped();
-                        }
-                        Err(_) => break,
-                    }
-                } else if route.client_id == super::ClientId::Dsh && fallback != Action::TryingNext
-                {
-                    failover.finish(super::failover::Exit::ReplayUnsafe);
-                    return error(
-                        if failure_kind.ends_with("TIMEOUT") {
-                            StatusCode::GATEWAY_TIMEOUT
-                        } else {
-                            StatusCode::BAD_GATEWAY
-                        },
-                        failure_kind,
-                        if failure_kind.ends_with("TIMEOUT") {
-                            "上游响应超时"
-                        } else {
-                            "上游响应流中断"
-                        },
-                    );
-                }
-                continue;
-            }
-            ended |= failed;
-            if ended {
-                protocol.finish(
-                    Some(status.as_u16()),
-                    if status.is_success() {
-                        code::OK
-                    } else {
-                        code::HTTP
-                    },
-                );
-                if protocol.terminal_observed() {
-                    if let Some((_, terminal, business)) = prefix.last_mut() {
-                        *terminal = true;
-                        *business = true;
-                    }
-                }
-            }
-            let before_output = !protocol.observation.meter.content_seen
-                && !protocol.observation.search_content
-                && !protocol.observation.opaque_output;
-            let initial_model_error = before_output
-                && protocol.terminal() == Some(super::protocol::Terminal::ModelUnavailable);
-            let initial_compact_error = protocol.observation.compaction_incompatible
-                && ownership.as_ref().is_some_and(|lease| {
-                    lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)
-                });
-            if initial_compact_error {
-                if let Some(owner) = ownership
-                    .as_ref()
-                    .and_then(|lease| lease.owner.as_ref())
-                    .filter(|owner| ids.contains(owner))
-                {
-                    retry_owner = Some(owner.clone());
-                }
-            }
-            let policy =
-                super::failure_policy::decision(Some(status.as_u16()), &protocol.observation.error);
-            let initial_hard_rejection = before_output && policy.hard;
-            if initial_hard_rejection {
-                hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
-            }
-            let initial_capacity = before_output
-                && !initial_hard_rejection
-                && !websocket
-                && !initial_model_error
-                && policy.temporary;
-            // This whole prefix is still private to the gateway. A body frame
-            // can contain both generated deltas and a terminal service error;
-            // observing those deltas is not proof that the client received them.
-            let initial_service_error = (before_output || protocol.explicit_failure())
-                && protocol.observation.error.error_basis
-                    == Some(crate::events::ErrorBasis::ServiceError);
-            let initial_other_error = before_output && !failed && protocol.explicit_failure();
-            let wait_same = initial_capacity
-                && established_capacity_owner.as_deref() == Some(&route.provider.id);
-            if initial_model_error
-                || initial_capacity
-                || initial_compact_error
-                || initial_hard_rejection
-                || initial_service_error
-                || initial_other_error
-            {
-                failover.failure(if initial_hard_rejection {
-                    super::failover::Failure::AccountRejected
-                } else if initial_capacity {
-                    super::failover::Failure::RateLimit
-                } else if initial_model_error {
-                    super::failover::Failure::ModelUnavailable
-                } else if initial_service_error {
-                    super::failover::Failure::UpstreamService
-                } else {
-                    super::failover::Failure::Protocol
-                });
-                let mut cooldown = response_parts
-                    .headers
-                    .get(header::RETRY_AFTER)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(circuit::retry_after)
-                    .max(protocol.observation.retry_after);
-                if initial_capacity && !dedicated_search {
-                    if wait_same {
-                        capacity_wait_owner = Some(route.provider.id.clone());
-                        ids.clear();
-                    }
-                    ordinary_attempts = ordinary_attempts.saturating_sub(1);
-                    capacity_protected = true;
-                    wait_budget.protect_capacity();
-
-                    capacity_pending = true;
-                    capacity_sources.push(CapacitySource {
-                        provider_id: route.provider.id.clone(),
-                        reset_generation,
-                    });
-                    capacity_retry_after = capacity_retry_after.max(cooldown);
-                }
-                protocol.finish(Some(status.as_u16()), code::HTTP);
-                let retry_same = initial_service_error
-                    && !unknown_affinity
-                    && ordinary_attempts <= settings.max_retries
-                    && (pinned.as_deref() == Some(&route.provider.id)
-                        || ownership
-                            .as_ref()
-                            .is_some_and(|lease| lease.owns(&route.provider.id))
-                        || fixed_dsh.as_deref() == Some(&route.provider.id));
-                let will_retry = policy.retryable
-                    && ((dedicated_search
-                        && ids
-                            .iter()
-                            .any(|id| routes.get(id).is_some_and(|r| r.provider.search_only)))
-                        || super::attempt::retained_fallback(
-                            &gateway,
-                            &route.provider.id,
-                            &ids,
-                            &routes,
-                            &requirement,
-                            parts.uri.path(),
-                            ownership.as_deref(),
-                            gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            super::attempt::may_fail_over(
-                                mode == "manual",
-                                pinned.as_deref(),
-                                unknown_affinity,
-                                ordinary_attempts,
-                                settings.max_retries,
-                            ),
-                        ) == Action::TryingNext);
-                let mut details = protocol.observation.error.clone();
-                details.phase = Some(crate::events::Phase::Response);
-                details.counted_failure = Some(!initial_compact_error && policy.counted_failure);
-                details.wait_seconds =
-                    cooldown.map(|d| d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0)));
-                let mut event = admission.permits.prepare_report(
-                    &gateway,
-                    &route,
-                    model.as_deref(),
-                    if initial_compact_error {
-                        Reason::ProtocolError
-                    } else {
-                        policy.reason
-                    },
-                    if wait_same {
-                        Action::RetryingSame
-                    } else if will_retry {
-                        Action::TryingNext
-                    } else if initial_capacity {
-                        Action::Waiting
-                    } else {
-                        Action::Returned
-                    },
-                    Some(status.as_u16()),
-                    attempted,
-                    details,
-                );
-                if initial_capacity {
-                    admission.permits.capacity_limited(&settings, cooldown);
-                } else if initial_hard_rejection || initial_service_error {
-                    admission.permits.failure(&settings, cooldown);
-                } else {
-                    admission.permits.neutral(&settings);
-                }
-                let retry_delay = super::attempt::same_provider_delay(
-                    retry_same,
-                    &route.health_for(&requirement),
-                    &mut transient_retries,
-                    cooldown,
-                );
-                if let Some(delay) = retry_delay {
-                    event.action = Action::RetryingSame;
-                    event.details.wait_seconds = Some(delay.as_secs());
-                }
-                last_error = Some(failover.report_failure(Some(&protocol), || {
-                    super::health_settlement::publish(&gateway, event)
-                }));
-                if initial_capacity {
-                    cooldown = cooldown.max(Some(Duration::from_secs(
-                        route.health_for(&requirement).retry_in,
-                    )));
-                    capacity_retry_after = capacity_retry_after.max(cooldown);
-                }
-                // Rejected initialization frames are never a successful client response.
-                // The upstream payload remains available in the error log.
-                last = Some(error(
-                    StatusCode::BAD_GATEWAY,
-                    code::UPSTREAM_REJECTED,
-                    "上游业务请求失败，已结束本次重试",
-                ));
-                if !policy.retryable && !initial_compact_error {
-                    failover.finish(super::failover::Exit::PermanentRejection);
-                    return last.take().unwrap();
-                }
-                if let Some(delay) = retry_delay {
-                    failover.wait(super::failover::WaitKind::TransientRetry, delay.as_secs());
-                    // Release the failed attempt before registering a bounded wait.
-                    // Keep the original spool, model, and response cursor untouched.
-                    drop(admission);
-                    request_budget.describe(None, model.as_deref(), "retry");
-                    match transient_wait(
-                        &gateway,
-                        &route,
-                        reset_generation,
-                        delay,
-                        settings.max_waiting,
-                        pinned.as_deref(),
-                        &requirement,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            ids.insert(0, route.provider.id.clone());
-                            retry_owner = Some(route.provider.id.clone());
-                        }
-                        Ok(false) => {}
-                        Err(Rejected::Stopped) => {
-                            failover.finish(super::failover::Exit::Stopped);
-                            return stopped();
-                        }
-                        Err(_) => break,
-                    }
-                } else if !will_retry && !initial_capacity {
-                    ids.clear();
-                }
-                last_category = if initial_hard_rejection || initial_service_error {
-                    code::UPSTREAM_REJECTED
-                } else if initial_capacity {
-                    code::CAPACITY
-                } else if initial_model_error {
-                    code::MODEL_UNAVAILABLE
-                } else {
-                    code::UPSTREAM_REJECTED
-                };
-                continue;
-            }
-            if preinspected {
-                ended = false;
-            }
-            let replay_unsafe = failed && failure_kind == code::FIRST_BYTE_TIMEOUT;
-            if replay_unsafe {
-                failover.failure(super::failover::Failure::Transport);
-                protocol.associate_failure(failover.failure_generation());
-            }
-            failover.finish(if replay_unsafe {
-                super::failover::Exit::ReplayUnsafe
-            } else {
-                super::failover::Exit::Forwarded
-            });
-            let Admission { permits, slot, .. } = admission;
-            let g = gateway.clone();
-            let cfg = settings.clone();
-            let neutral = status.as_u16() >= 400;
-            if rerouted {
-                gateway.record(
-                    Some(&route.provider.id),
-                    model.as_deref(),
-                    Reason::Failover,
-                    Action::Routed,
-                    Some(status.as_u16()),
-                    Some(attempted.min(u32::MAX as usize) as u32),
-                );
-            }
-            let delivery = protocol.delivery();
-            let output_delivery = delivery.clone();
-            let activity = parts
-                .extensions
-                .get::<std::sync::Arc<super::wire_progress::Activity>>()
-                .cloned()
-                .unwrap_or_default();
-            let (sender, receiver) = tokio::sync::mpsc::channel::<ForwardFrame>(2);
-            let empty = ended && !failed && prefix.is_empty();
-            if empty {
-                output_delivery.body_complete();
-            }
-            let shutdown = gateway
-                .request_state()
-                .shutdown
-                .as_ref()
-                .map(watch::Sender::subscribe);
-            let request_budget = request_budget.clone();
-            tokio::spawn(relay(Relay {
-                active,
-                traffic,
-                slot,
-                protocol,
-                g,
-                route,
-                model,
-                permits,
-                cfg,
-                status,
-                attempted,
-                prefix,
-                request_budget,
-                sender,
-                activity,
-                shutdown,
-                ended,
-                failed,
-                delivery,
-                dedicated_search,
-                body,
-                inspected_bytes,
-                neutral,
-                operation,
-            }));
-            // Hyper may drop a Content-Length body immediately after its last frame,
-            // without polling it again for None. Mark that frame before yielding it.
-            return Response::from_parts(
-                response_parts,
-                delivered(receiver, output_delivery, empty),
-            );
-        }
-        failover.finish(if ordinary_attempts > settings.max_retries {
-            super::failover::Exit::AttemptsExhausted
-        } else {
-            super::failover::Exit::NoEligibleProvider
-        });
-        gateway.record_final(
-            last_error.as_ref(),
-            failover.failure_reported(),
-            previous_provider.as_deref(),
-            model.as_deref(),
-            last.as_ref().map(|r| r.status().as_u16()),
-            attempted,
-        );
-        last.unwrap_or_else(|| {
-            if last_category == code::RPM_LIMIT {
-                let mut response = error(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    code::RPM_LIMIT,
-                    "供应商已达到 RPM 上限，等待后重试",
-                );
-                response.headers_mut().insert(
-                    header::RETRY_AFTER,
-                    rpm_retry_after
-                        .unwrap_or(Duration::from_secs(1))
-                        .as_secs()
-                        .max(1)
-                        .into(),
-                );
-                response
-            } else {
-                error(
-                    if attempted == 0 {
-                        StatusCode::SERVICE_UNAVAILABLE
-                    } else {
-                        StatusCode::BAD_GATEWAY
-                    },
-                    last_category,
-                    if attempted == 0 {
-                        "没有可用供应商，请检查队列和熔断状态"
-                    } else {
-                        "所有可用供应商均请求失败"
-                    },
+                end!(
+                    cx.interrupted(attempt, opening.status, opening.failure_kind)
+                        .await
                 )
             }
-        })
+            let attempt = step!(cx.initial_rejection(attempt, &mut opening).await);
+            return cx.hand_over(attempt, opening);
+        }
+        cx.exhausted()
     };
     tokio::select! {
         biased;
