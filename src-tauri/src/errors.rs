@@ -1,8 +1,11 @@
 //! Stable local wire codes. Upstream and historical unknown codes stay strings.
 use serde::{Deserialize, Serialize};
 
+// `Variant => CONSTANT = "WIRE"` also declares `code::CONSTANT`. Codes that are
+// only reached through `ErrorCode` leave the constant out, and a constant used
+// on one platform carries that platform's `cfg`.
 macro_rules! local_codes {
-    ($($variant:ident => $constant:ident = $wire:literal,)*) => {
+    ($($variant:ident $(=> $(#[$gate:meta])* $constant:ident)? = $wire:literal,)*) => {
         #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
         pub enum ErrorCode {
             $(#[serde(rename = $wire)] $variant,)*
@@ -12,11 +15,11 @@ macro_rules! local_codes {
                 match self { $(Self::$variant => $wire,)* }
             }
         }
-        // Some codes are reached through `ErrorCode`, only on one platform, or
-        // only from tests; the variant list stays the shared vocabulary.
-        #[allow(dead_code)]
         pub mod code {
-            $(pub const $constant: &str = super::ErrorCode::$variant.as_str();)*
+            $($(
+                $(#[$gate])*
+                pub const $constant: &str = super::ErrorCode::$variant.as_str();
+            )?)*
         }
     };
 }
@@ -24,15 +27,15 @@ macro_rules! local_codes {
 local_codes! {
     Account => ACCOUNT = "ACCOUNT",
     AccountExchange => ACCOUNT_EXCHANGE = "ACCOUNT_EXCHANGE",
-    AccountSyncError => ACCOUNT_SYNC_ERROR = "ACCOUNT_SYNC_ERROR",
+    AccountSyncError = "ACCOUNT_SYNC_ERROR",
     Auth => AUTH = "AUTH",
-    AuthenticationFailed => AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED",
+    AuthenticationFailed = "AUTHENTICATION_FAILED",
     Body => BODY = "BODY",
     Busy => BUSY = "BUSY",
     Cancelled => CANCELLED = "CANCELLED",
     Capacity => CAPACITY = "CAPACITY",
-    CapacityLimited => CAPACITY_LIMITED = "CAPACITY_LIMITED",
-    CircuitOpen => CIRCUIT_OPEN = "CIRCUIT_OPEN",
+    CapacityLimited = "CAPACITY_LIMITED",
+    CircuitOpen = "CIRCUIT_OPEN",
     ClaudeConfig => CLAUDE_CONFIG = "CLAUDE_CONFIG",
     ClaudeOfficial => CLAUDE_OFFICIAL = "CLAUDE_OFFICIAL",
     ClaudeProfile => CLAUDE_PROFILE = "CLAUDE_PROFILE",
@@ -41,7 +44,7 @@ local_codes! {
     Cli => CLI = "CLI",
     Client => CLIENT = "CLIENT",
     ClientDisconnected => CLIENT_DISCONNECTED = "CLIENT_DISCONNECTED",
-    RequestInterrupted => REQUEST_INTERRUPTED = "REQUEST_INTERRUPTED",
+    RequestInterrupted = "REQUEST_INTERRUPTED",
     ClientError => CLIENT_ERROR = "CLIENT_ERROR",
     Clipboard => CLIPBOARD = "CLIPBOARD",
     CliMissing => CLI_MISSING = "CLI_MISSING",
@@ -50,7 +53,7 @@ local_codes! {
     CompactionContextUnsupported => COMPACTION_CONTEXT_UNSUPPORTED = "COMPACTION_CONTEXT_UNSUPPORTED",
     Concurrency => CONCURRENCY = "CONCURRENCY",
     Config => CONFIG = "CONFIG",
-    ConfigConflict => CONFIG_CONFLICT = "CONFIG_CONFLICT",
+    ConfigConflict = "CONFIG_CONFLICT",
     ConfigType => CONFIG_TYPE = "CONFIG_TYPE",
     Conflict => CONFLICT = "CONFLICT",
     ConnectionFailed => CONNECTION_FAILED = "CONNECTION_FAILED",
@@ -65,8 +68,8 @@ local_codes! {
     Event => EVENT = "EVENT",
     ExchangeTemplate => EXCHANGE_TEMPLATE = "EXCHANGE_TEMPLATE",
     Export => EXPORT = "EXPORT",
-    Failover => FAILOVER = "FAILOVER",
-    FailoverExhausted => FAILOVER_EXHAUSTED = "FAILOVER_EXHAUSTED",
+    Failover = "FAILOVER",
+    FailoverExhausted = "FAILOVER_EXHAUSTED",
     FileSize => FILE_SIZE = "FILE_SIZE",
     FileType => FILE_TYPE = "FILE_TYPE",
     FirstByteTimeout => FIRST_BYTE_TIMEOUT = "FIRST_BYTE_TIMEOUT",
@@ -83,7 +86,6 @@ local_codes! {
     ImportLink => IMPORT_LINK = "IMPORT_LINK",
     Io => IO = "IO",
     Json => JSON = "JSON",
-    Key => KEY = "KEY",
     LocalAuth => LOCAL_AUTH = "LOCAL_AUTH",
     LoginAuth => LOGIN_AUTH = "LOGIN_AUTH",
     LoginBusy => LOGIN_BUSY = "LOGIN_BUSY",
@@ -113,7 +115,7 @@ local_codes! {
     ModelUndetermined => MODEL_UNDETERMINED = "MODEL_UNDETERMINED",
     Name => NAME = "NAME",
     Network => NETWORK = "NETWORK",
-    NetworkError => NETWORK_ERROR = "NETWORK_ERROR",
+    NetworkError = "NETWORK_ERROR",
     Notification => NOTIFICATION = "NOTIFICATION",
     NotificationDenied => NOTIFICATION_DENIED = "NOTIFICATION_DENIED",
     NoEligibleProvider => NO_ELIGIBLE_PROVIDER = "NO_ELIGIBLE_PROVIDER",
@@ -123,23 +125,23 @@ local_codes! {
     Open => OPEN = "OPEN",
     Panel => PANEL = "PANEL",
     Path => PATH = "PATH",
-    Permissions => PERMISSIONS = "PERMISSIONS",
+    Permissions => #[cfg(windows)] PERMISSIONS = "PERMISSIONS",
     Port => PORT = "PORT",
     Power => POWER = "POWER",
-    PowerAuth => POWER_AUTH = "POWER_AUTH",
+    PowerAuth => #[cfg(any(target_os = "macos", test))] POWER_AUTH = "POWER_AUTH",
     PowerHelper => POWER_HELPER = "POWER_HELPER",
-    PowerInstallConnect => POWER_INSTALL_CONNECT = "POWER_INSTALL_CONNECT",
-    PowerInstallResult => POWER_INSTALL_RESULT = "POWER_INSTALL_RESULT",
-    PowerIsolated => POWER_ISOLATED = "POWER_ISOLATED",
+    PowerInstallConnect => #[cfg(target_os = "macos")] POWER_INSTALL_CONNECT = "POWER_INSTALL_CONNECT",
+    PowerInstallResult => #[cfg(target_os = "macos")] POWER_INSTALL_RESULT = "POWER_INSTALL_RESULT",
+    PowerIsolated => #[cfg(target_os = "macos")] POWER_ISOLATED = "POWER_ISOLATED",
     Preferences => PREFERENCES = "PREFERENCES",
     Process => PROCESS = "PROCESS",
-    ProtocolError => PROTOCOL_ERROR = "PROTOCOL_ERROR",
+    ProtocolError = "PROTOCOL_ERROR",
     Provider => PROVIDER = "PROVIDER",
     ProviderTest => PROVIDER_TEST = "PROVIDER_TEST",
     ProvidersCoolingDown => PROVIDERS_COOLING_DOWN = "PROVIDERS_COOLING_DOWN",
     Queue => QUEUE = "QUEUE",
     Quota => QUOTA = "QUOTA",
-    RateLimited => RATE_LIMITED = "RATE_LIMITED",
+    RateLimited = "RATE_LIMITED",
     Recovery => RECOVERY = "RECOVERY",
     Restore => RESTORE = "RESTORE",
     ResumeConflict => RESUME_CONFLICT = "RESUME_CONFLICT",
@@ -149,7 +151,7 @@ local_codes! {
     Settings => SETTINGS = "SETTINGS",
     Stale => STALE = "STALE",
     Startup => STARTUP = "STARTUP",
-    StartupRecoveryFailed => STARTUP_RECOVERY_FAILED = "STARTUP_RECOVERY_FAILED",
+    StartupRecoveryFailed = "STARTUP_RECOVERY_FAILED",
     State => STATE = "STATE",
     Stopped => STOPPED = "STOPPED",
     Store => STORE = "STORE",
@@ -158,19 +160,19 @@ local_codes! {
     StreamTimeout => STREAM_TIMEOUT = "STREAM_TIMEOUT",
     Symlink => SYMLINK = "SYMLINK",
     Theme => THEME = "THEME",
-    ThreadHandoff => THREAD_HANDOFF = "THREAD_HANDOFF",
-    ThreadRouting => THREAD_ROUTING = "THREAD_ROUTING",
+    ThreadHandoff = "THREAD_HANDOFF",
+    ThreadRouting = "THREAD_ROUTING",
     Tls => TLS = "TLS",
     TlsHandshakeFailed => TLS_HANDSHAKE_FAILED = "TLS_HANDSHAKE_FAILED",
     Token => TOKEN = "TOKEN",
     Toml => TOML = "TOML",
-    Tray => TRAY = "TRAY",
+    Tray => #[cfg(target_os = "macos")] TRAY = "TRAY",
     Unsupported => UNSUPPORTED = "UNSUPPORTED",
     Update => UPDATE = "UPDATE",
     UpstreamBody => UPSTREAM_BODY = "UPSTREAM_BODY",
     UpstreamError => UPSTREAM_ERROR = "UPSTREAM_ERROR",
     UpstreamRejected => UPSTREAM_REJECTED = "UPSTREAM_REJECTED",
-    UpstreamServiceError => UPSTREAM_SERVICE_ERROR = "UPSTREAM_SERVICE_ERROR",
+    UpstreamServiceError = "UPSTREAM_SERVICE_ERROR",
     Url => URL = "URL",
     Usage => USAGE = "USAGE",
     Utf8 => UTF8 = "UTF8",

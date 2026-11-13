@@ -1015,19 +1015,6 @@ pub fn add_adc_at(
         Ok(state)
     }
 }
-#[cfg(test)]
-pub(crate) fn switch_fixture_account(
-    paths: &Paths,
-    lc: &dyn AppLifecycle,
-    id: &str,
-    revision: &str,
-) -> Result<AntigravityAuthState> {
-    let entry = with_lock(|| {
-        let (vault, _) = load_vault(paths)?;
-        Ok(vault.entries[vault.index_of(id)?].clone())
-    })?;
-    switch_account_at(paths, lc, entry, revision)
-}
 fn switch_account_at(
     paths: &Paths,
     lc: &dyn AppLifecycle,
@@ -1698,4 +1685,4 @@ pub fn delete_antigravity_account(
 }
 #[cfg(test)]
 #[path = "antigravity_auth_tests.rs"]
-mod tests;
+pub(crate) mod tests;

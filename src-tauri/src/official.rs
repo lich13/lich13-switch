@@ -491,16 +491,6 @@ pub fn blocks_gateway(data: &Path) -> bool {
     !matches!(load(data), Ok(None))
 }
 
-#[cfg(test)]
-pub fn enable(
-    data: &Path,
-    home: &Path,
-    account_id: &str,
-    expected: &str,
-) -> Result<OfficialModeView> {
-    enable_with_switch(data, home, account_id, expected, || Ok(()))
-}
-
 pub fn enable_with_switch<F: FnOnce() -> Result<()>>(
     data: &Path,
     home: &Path,
@@ -692,6 +682,14 @@ pub fn guard_save(data: &Path, home: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn enable(
+        data: &Path,
+        home: &Path,
+        account_id: &str,
+        expected: &str,
+    ) -> Result<OfficialModeView> {
+        enable_with_switch(data, home, account_id, expected, || Ok(()))
+    }
     const TEXT: &str = "model_provider='custom'\r\n[model_providers.custom]\r\nbase_url = 'https://x.test' # keep\r\nexperimental_bearer_token = 'secret'\r\nsupports_websockets = true\r\nwire_api='responses'\r\n";
     #[test]
     fn comments_and_restores_exact_lines() {

@@ -609,7 +609,7 @@ async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
         .await
         .unwrap();
     assert!(g.start(&g.view().revision, t.path()).await.is_err());
-    assert!(takeover::read(t.path()).is_ok());
+    assert!(takeover::tests::read(t.path()).is_ok());
     drop(occupied);
     update(
         &g,
@@ -664,19 +664,19 @@ async fn port_conflict_startup_recovery_and_single_candidate_breaker() {
     );
     assert!(health.protected_single_provider);
     g.stop().await.unwrap();
-    let (_, pair) = takeover::read(t.path()).unwrap();
-    takeover::attach(
+    let (_, pair) = takeover::tests::read(t.path()).unwrap();
+    takeover::tests::attach(
         t.path(),
         t.path(),
         g.view().settings.port,
         "fixture-crash",
         pair,
-        &takeover::read(t.path()).unwrap().0,
+        &takeover::tests::read(t.path()).unwrap().0,
     )
     .unwrap();
     let recovered = Gateway::new(t.path().to_path_buf()).unwrap();
     assert!(!recovered.guarded_home());
-    assert!(takeover::read(t.path()).is_ok());
+    assert!(takeover::tests::read(t.path()).is_ok());
 }
 
 #[tokio::test]
@@ -954,7 +954,7 @@ async fn custom_only_switch_while_stopped_running_and_auto_stop() {
     let b = g.view().providers[1].id.clone();
     let path = t.path().join("config.toml");
     let initial = std::fs::read_to_string(&path).unwrap();
-    let old_rev = takeover::read(t.path()).unwrap().0;
+    let old_rev = takeover::tests::read(t.path()).unwrap().0;
     assert!(g
         .edit_checked(
             Edit::Select { id: b.clone() },
@@ -1038,7 +1038,11 @@ async fn running_cannot_delete_final_exit_provider_and_crash_uses_updated_target
         .is_err());
     takeover::recover(t.path()).unwrap();
     assert_eq!(
-        takeover::read(t.path()).unwrap().1.base_url.as_deref(),
+        takeover::tests::read(t.path())
+            .unwrap()
+            .1
+            .base_url
+            .as_deref(),
         Some("https://b.test/v1")
     );
     g.stop().await.unwrap();

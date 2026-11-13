@@ -1,5 +1,10 @@
 // 覆盖凭据新旧次序、身份刷新与认证文件保护。
 use super::*;
+use serde_json::json;
+
+fn token_is_newer(incoming: &str, stored: &str) -> bool {
+    matches!((credential_times(incoming).1, credential_times(stored).1), (Some(a), Some(b)) if a > b)
+}
 
 fn setup() -> (tempfile::TempDir, Core) {
     let temp = tempfile::tempdir().unwrap();

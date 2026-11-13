@@ -218,10 +218,6 @@ pub(super) fn pair_for(client: ClientId, text: &str) -> Result<Pair> {
         ClientId::Dsh => Err(AppError::new(code::CONFIG, "请使用 DSH profile 接入")),
     }
 }
-#[cfg(test)]
-pub fn read(home: &Path) -> Result<(String, Pair)> {
-    read_for(ClientId::Codex, home)
-}
 pub fn patch(text: &str, target: &Pair) -> Result<String> {
     let doc = parse(text)?;
     let p = custom(&doc)?;
@@ -396,26 +392,6 @@ pub fn import_for(client: ClientId, home: &Path) -> Result<(String, String)> {
         return Err(AppError::new(code::MANAGED, "不能导入网关的本地凭据"));
     }
     Ok((base, token))
-}
-#[cfg(test)]
-pub fn attach(
-    data: &Path,
-    home: &Path,
-    port: u16,
-    token: &str,
-    exit: Pair,
-    expected: &str,
-) -> Result<()> {
-    attach_store_for(
-        ClientId::Codex,
-        data,
-        home,
-        port,
-        token,
-        exit,
-        expected,
-        None,
-    )
 }
 #[allow(clippy::too_many_arguments)]
 pub fn attach_store_for(
@@ -620,19 +596,6 @@ pub fn commit_store_for(
     }
     Ok(())
 }
-#[cfg(test)]
-pub fn update_exit(data: &Path, target: Pair) -> Result<()> {
-    let mut record =
-        load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少网关事务记录"))?;
-    if record.store_after.is_some() {
-        return Err(AppError::new(code::RECOVERY, "供应商事务尚未完成"));
-    }
-    if record.exit != target {
-        record.exit = target;
-        save(data, &record)?;
-    }
-    Ok(())
-}
 fn detach_record(data: &Path, mut record: Journal) -> Result<()> {
     let current = if record.grok.is_none() {
         let home = record
@@ -666,13 +629,6 @@ fn detach_record(data: &Path, mut record: Journal) -> Result<()> {
     fs::remove_file(data.join(FILE)).map_err(storage::io_error)
 }
 /// Startup, normal stop and exit all finish the same transaction, preserving unrelated edits.
-#[cfg(test)]
-pub fn detach(data: &Path) -> Result<()> {
-    let Some(record) = load(data)? else {
-        return Ok(());
-    };
-    detach_record(data, record)
-}
 pub fn recover(data: &Path) -> Result<()> {
     let Some(record) = load(data)? else {
         return Ok(());
@@ -681,8 +637,42 @@ pub fn recover(data: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+    pub fn read(home: &Path) -> Result<(String, Pair)> {
+        read_for(ClientId::Codex, home)
+    }
+    pub fn attach(
+        data: &Path,
+        home: &Path,
+        port: u16,
+        token: &str,
+        exit: Pair,
+        expected: &str,
+    ) -> Result<()> {
+        attach_store_for(
+            ClientId::Codex,
+            data,
+            home,
+            port,
+            token,
+            exit,
+            expected,
+            None,
+        )
+    }
+    fn update_exit(data: &Path, target: Pair) -> Result<()> {
+        let mut record =
+            load(data)?.ok_or_else(|| AppError::new(code::RECOVERY, "缺少网关事务记录"))?;
+        if record.store_after.is_some() {
+            return Err(AppError::new(code::RECOVERY, "供应商事务尚未完成"));
+        }
+        if record.exit != target {
+            record.exit = target;
+            save(data, &record)?;
+        }
+        Ok(())
+    }
     const ORIGINAL: &str = "# settings\r\nmodel_provider='custom'\r\nmodel='unchanged'\r\n[model_providers.custom] # comment\r\nbase_url = 'https://original.test/v1' # address\r\nexperimental_bearer_token = 'old' # key\r\nsupports_websockets = false\r\nwire_api = 'responses'\r\n[other]\r\na=42\r\n";
     pub fn masked(text: &str) -> String {
         let doc = parse(text).unwrap();
@@ -742,7 +732,7 @@ mod tests {
             .replace("model='unchanged'", "model='external'");
         fs::write(&path, &live).unwrap();
         update_exit(t.path(), Pair::new("https://b.test", "b")).unwrap();
-        detach(t.path()).unwrap();
+        recover(t.path()).unwrap();
         let output = fs::read_to_string(&path).unwrap();
         assert_eq!(masked(&output), masked(&live));
         assert_eq!(
@@ -783,7 +773,7 @@ mod tests {
             .unwrap()
             .replace("local", "externally-edited");
         fs::write(&path, &changed).unwrap();
-        assert!(detach(t.path()).is_err());
+        assert!(recover(t.path()).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), changed);
         assert!(t.path().join(FILE).exists());
     }

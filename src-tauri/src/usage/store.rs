@@ -776,17 +776,6 @@ impl Store {
         }
         Ok(changed)
     }
-    #[cfg(test)]
-    pub fn remove_superseded(&mut self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let tx = db(self.connection.transaction())?;
-        if Self::remove_superseded_in_tx(&tx, ids)? {
-            query::changed(&tx)?;
-        }
-        db(tx.commit())
-    }
     pub fn begin_rebuild(&mut self, source: &str) -> Result<()> {
         if !matches!(source, "codex" | "claude" | "grok") {
             return Err(failure("只可重建会话来源"));

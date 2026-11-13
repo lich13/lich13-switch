@@ -1575,31 +1575,37 @@ fn remove_superseded_rejects_invalid_ids_wrong_sources_missing_rpc_and_rolls_bac
             .unwrap();
 
         // 1. Out-of-bounds / invalid IDs are rejected.
-        assert!(store.remove_superseded(&["../bad-id".to_string()]).is_err());
         assert!(store
-            .remove_superseded(&["not-64-hex".to_string()])
+            .write_batch_with_superseded(&[], &["../bad-id".to_string()], None)
+            .is_err());
+        assert!(store
+            .write_batch_with_superseded(&[], &["not-64-hex".to_string()], None)
             .is_err());
 
         // 2. Non-history_file records (local_api / codex) are rejected and remain intact.
         assert!(store
-            .remove_superseded(std::slice::from_ref(&replacing_rpc.id))
+            .write_batch_with_superseded(&[], std::slice::from_ref(&replacing_rpc.id), None)
             .is_err());
         assert!(store.detail(&replacing_rpc.id).is_ok());
         assert!(store
-            .remove_superseded(std::slice::from_ref(&codex_row.id))
+            .write_batch_with_superseded(&[], std::slice::from_ref(&codex_row.id), None)
             .is_err());
         assert!(store.detail(&codex_row.id).is_ok());
 
         // 3. history_file record without replacing local_api in the same session is rejected.
         assert!(store
-            .remove_superseded(std::slice::from_ref(&orphan_history.id))
+            .write_batch_with_superseded(&[], std::slice::from_ref(&orphan_history.id), None)
             .is_err());
         assert!(store.detail(&orphan_history.id).is_ok());
 
         // 4. Partial failure rolls back the entire transaction: valid_history must NOT be deleted
         // when paired with an invalid/non-deletable target in the same batch.
         assert!(store
-            .remove_superseded(&[valid_history.id.clone(), replacing_rpc.id.clone()])
+            .write_batch_with_superseded(
+                &[],
+                &[valid_history.id.clone(), replacing_rpc.id.clone()],
+                None
+            )
             .is_err());
         assert!(
             store.detail(&valid_history.id).is_ok(),
@@ -1608,7 +1614,7 @@ fn remove_superseded_rejects_invalid_ids_wrong_sources_missing_rpc_and_rolls_bac
 
         // 5. Valid superseded history_file record with replacing local_api succeeds.
         store
-            .remove_superseded(std::slice::from_ref(&valid_history.id))
+            .write_batch_with_superseded(&[], std::slice::from_ref(&valid_history.id), None)
             .unwrap();
         assert!(store.detail(&valid_history.id).is_err());
         assert!(store.detail(&replacing_rpc.id).is_ok());
@@ -1984,7 +1990,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
             },
             || {
                 let switched =
-                    auth::switch_fixture_account(&paths, &Lifecycle, &adc, &added.revision)?;
+                    auth::tests::switch_fixture_account(&paths, &Lifecycle, &adc, &added.revision)?;
                 *fixture.changed.lock() = "after-switch".into();
                 Ok(switched)
             },

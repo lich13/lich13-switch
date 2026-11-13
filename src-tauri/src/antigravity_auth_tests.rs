@@ -2,6 +2,20 @@ use super::*;
 use parking_lot::Mutex;
 use tempfile::TempDir;
 
+/// Switches to an account already in the vault; the usage tests share it.
+pub(crate) fn switch_fixture_account(
+    paths: &Paths,
+    lc: &dyn AppLifecycle,
+    id: &str,
+    revision: &str,
+) -> Result<AntigravityAuthState> {
+    let entry = with_lock(|| {
+        let (vault, _) = load_vault(paths)?;
+        Ok(vault.entries[vault.index_of(id)?].clone())
+    })?;
+    switch_account_at(paths, lc, entry, revision)
+}
+
 struct MockLifecycle {
     running: Mutex<bool>,
     events: Mutex<Vec<&'static str>>,

@@ -1,5 +1,6 @@
 // 覆盖官方账号刷新后的身份与凭据版本保护。
 use super::*;
+use serde_json::json;
 
 const CONFIG: &[u8] =
     b"# fixture config\r\nmodel = 'fixture-model'\r\n[future]\r\nkeep = [1, 2]\r\n";

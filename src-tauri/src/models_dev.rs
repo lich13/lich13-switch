@@ -298,10 +298,6 @@ impl Catalog {
         drop(state);
         Ok(self.view())
     }
-    #[cfg(test)]
-    pub fn metadata(&self, id: &str) -> Option<Metadata> {
-        self.metadata_from(id, None)
-    }
     pub fn metadata_from(&self, id: &str, source: Option<&str>) -> Option<Metadata> {
         self.ensure_loaded();
         let state = self.state.read();
@@ -819,6 +815,11 @@ pub fn rates(data: &Value, context: u64, fast: bool) -> Option<(Value, Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+    impl Catalog {
+        fn metadata(&self, id: &str) -> Option<Metadata> {
+            self.metadata_from(id, None)
+        }
+    }
     fn catalog(dir: &Path, source: Value) -> Catalog {
         let index = crop(source).unwrap();
         storage::atomic_write(

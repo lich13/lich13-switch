@@ -2,8 +2,6 @@ use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use serde_json::json;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -447,10 +445,6 @@ impl CredentialTimes {
 fn credential_times(raw: &str) -> (Option<i64>, Option<i64>) {
     CredentialTimes::parse(raw).current()
 }
-#[cfg(test)]
-fn token_is_newer(incoming: &str, stored: &str) -> bool {
-    matches!((credential_times(incoming).1, credential_times(stored).1), (Some(a), Some(b)) if a > b)
-}
 fn older(incoming: &str, stored: &str) -> bool {
     older_times(credential_times(incoming), credential_times(stored))
 }
@@ -769,17 +763,6 @@ impl Core {
         self.set_sync("updated", Some(target.id.clone()), "指定账号凭据已更新");
         Ok(target.current)
     }
-    #[cfg(test)]
-    pub fn add_api_key(&mut self, name: &str, key: &str) -> Result<String> {
-        if key.trim().is_empty() || key.contains(['\n', '\r']) {
-            return Err(AppError::new(code::KEY, "请输入单行有效 API Key"));
-        }
-        let raw = serde_json::to_string_pretty(
-            &json!({"auth_mode":"apikey","OPENAI_API_KEY":key.trim()}),
-        )
-        .unwrap();
-        self.import_raw(&raw, Some(clean_name(name)?))
-    }
     pub fn import_file(&mut self, path: &Path, name: Option<String>) -> Result<String> {
         let bytes = storage::read_optional(path)?
             .ok_or_else(|| AppError::new(code::MISSING, "所选文件不存在"))?;
@@ -1089,30 +1072,6 @@ impl Core {
         storage::atomic_write_user(&path, raw.as_bytes(), Some(expected))?;
         self.state()
     }
-    #[cfg(test)]
-    pub fn read_config(&self) -> Result<crate::configuration::Document> {
-        crate::configuration::read(
-            crate::gateway::ClientId::Codex,
-            &self.home(),
-            &self.data_dir,
-            false,
-        )
-    }
-    #[cfg(test)]
-    pub fn save_config(
-        &self,
-        text: &str,
-        expected: &str,
-    ) -> Result<crate::configuration::Document> {
-        crate::configuration::save(
-            crate::gateway::ClientId::Codex,
-            &self.home(),
-            &self.data_dir,
-            text,
-            expected,
-            false,
-        )
-    }
     pub fn set_quota_refresh(&mut self, seconds: u64, expected: u64) -> Result<ViewState> {
         if seconds != 0 && !(10..=86400).contains(&seconds) {
             return Err(AppError::new(code::PREFERENCES, "刷新间隔需为 10–86400 秒"));
@@ -1184,6 +1143,37 @@ fn clean_name(name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    impl Core {
+        pub(super) fn add_api_key(&mut self, name: &str, key: &str) -> Result<String> {
+            let raw =
+                serde_json::to_string_pretty(&json!({"auth_mode":"apikey","OPENAI_API_KEY":key}))
+                    .unwrap();
+            self.import_raw(&raw, Some(clean_name(name)?))
+        }
+        fn read_config(&self) -> Result<crate::configuration::Document> {
+            crate::configuration::read(
+                crate::gateway::ClientId::Codex,
+                &self.home(),
+                &self.data_dir,
+                false,
+            )
+        }
+        fn save_config(
+            &self,
+            text: &str,
+            expected: &str,
+        ) -> Result<crate::configuration::Document> {
+            crate::configuration::save(
+                crate::gateway::ClientId::Codex,
+                &self.home(),
+                &self.data_dir,
+                text,
+                expected,
+                false,
+            )
+        }
+    }
     fn setup() -> (tempfile::TempDir, Core) {
         let t = tempfile::tempdir().unwrap();
         let h = t.path().join("codex");
