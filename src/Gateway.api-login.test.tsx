@@ -85,7 +85,7 @@ async function openProviderEditor(
   return screen.getByRole("dialog", { name: "编辑供应商" });
 }
 
-describe("Codex v0.20.0 API login gateway controls", () => {
+describe("Codex API login gateway controls", () => {
   it.each(["preserve", "replace", "clear"] as const)(
     "keeps a configured account token masked and supports %s on save",
     async (action) => {

@@ -312,7 +312,7 @@ async function openBilling() {
   return { button, dialog };
 }
 
-describe("v0.19 usage overview", () => {
+describe("usage overview", () => {
   it("shows the four primary metrics and computes cache rate and first-token time from reported samples", async () => {
     dashboard.totals = totals({
       cacheReadEligible: 5,
@@ -480,7 +480,7 @@ describe("v0.19 usage overview", () => {
   });
 });
 
-describe("v0.18 time ranges", () => {
+describe("time ranges", () => {
   it("keeps all seven range choices in the date dialog and applies custom values only on confirmation", async () => {
     const user = userEvent.setup();
     records = Array.from({ length: 21 }, (_, index) =>
@@ -587,7 +587,7 @@ describe("v0.18 time ranges", () => {
   });
 });
 
-describe("v0.18 rankings", () => {
+describe("rankings", () => {
   it("keeps nine request columns and separate twenty-row ranking pages when switching tabs", async () => {
     const user = userEvent.setup();
     dashboard.providers = groups("provider");
@@ -703,7 +703,7 @@ describe("v0.18 rankings", () => {
   });
 });
 
-describe("v0.18 request details and sources", () => {
+describe("request details and sources", () => {
   it.each([
     {
       label: "measured streaming zero",
@@ -831,7 +831,7 @@ describe("v0.18 request details and sources", () => {
   });
 });
 
-describe("v0.18 billing settings", () => {
+describe("billing settings", () => {
   it("keeps billing drafts while opening provider mappings and returns focus through both drawers", async () => {
     const user = userEvent.setup();
     await renderUsage();
