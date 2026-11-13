@@ -157,7 +157,6 @@ fn stored_connection(store: Option<&str>) -> Result<Connection> {
         .map_err(|_| AppError::new(code::STORE, "网关连接方式无效"))
 }
 fn write_record(
-    data: &Path,
     record: &Journal,
     target: &Pair,
     expected: Option<&str>,
@@ -175,13 +174,12 @@ fn write_record(
             .path
             .parent()
             .ok_or_else(|| AppError::new(code::RECOVERY, "API 恢复路径无效"))?;
-        codex_api::write(data, home, provider, target, expected, allowed)
+        codex_api::write(home, provider, target, expected, allowed)
     } else {
         write_pair(record.client, &record.path, target, expected, allowed)
     }
 }
 /// Account synchronization must never adopt the gateway's local API credential.
-/// An unresolved transaction also owns auth.json until recovery succeeds.
 pub(crate) fn manages_auth(data: &Path, home: &Path) -> bool {
     match load(data) {
         Ok(Some(record)) => {
@@ -189,7 +187,7 @@ pub(crate) fn manages_auth(data: &Path, home: &Path) -> bool {
                 && matches!(record.connection, Connection::ApiKey { .. })
                 && record.path == home.join("config.toml")
         }
-        Ok(None) => data.join("gateway-api-write.json").exists(),
+        Ok(None) => false,
         Err(_) => true,
     }
 }
@@ -463,10 +461,8 @@ pub fn attach_store_for(
         store_after: store.map(|(_, after)| after),
     };
     save(data, &record)?;
-    if let Err(e) = write_record(data, &record, &record.applied, Some(expected), None) {
-        if !data.join("gateway-api-write.json").exists()
-            && read_connection(client, home, &record.connection)
-                .is_ok_and(|(_, p)| p != record.applied)
+    if let Err(e) = write_record(&record, &record.applied, Some(expected), None) {
+        if read_connection(client, home, &record.connection).is_ok_and(|(_, p)| p != record.applied)
         {
             fs::remove_file(data.join(FILE)).map_err(storage::io_error)?;
         }
@@ -612,7 +608,6 @@ pub fn commit_store_for(
     } else {
         save(data, &record)?;
         write_record(
-            data,
             &record,
             &record.applied,
             expected_config,
@@ -665,7 +660,7 @@ fn detach_record(data: &Path, mut record: Journal) -> Result<()> {
             snapshot.apply(&record.path, None)?;
         }
     } else {
-        write_record(data, &record, &record.exit, None, Some(&allowed))?;
+        write_record(&record, &record.exit, None, Some(&allowed))?;
     }
     complete_store(data, &mut record, false)?;
     fs::remove_file(data.join(FILE)).map_err(storage::io_error)
@@ -679,7 +674,6 @@ pub fn detach(data: &Path) -> Result<()> {
     detach_record(data, record)
 }
 pub fn recover(data: &Path) -> Result<()> {
-    codex_api::recover_write(data)?;
     let Some(record) = load(data)? else {
         return Ok(());
     };

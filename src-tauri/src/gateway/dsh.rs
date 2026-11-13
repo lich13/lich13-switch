@@ -36,7 +36,6 @@ const KEY: &str = "VELA_GATEWAY_KEY";
 const PI: &str = "llm-pi-ai";
 const DEFAULT: &str = "agent-default-model";
 const PATCH: &str = "cordis.patch.yml";
-const JOURNAL: &str = "dsh-recovery.json";
 const LIMIT: u64 = 2 * 1024 * 1024;
 fn error(message: &str) -> AppError {
     AppError::new(code::CONFIG, message)
@@ -932,22 +931,17 @@ fn restore(snapshot: &Snapshot, input: &mut Input) -> Result<()> {
     overlays::restore(snapshot, input)?;
     Ok(())
 }
-#[derive(Serialize, Deserialize)]
+/// The files one DSH change rewrites together. Nothing is persisted about the
+/// transaction itself: a failed write puts the already written files back.
 struct Transaction {
-    version: u32,
-    #[serde(default)]
-    rollback: bool,
     home: PathBuf,
     profile: String,
     patch: Change,
     environment: Change,
     credentials: Change,
-    #[serde(default)]
     home_patch: Option<Change>,
-    #[serde(default)]
     settings: Option<Change>,
     store: Change,
-    #[serde(default)]
     patches: BTreeMap<String, Change>,
 }
 impl Transaction {
@@ -976,13 +970,7 @@ impl Transaction {
         }
         Ok(files)
     }
-    fn apply(&self, data: &Path) -> Result<()> {
-        self.write(data, self.rollback)
-    }
-    fn write(&self, data: &Path, rollback: bool) -> Result<()> {
-        if self.version != 1 || !self.home.is_absolute() {
-            return Err(error("DSH 恢复事务无效"));
-        }
+    fn write(&self, data: &Path) -> Result<()> {
         let files = self.files(data)?;
         for (path, change) in &files {
             let current = text(path)?;
@@ -993,45 +981,42 @@ impl Transaction {
                 return Err(error("DSH 配置超过大小限制"));
             }
         }
-        let files: Vec<_> = if rollback {
-            files.into_iter().rev().collect()
-        } else {
-            files
-        };
         for (path, change) in files {
             let current = text(&path)?;
             if current != change.before && current.as_deref() != Some(&change.after) {
                 return Err(conflict());
             }
-            let desired = if rollback {
-                change.before.as_deref()
-            } else {
-                Some(change.after.as_str())
-            };
-            if current.as_deref() != desired {
-                if let Some(raw) = desired {
-                    storage::atomic_write(
-                        &path,
-                        raw.as_bytes(),
-                        Some(&storage::revision(current.as_deref().map(str::as_bytes))),
-                    )?;
-                } else {
-                    std::fs::remove_file(&path).map_err(storage::io_error)?;
-                    storage::sync_parent(&path)?;
-                }
+            if current.as_deref() != Some(change.after.as_str()) {
+                storage::atomic_write(
+                    &path,
+                    change.after.as_bytes(),
+                    Some(&storage::revision(current.as_deref().map(str::as_bytes))),
+                )?;
             }
         }
-        std::fs::remove_file(data.join(JOURNAL)).map_err(storage::io_error)?;
-        storage::sync_parent(&data.join(JOURNAL))
+        Ok(())
     }
-}
-pub fn recover(data: &Path) -> Result<()> {
-    if let Some(raw) = storage::read_bounded(&data.join(JOURNAL), 16 * 1024 * 1024)? {
-        let tx: Transaction =
-            serde_json::from_slice(&raw).map_err(|_| error("DSH 恢复事务损坏，已保留文件"))?;
-        tx.apply(data)?;
+    /// Puts back the files this change already wrote. A file that no longer
+    /// holds what was written was changed externally and is left alone.
+    fn restore(&self, data: &Path) -> Result<()> {
+        for (path, change) in self.files(data)?.into_iter().rev() {
+            let current = text(&path)?;
+            if current.as_deref() != Some(change.after.as_str()) || current == change.before {
+                continue;
+            }
+            if let Some(raw) = change.before.as_deref() {
+                storage::atomic_write(
+                    &path,
+                    raw.as_bytes(),
+                    Some(&storage::revision(current.as_deref().map(str::as_bytes))),
+                )?;
+            } else {
+                std::fs::remove_file(&path).map_err(storage::io_error)?;
+                storage::sync_parent(&path)?;
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 fn commit(
     data: &Path,
@@ -1058,8 +1043,6 @@ fn commit_patches(
     let after = serde_json::to_string_pretty(store).map_err(|_| error("无法生成 DSH 接入事务"))?;
     let tx = Transaction {
         patches,
-        version: 1,
-        rollback: true,
         home: home.to_owned(),
         profile: input.dir.file_name().unwrap().to_string_lossy().into(),
         patch: input.patch.clone(),
@@ -1079,12 +1062,10 @@ fn commit_patches(
     {
         return Err(error("DSH 配置超过大小限制"));
     }
-    let raw = serde_json::to_vec(&tx).map_err(|_| error("无法生成 DSH 接入事务"))?;
-    storage::atomic_write_bounded(&data.join(JOURNAL), &raw, Some("missing"), 16 * 1024 * 1024)?;
-    if let Err(failure) = tx.write(data, false) {
-        if tx.write(data, true).is_err() {
+    if let Err(failure) = tx.write(data) {
+        if tx.restore(data).is_err() {
             return Err(error(
-                "DSH 写入失败，回滚遇到冲突；已保留恢复事务和外部修改",
+                "DSH 写入失败且部分文件无法还原；已保留外部修改，请检查 DSH 配置后重试",
             ));
         }
         return Err(failure);
@@ -1092,7 +1073,7 @@ fn commit_patches(
     Ok(storage::digest(after.as_bytes()))
 }
 
-/// Save mapping and all active profile catalogs as one existing recovery transaction.
+/// Save mapping and all active profile catalogs together.
 pub(super) fn commit_mapping(
     data: &Path,
     home: &Path,
@@ -1150,16 +1131,6 @@ pub(super) fn commit_mapping(
 }
 
 impl Gateway {
-    fn recover_dsh_state(&self) -> Result<()> {
-        if self.0.data.join(JOURNAL).exists() {
-            let (store, revision) = crate::migrations::gateway(&self.0.data)?;
-            let mut state = self.0.inner.lock().unwrap();
-            self.replace_store(&mut state, store);
-            state.revision = revision;
-            state.editable_mut().recovery_error = None;
-        }
-        Ok(())
-    }
     pub fn preview_dsh(&self, home: &Path, profile: Option<&str>) -> Result<Preview> {
         let mut profiles = vec![];
         if home.join("profiles").is_dir() {
@@ -1253,7 +1224,6 @@ impl Gateway {
         import: bool,
     ) -> Result<View> {
         models::require_chat(options.protocol)?;
-        self.recover_dsh_state()?;
         let (old, token) = {
             let s = self.0.inner.lock().unwrap();
             if self.view_revision(&s)? != expected {
@@ -1404,7 +1374,6 @@ impl Gateway {
     pub(super) async fn stop_dsh(&self, preserve: bool) -> Result<View> {
         let _listener = self.0.registry.lifecycle.lock().await;
         let _lifecycle = self.0.lifecycle.lock().await;
-        self.recover_dsh_state()?;
         {
             let mut s = self.0.inner.lock().unwrap();
             let snapshots = s
@@ -1848,10 +1817,9 @@ mod tests {
                 .unwrap()
                 .contains("vela")
         );
-        assert!(!gateway.0.data.join(JOURNAL).exists());
     }
     #[test]
-    fn partial_multi_file_transaction_recovers_without_erasing_external_changes() {
+    fn failed_multi_file_write_restores_written_files_and_keeps_external_changes() {
         let dir = fixture();
         let data = dir.path().join("data");
         storage::private_dir(&data).unwrap();
@@ -1869,40 +1837,32 @@ mod tests {
             dsh: Some(snapshot),
             ..Default::default()
         };
-        let tx = Transaction {
-            patches: BTreeMap::new(),
-            version: 1,
-            rollback: false,
-            home: dir.path().to_owned(),
-            profile: "default".into(),
-            patch: input.patch.clone(),
-            environment: input.environment.clone(),
-            credentials: input.credentials.clone(),
-            home_patch: input.home_patch.clone(),
-            settings: input.settings.clone(),
-            store: Change {
-                before: None,
-                after: serde_json::to_string(&store).unwrap(),
-            },
-        };
-        storage::atomic_write_bounded(
-            &data.join(JOURNAL),
-            &serde_json::to_vec(&tx).unwrap(),
-            Some("missing"),
-            16 * 1024 * 1024,
-        )
-        .unwrap();
-        storage::atomic_write(&input.dir.join(PATCH), input.patch.after.as_bytes(), None).unwrap();
+        let patch_before = text(&input.dir.join(PATCH)).unwrap();
+        // The environment file changes after the snapshot was read.
         fs::write(dir.path().join(".env"), "EXTERNAL=fixture\n").unwrap();
-        assert!(recover(&data).is_err());
+        let failure =
+            commit(&data, dir.path(), &input, &store, &storage::revision(None)).unwrap_err();
+        assert_eq!(failure.code, code::CONFLICT);
         assert_eq!(
             text(&dir.path().join(".env")).unwrap().as_deref(),
             Some("EXTERNAL=fixture\n")
         );
-        assert!(data.join(JOURNAL).exists());
+        assert_eq!(text(&input.dir.join(PATCH)).unwrap(), patch_before);
+        assert!(!data.join("gateway.json").exists());
+
         fs::write(dir.path().join(".env"), input.environment.before.unwrap()).unwrap();
-        recover(&data).unwrap();
-        assert!(!data.join(JOURNAL).exists());
+        let input = Input::read(dir.path(), "default").unwrap();
+        let mut input = input;
+        prepare(
+            &mut input,
+            options(Protocol::ChatCompletions),
+            "fixture-local",
+            43721,
+            &[],
+            None,
+        )
+        .unwrap();
+        commit(&data, dir.path(), &input, &store, &storage::revision(None)).unwrap();
         assert!(text(&data.join("gateway.json"))
             .unwrap()
             .unwrap()

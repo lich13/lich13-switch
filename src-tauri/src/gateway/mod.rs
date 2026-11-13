@@ -106,9 +106,7 @@ mod takeover;
 #[cfg(test)]
 mod takeover_alias_tests;
 pub(crate) fn recover_transactions(data: &Path) -> Result<()> {
-    takeover::recover(data)?;
-    grok_import::recover(data)?;
-    dsh::recover(data)
+    takeover::recover(data)
 }
 #[cfg(test)]
 mod tests;
@@ -1104,13 +1102,7 @@ impl Gateway {
         };
         view.config_warning = current.warning.clone();
         view.current = current;
-        view.recovery_pending |= [
-            "gateway-recovery.json",
-            "grok-import.json",
-            "dsh-recovery.json",
-        ]
-        .iter()
-        .any(|name| self.0.data.join(name).exists());
+        view.recovery_pending |= self.0.data.join("gateway-recovery.json").exists();
     }
     pub fn try_view(&self) -> Result<View> {
         self.try_view_read(Self::read_view_config)
@@ -1165,11 +1157,7 @@ impl Gateway {
     }
     fn config_guarded(&self) -> bool {
         let running = self.0.inner.lock().unwrap().running;
-        running
-            || self.0.data.join("gateway-recovery.json").exists()
-            || self.0.data.join("grok-import.json").exists()
-            || self.0.data.join("dsh-recovery.json").exists()
-            || self.claude_official()
+        running || self.0.data.join("gateway-recovery.json").exists() || self.claude_official()
     }
     pub(crate) fn config_stamp(
         &self,
@@ -1203,12 +1191,6 @@ impl Gateway {
         expected: &str,
     ) -> Result<crate::configuration::Document> {
         let s = self.0.inner.lock().unwrap();
-        if self.0.data.join("grok-import.json").exists() {
-            return Err(AppError::new(
-                code::RECOVERY,
-                "请先处理未完成的 Grok 导入事务",
-            ));
-        }
         if self.0.client == ClientId::Dsh {
             return Err(AppError::new(code::CONFIG, "请使用 DSH 接入面板"));
         }
@@ -1275,8 +1257,6 @@ impl Gateway {
         self.try_view().is_err()
             || self.request_state().running
             || self.0.data.join("gateway-recovery.json").exists()
-            || self.0.data.join("grok-import.json").exists()
-            || self.0.data.join("dsh-recovery.json").exists()
     }
     pub fn edit(&self, edit: Edit, expected: &str, home: &Path) -> Result<View> {
         self.edit_checked(edit, expected, home, None)
@@ -1312,12 +1292,6 @@ impl Gateway {
             return Err(AppError::new(
                 code::CONFLICT,
                 "网关设置已变化，请使用最新状态重试",
-            ));
-        }
-        if self.0.data.join("grok-import.json").exists() {
-            return Err(AppError::new(
-                code::RECOVERY,
-                "请先处理未完成的 Grok 导入事务",
             ));
         }
         if self.0.client != ClientId::Codex
@@ -1602,12 +1576,6 @@ impl Gateway {
             }
             if let Some(error) = &s.recovery_error {
                 return Err(error.clone());
-            }
-            if self.0.data.join("grok-import.json").exists() {
-                return Err(AppError::new(
-                    code::RECOVERY,
-                    "请先处理未完成的 Grok 导入事务",
-                ));
             }
             if s.store.providers.is_empty() {
                 return Err(AppError::new(code::PROVIDER, "请先添加供应商"));

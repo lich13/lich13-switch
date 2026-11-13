@@ -72,7 +72,6 @@ impl Gateway {
     ) -> Result<View> {
         let _listener = self.0.registry.lifecycle.lock().await;
         let _lifecycle = self.0.lifecycle.lock().await;
-        self.recover_dsh_state()?;
         let profiles = self
             .0
             .inner
@@ -114,7 +113,6 @@ impl Gateway {
     ) -> Result<Batch> {
         let _listener = self.0.registry.lifecycle.lock().await;
         let _lifecycle = self.0.lifecycle.lock().await;
-        self.recover_dsh_state()?;
         if self.try_view()?.revision != expected {
             return Err(conflict());
         }

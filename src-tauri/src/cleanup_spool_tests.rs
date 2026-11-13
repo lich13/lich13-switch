@@ -139,20 +139,14 @@ fn spools_outside_the_data_root_are_not_cleaned() {
 }
 
 #[test]
-fn gateway_api_write_and_recovery_journals_are_preserved() {
+fn gateway_recovery_journal_is_preserved() {
     let fixture = tempdir().unwrap();
     let data = private_root(fixture.path(), "data");
-    let write_journal = data.join("gateway-api-write.json");
     let recovery_journal = data.join("gateway-recovery.json");
-    fs::write(&write_journal, b"{\"fixture\":\"api-write\"}").unwrap();
     fs::write(&recovery_journal, b"{\"fixture\":\"recovery\"}").unwrap();
     let spool = old_spool(&data);
 
     assert_eq!(super::clean(&data), 1);
-    assert_eq!(
-        fs::read(&write_journal).unwrap(),
-        b"{\"fixture\":\"api-write\"}"
-    );
     assert_eq!(
         fs::read(&recovery_journal).unwrap(),
         b"{\"fixture\":\"recovery\"}"

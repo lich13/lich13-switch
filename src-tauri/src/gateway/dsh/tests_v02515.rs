@@ -463,67 +463,7 @@ async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
 }
 
 #[tokio::test]
-async fn interrupted_new_transaction_rolls_back_and_conflicts_leave_recovery_journal() {
-    let home = super::tests::fixture();
-    let data = home.path().join("data");
-    storage::private_dir(&data).unwrap();
-    let mut input = Input::read(home.path(), "default").unwrap();
-    prepare(
-        &mut input,
-        options("default"),
-        "fixture-local",
-        43721,
-        &[],
-        None,
-    )
-    .unwrap();
-    let tx = Transaction {
-        patches: BTreeMap::new(),
-        version: 1,
-        rollback: true,
-        home: home.path().into(),
-        profile: "default".into(),
-        patch: input.patch.clone(),
-        environment: input.environment.clone(),
-        credentials: input.credentials.clone(),
-        home_patch: input.home_patch.clone(),
-        settings: input.settings.clone(),
-        store: Change {
-            before: None,
-            after: "{}".into(),
-        },
-    };
-    storage::atomic_write(&data.join(JOURNAL), &serde_json::to_vec(&tx).unwrap(), None).unwrap();
-    fs::write(input.dir.join(PATCH), &input.patch.after).unwrap();
-    fs::write(home.path().join(".env"), "EXTERNAL=kept\n").unwrap();
-    let failure = recover(&data).unwrap_err();
-    assert_eq!(failure.code, code::CONFLICT);
-    let parent = Gateway::new(home.path().join("parent-data")).unwrap();
-    let gateway = parent.dsh_companion(data.clone()).unwrap();
-    let resumed = gateway.resume(home.path()).await.unwrap_err();
-    assert_eq!(resumed.code, failure.code);
-    assert_eq!(resumed.message, failure.message);
-    assert!(data.join(JOURNAL).exists());
-    assert_eq!(
-        fs::read_to_string(home.path().join(".env")).unwrap(),
-        "EXTERNAL=kept\n"
-    );
-    fs::write(
-        home.path().join(".env"),
-        input.environment.before.as_ref().unwrap(),
-    )
-    .unwrap();
-    recover(&data).unwrap();
-    assert!(!data.join(JOURNAL).exists());
-    assert_eq!(
-        fs::read_to_string(input.dir.join(PATCH)).unwrap(),
-        input.patch.before.unwrap()
-    );
-    assert!(!data.join("gateway.json").exists());
-}
-
-#[tokio::test]
-async fn editor_rejects_duplicate_managed_rows_invalid_root_symlinks_and_pending_recovery() {
+async fn editor_rejects_duplicate_managed_rows_and_invalid_root_symlinks() {
     let home = super::tests::fixture();
     let gateway = gateway(home.path());
     let file = gateway
@@ -552,17 +492,6 @@ async fn editor_rejects_duplicate_managed_rows_invalid_root_symlinks_and_pending
             .read_dsh_file(home.path(), None, FileKey::HomePatch)
             .is_err());
     }
-    fs::write(gateway.0.data.join(JOURNAL), "{}").unwrap();
-    assert!(gateway
-        .save_dsh_file(
-            home.path(),
-            Some("default"),
-            FileKey::ProfilePatch,
-            Some("[]"),
-            &file.revision
-        )
-        .await
-        .is_err());
 }
 
 #[test]

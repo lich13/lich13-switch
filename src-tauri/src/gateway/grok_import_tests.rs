@@ -158,58 +158,6 @@ impl Fixture {
     }
 }
 
-struct RecoveryFixture {
-    _temp: tempfile::TempDir,
-    home: PathBuf,
-    data: PathBuf,
-}
-
-impl RecoveryFixture {
-    fn new(config: Option<&str>, environment: Option<&str>, store: Option<&str>) -> Self {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("grok-home");
-        let data = temp.path().join("grok-store");
-        fs::create_dir_all(&home).unwrap();
-        fs::create_dir_all(&data).unwrap();
-        for (path, content) in [
-            (home.join("config.toml"), config),
-            (home.join("endpoint.env"), environment),
-            (data.join("gateway.json"), store),
-        ] {
-            if let Some(content) = content {
-                fs::write(path, content).unwrap();
-            }
-        }
-        Self {
-            _temp: temp,
-            home,
-            data,
-        }
-    }
-
-    fn write_journal(
-        &self,
-        config_before: Option<&str>,
-        config_after: &str,
-        environment: Option<(Option<&str>, &str)>,
-        store_before: Option<&str>,
-        store_after: &str,
-    ) -> Vec<u8> {
-        let environment = environment
-            .map(|(before, after)| serde_json::json!({ "before": before, "after": after }));
-        let journal = serde_json::to_vec(&serde_json::json!({
-            "version": 1,
-            "home": self.home.display().to_string(),
-            "config": { "before": config_before, "after": config_after },
-            "environment": environment,
-            "store": { "before": store_before, "after": store_after },
-        }))
-        .unwrap();
-        fs::write(self.data.join("grok-import.json"), &journal).unwrap();
-        journal
-    }
-}
-
 fn optional_bytes(path: &Path) -> Option<Vec<u8>> {
     fs::read(path).ok()
 }
@@ -458,7 +406,6 @@ fn preview_and_cancel_leave_config_environment_and_store_untouched() {
     assert_eq!(optional_bytes(&config_path), before_config);
     assert_eq!(optional_bytes(&environment_path), before_environment);
     assert_eq!(optional_bytes(&store_path), before_store);
-    assert!(!fixture.data.join("grok-import.json").exists());
 
     let token = preview.token.as_deref().unwrap();
     fixture.gateway.cancel_grok_import(Some(token));
@@ -470,7 +417,6 @@ fn preview_and_cancel_leave_config_environment_and_store_untouched() {
     assert_eq!(optional_bytes(&config_path), before_config);
     assert_eq!(optional_bytes(&environment_path), before_environment);
     assert_eq!(optional_bytes(&store_path), before_store);
-    assert!(!fixture.data.join("grok-import.json").exists());
 }
 
 #[test]
@@ -551,7 +497,6 @@ fn commit_migrates_config_environment_and_store_once_without_duplicates() {
     );
     assert_eq!(view.providers.len(), 1);
     assert_eq!(view.selected.as_deref(), Some(provider_id));
-    assert!(!fixture.data.join("grok-import.json").exists());
 
     let environment_after_first_commit = fs::read(&environment_path).unwrap();
     let second = fixture.valid_preview(Some(grok_config::MANAGED), false);
@@ -601,7 +546,6 @@ fn commit_rejects_config_revision_conflict_without_partial_writes() {
     assert_eq!(optional_bytes(&config_path), Some(changed));
     assert_eq!(optional_bytes(&environment_path), before_environment);
     assert_eq!(optional_bytes(&store_path), before_store);
-    assert!(!fixture.data.join("grok-import.json").exists());
 }
 
 #[test]
@@ -624,7 +568,6 @@ fn commit_rejects_environment_revision_conflict_without_partial_writes() {
     assert_eq!(optional_bytes(&config_path), before_config);
     assert_eq!(optional_bytes(&environment_path), Some(changed.to_vec()));
     assert_eq!(optional_bytes(&store_path), before_store);
-    assert!(!fixture.data.join("grok-import.json").exists());
 }
 
 #[test]
@@ -648,7 +591,6 @@ fn commit_rejects_provider_store_revision_conflict_without_partial_writes() {
     assert_eq!(optional_bytes(&config_path), before_config);
     assert_eq!(optional_bytes(&environment_path), before_environment);
     assert_eq!(optional_bytes(&store_path), Some(external));
-    assert!(!fixture.data.join("grok-import.json").exists());
 }
 
 #[test]
@@ -745,199 +687,39 @@ native_metadata = "fixture-two"
         .is_none());
 }
 
+#[cfg(unix)]
 #[test]
-fn recover_finishes_interrupted_config_write_and_repeats_without_side_effects() {
-    let config_before = "fixture-config-before";
-    let config_after = "fixture-config-after";
-    let environment_before = "XAI_API_KEY=fixture-before\nKEEP_VALUE=fixture-retained\n";
-    let environment_after = "KEEP_VALUE=fixture-retained\n";
-    let store_after = "{\"store\":\"fixture-after\"}";
-    let fixture = RecoveryFixture::new(Some(config_before), Some(environment_before), None);
+fn commit_restores_written_files_when_a_later_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new(IMPORT_CONFIG, Some(IMPORT_ENV));
+    let preview = fixture.valid_preview(None, true);
     let config_path = fixture.home.join("config.toml");
     let environment_path = fixture.home.join("endpoint.env");
     let store_path = fixture.data.join("gateway.json");
-
-    // The config write reached disk, but environment and store writes did not.
-    fs::write(&config_path, config_after).unwrap();
-    fixture.write_journal(
-        Some(config_before),
-        config_after,
-        Some((Some(environment_before), environment_after)),
-        None,
-        store_after,
-    );
-
-    grok_import::recover(&fixture.data).unwrap();
-    assert_eq!(fs::read(&config_path).unwrap(), config_after.as_bytes());
-    assert_eq!(
-        fs::read(&environment_path).unwrap(),
-        environment_after.as_bytes()
-    );
-    assert_eq!(fs::read(&store_path).unwrap(), store_after.as_bytes());
-    assert!(!fixture.data.join("grok-import.json").exists());
-
-    let after_first_recovery = (
+    let before = (
         optional_bytes(&config_path),
         optional_bytes(&environment_path),
         optional_bytes(&store_path),
     );
-    grok_import::recover(&fixture.data).unwrap();
+
+    // The provider store is written last; a read-only directory fails that write
+    // after the Grok configuration and environment file were already replaced.
+    fs::set_permissions(&fixture.data, fs::Permissions::from_mode(0o500)).unwrap();
+    let result = fixture.commit(&preview);
+    fs::set_permissions(&fixture.data, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(result.is_err(), "the store write should have failed");
     assert_eq!(
         (
             optional_bytes(&config_path),
             optional_bytes(&environment_path),
             optional_bytes(&store_path),
         ),
-        after_first_recovery
+        before
     );
-}
-
-#[test]
-fn recover_finishes_interrupted_environment_write_before_store() {
-    let config_before = "fixture-config-before";
-    let config_after = "fixture-config-after";
-    let environment_before = "XAI_API_KEY=fixture-before\nKEEP_VALUE=fixture-retained\n";
-    let environment_after = "KEEP_VALUE=fixture-retained\n";
-    let store_before = "{\"store\":\"fixture-before\"}";
-    let store_after = "{\"store\":\"fixture-after\"}";
-    let fixture = RecoveryFixture::new(
-        Some(config_before),
-        Some(environment_before),
-        Some(store_before),
-    );
-    let config_path = fixture.home.join("config.toml");
-    let environment_path = fixture.home.join("endpoint.env");
-    let store_path = fixture.data.join("gateway.json");
-
-    // Both config and environment writes reached disk; the store write did not.
-    fs::write(&config_path, config_after).unwrap();
-    fs::write(&environment_path, environment_after).unwrap();
-    fixture.write_journal(
-        Some(config_before),
-        config_after,
-        Some((Some(environment_before), environment_after)),
-        Some(store_before),
-        store_after,
-    );
-
-    grok_import::recover(&fixture.data).unwrap();
-    assert_eq!(fs::read(&config_path).unwrap(), config_after.as_bytes());
-    assert_eq!(
-        fs::read(&environment_path).unwrap(),
-        environment_after.as_bytes()
-    );
-    assert_eq!(fs::read(&store_path).unwrap(), store_after.as_bytes());
-    assert!(!fixture.data.join("grok-import.json").exists());
-}
-
-#[test]
-fn recover_stops_all_writes_and_keeps_journal_on_any_external_conflict() {
-    let config_before = "fixture-config-before";
-    let config_after = "fixture-config-after";
-    let environment_before = "KEEP_VALUE=fixture-before\n";
-    let environment_after = "KEEP_VALUE=fixture-after\n";
-    let store_before = "{\"store\":\"fixture-before\"}";
-    let store_after = "{\"store\":\"fixture-after\"}";
-
-    for conflicting_participant in ["config", "environment", "store"] {
-        let fixture = RecoveryFixture::new(
-            Some(config_before),
-            Some(environment_before),
-            Some(store_before),
-        );
-        let config_path = fixture.home.join("config.toml");
-        let environment_path = fixture.home.join("endpoint.env");
-        let store_path = fixture.data.join("gateway.json");
-        let journal_path = fixture.data.join("grok-import.json");
-        let journal = fixture.write_journal(
-            Some(config_before),
-            config_after,
-            Some((Some(environment_before), environment_after)),
-            Some(store_before),
-            store_after,
-        );
-        let external = format!("fixture-external-{conflicting_participant}");
-        let conflicting_path = match conflicting_participant {
-            "config" => &config_path,
-            "environment" => &environment_path,
-            "store" => &store_path,
-            _ => unreachable!(),
-        };
-        fs::write(conflicting_path, &external).unwrap();
-        let before_recovery = (
-            optional_bytes(&config_path),
-            optional_bytes(&environment_path),
-            optional_bytes(&store_path),
-        );
-
-        let result = grok_import::recover(&fixture.data);
-        assert!(
-            result.is_err(),
-            "{conflicting_participant} conflict was ignored"
-        );
-        assert_eq!(
-            result.err().unwrap().code,
-            "CONFLICT",
-            "unexpected error for {conflicting_participant} conflict"
-        );
-        assert_eq!(
-            (
-                optional_bytes(&config_path),
-                optional_bytes(&environment_path),
-                optional_bytes(&store_path),
-            ),
-            before_recovery,
-            "recovery wrote a participant after a {conflicting_participant} conflict"
-        );
-        assert_eq!(
-            optional_bytes(&journal_path),
-            Some(journal),
-            "the journal should remain after a {conflicting_participant} conflict"
-        );
-    }
-}
-
-#[test]
-fn recover_preserves_a_damaged_journal_and_original_files() {
-    let config = "fixture-config-original";
-    let environment = "KEEP_VALUE=fixture-original\n";
-    let fixture = RecoveryFixture::new(Some(config), Some(environment), None);
-    let config_path = fixture.home.join("config.toml");
-    let environment_path = fixture.home.join("endpoint.env");
-    let journal_path = fixture.data.join("grok-import.json");
-    let damaged_journal = b"{not-json";
-    fs::write(&journal_path, damaged_journal).unwrap();
-
-    let result = grok_import::recover(&fixture.data);
-    assert!(result.is_err(), "a damaged journal must not be ignored");
-    assert_eq!(
-        optional_bytes(&journal_path),
-        Some(damaged_journal.to_vec())
-    );
-    assert_eq!(fs::read(&config_path).unwrap(), config.as_bytes());
-    assert_eq!(fs::read(&environment_path).unwrap(), environment.as_bytes());
-}
-
-#[test]
-fn recover_accepts_a_journal_larger_than_two_mib_when_each_file_is_bounded() {
-    let config_before = "b".repeat(1_100_000);
-    let config_after = "a".repeat(1_100_000);
-    let store_after = "{\"store\":\"fixture-large-journal\"}";
-    let fixture = RecoveryFixture::new(Some(&config_before), None, None);
-    let config_path = fixture.home.join("config.toml");
-    let store_path = fixture.data.join("gateway.json");
-    let journal =
-        fixture.write_journal(Some(&config_before), &config_after, None, None, store_after);
-
-    assert!(journal.len() > 2 * 1024 * 1024);
-    assert!(config_before.len() <= 2 * 1024 * 1024);
-    assert!(config_after.len() <= 2 * 1024 * 1024);
-    assert!(store_after.len() <= 2 * 1024 * 1024);
-
-    grok_import::recover(&fixture.data).unwrap();
-    assert_eq!(fs::read(&config_path).unwrap(), config_after.as_bytes());
-    assert_eq!(fs::read(&store_path).unwrap(), store_after.as_bytes());
-    assert!(!fixture.data.join("grok-import.json").exists());
+    // Nothing is left behind, so the same import can simply be retried.
+    let preview = fixture.valid_preview(None, true);
+    fixture.commit(&preview).unwrap();
 }
 
 #[test]
@@ -952,7 +734,6 @@ fn preview_rejects_an_unknown_selected_model_without_creating_a_token() {
 
     assert!(result.is_err(), "an unknown model must not be inferred");
     assert_eq!(result.err().unwrap().code, "GROK_CONFIG");
-    assert!(!fixture.data.join("grok-import.json").exists());
 }
 
 #[test]
@@ -982,7 +763,6 @@ api_key = "fixture-sparse-key"
         .unwrap();
     assert!(sparse_model.protocol.is_none());
     assert!(sparse_model.credential_available);
-    assert!(!sparse.data.join("grok-import.json").exists());
 
     let unsupported_config = r#"
 [models]
@@ -1011,7 +791,6 @@ api_key = "fixture-future-key"
         .unwrap();
     assert!(unsupported_model.protocol.is_none());
     assert!(unsupported_model.error.is_some());
-    assert!(!unsupported.data.join("grok-import.json").exists());
 }
 
 #[test]

@@ -300,9 +300,6 @@ impl Gateway {
     ) -> Result<FileView> {
         let _listener = self.0.registry.lifecycle.lock().await;
         let _lifecycle = self.0.lifecycle.lock().await;
-        if self.0.data.join(JOURNAL).exists() {
-            return Err(error("DSH 存在待恢复事务，请先完成恢复"));
-        }
         let path = path(home, profile, key)?;
         let restored;
         let raw = match raw {

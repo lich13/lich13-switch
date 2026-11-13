@@ -271,7 +271,6 @@ impl Gateway {
     ) -> Result<()> {
         let _lifecycle = self.0.lifecycle.lock().await;
         let _mutation = self.0.registry.mutation.lock().unwrap();
-        self.recover_dsh_state()?;
         let current_token = official_token(home, &self.0.inner.lock().unwrap().store);
         if current_token.as_deref().ok() != Some(token) {
             return Err(error("DSH 官方登录已变化，请重新刷新模型"));

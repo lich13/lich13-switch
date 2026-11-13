@@ -4,13 +4,9 @@ use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 use toml_edit::{Document, Item};
 
-const WRITE_FILE: &str = "gateway-api-write.json";
 const LIMIT: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,62 +299,13 @@ fn patch_base(config: &str, id: &str, value: &str) -> Result<String> {
     Ok(output)
 }
 
-#[derive(Serialize, Deserialize)]
-struct Write {
-    version: u32,
-    home: PathBuf,
-    config_before: String,
-    config_after: String,
-    auth_before: Option<Vec<u8>>,
-    auth_after: Vec<u8>,
-}
-fn restore(path: &Path, before: Option<&[u8]>, after: &[u8]) -> Result<()> {
-    let current = storage::read_user_bounded(path, LIMIT)?;
-    if current.as_deref() == before {
-        return Ok(());
-    }
-    if current.as_deref() != Some(after) {
-        return Err(invalid("API 连接事务遇到外部修改，已保留恢复记录"));
-    }
-    match before {
-        Some(bytes) => storage::atomic_write_user(path, bytes, Some(&storage::digest(after))),
-        None => fs::remove_file(path).map_err(storage::io_error),
-    }
-}
-pub fn recover_write(data: &Path) -> Result<()> {
-    let path = data.join(WRITE_FILE);
-    let Some(raw) = storage::read_bounded(&path, LIMIT * 16)? else {
-        return Ok(());
-    };
-    let tx: Write =
-        serde_json::from_slice(&raw).map_err(|_| invalid("API 连接恢复记录损坏，已保留"))?;
-    if tx.version != 1 {
-        return Err(invalid("API 连接恢复记录版本不受支持，已保留"));
-    }
-    let auth = restore(
-        &tx.home.join("auth.json"),
-        tx.auth_before.as_deref(),
-        &tx.auth_after,
-    );
-    let config = restore(
-        &tx.home.join("config.toml"),
-        Some(tx.config_before.as_bytes()),
-        tx.config_after.as_bytes(),
-    );
-    auth.and(config)?;
-    fs::remove_file(path).map_err(storage::io_error)
-}
 pub fn write(
-    data: &Path,
     home: &Path,
     id: &str,
     target: &Pair,
     expected: Option<&str>,
     allowed: Option<&[&Pair]>,
 ) -> Result<()> {
-    if data.join(WRITE_FILE).exists() {
-        return Err(invalid("请先处理未完成的 API 连接事务"));
-    }
     let config_before = text(home)?;
     let auth_before = storage::read_user_bounded(&home.join("auth.json"), LIMIT)?;
     let mut value = auth(auth_before.as_deref())?;
@@ -386,36 +333,24 @@ pub fn write(
         .ok_or_else(|| invalid("缺少 API Key"))?;
     value["auth_mode"] = "apikey".into();
     value["OPENAI_API_KEY"] = key.into();
-    let tx = Write {
-        version: 1,
-        home: home.to_owned(),
-        config_after: patch_base(&config_before, id, url)?,
-        config_before,
-        auth_after: serde_json::to_vec_pretty(&value).map_err(|_| invalid("无法生成 API 凭据"))?,
-        auth_before,
-    };
-    storage::atomic_write_bounded(
-        &data.join(WRITE_FILE),
-        &serde_json::to_vec(&tx).map_err(|_| invalid("无法生成 API 事务"))?,
-        Some("missing"),
-        LIMIT * 16,
-    )?;
-    let result = (|| {
-        storage::atomic_write_user(
-            &home.join("config.toml"),
-            tx.config_after.as_bytes(),
-            Some(&config_rev),
-        )?;
-        storage::atomic_write_user(&home.join("auth.json"), &tx.auth_after, Some(&auth_rev))?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        return match recover_write(data) {
+    let config_after = patch_base(&config_before, id, url)?;
+    let auth_after = serde_json::to_vec_pretty(&value).map_err(|_| invalid("无法生成 API 凭据"))?;
+    let config = home.join("config.toml");
+    storage::atomic_write_user(&config, config_after.as_bytes(), Some(&config_rev))?;
+    if let Err(error) =
+        storage::atomic_write_user(&home.join("auth.json"), &auth_after, Some(&auth_rev))
+    {
+        // Put config.toml back unless it was changed again in the meantime.
+        let after_rev = storage::digest(config_after.as_bytes());
+        return match storage::atomic_write_user(&config, config_before.as_bytes(), Some(&after_rev))
+        {
             Ok(()) => Err(error),
-            Err(_) => Err(invalid("API 连接写入失败且恢复遇到冲突，已保留记录")),
+            Err(_) => Err(invalid(
+                "API 连接写入失败且 config.toml 无法还原，请检查后重试",
+            )),
         };
     }
-    fs::remove_file(data.join(WRITE_FILE)).map_err(storage::io_error)
+    Ok(())
 }
 
 #[cfg(test)]

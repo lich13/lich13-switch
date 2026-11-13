@@ -1322,11 +1322,6 @@ mod tests {
         assert_eq!(reopened.state().unwrap().accounts.len(), 1);
 
         // Gateway-active and official-mode busy states reject deletion and preserve accounts.json.
-        let gw_marker = reopened.data_dir.join("gateway-api-write.json");
-        std::fs::write(&gw_marker, b"{}").unwrap();
-        assert_eq!(reopened.delete(&b).unwrap_err().code, code::GATEWAY_ACTIVE);
-        std::fs::remove_file(&gw_marker).unwrap();
-
         let official_marker = reopened.data_dir.join("official-mode.json");
         std::fs::write(
             &official_marker,

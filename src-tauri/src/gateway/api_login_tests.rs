@@ -434,7 +434,6 @@ fn v020_api_external_auth_edit_conflict_does_not_overwrite_external_bytes() {
     fs::write(home.join("auth.json"), &external).unwrap();
     let config_before = fs::read(home.join("config.toml")).unwrap();
     let error = codex_api::write(
-        &data,
         &home,
         "named",
         &Pair::new("https://api.next.example.invalid/v1", "next-key"),
@@ -445,6 +444,5 @@ fn v020_api_external_auth_edit_conflict_does_not_overwrite_external_bytes() {
     assert_eq!(error.code, "CONFLICT");
     assert_eq!(fs::read(home.join("auth.json")).unwrap(), external);
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), config_before);
-    assert!(!data.join("gateway-api-write.json").exists());
     drop(t);
 }

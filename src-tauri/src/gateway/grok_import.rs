@@ -8,7 +8,7 @@ use crate::{
     errors::code,
     storage::{self, AppError, Result},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -16,11 +16,9 @@ use std::{
 };
 use toml_edit::{value, DocumentMut, Item, Table};
 
-const JOURNAL: &str = "grok-import.json";
 const ENV_FILE: &str = "endpoint.env";
 const FILE_LIMIT: u64 = 2 * 1024 * 1024;
 // Three bounded files, before/after images, and JSON string escaping.
-const JOURNAL_LIMIT: u64 = 80 * 1024 * 1024;
 #[derive(Default)]
 pub struct Service(Mutex<Option<Pending>>);
 struct Pending {
@@ -339,14 +337,13 @@ fn migrate(text: &str, p: &Profile, known_managed: bool) -> Result<String> {
     Ok(doc.to_string())
 }
 
-#[derive(Serialize, Deserialize)]
 struct Change {
     before: Option<String>,
     after: String,
 }
-#[derive(Serialize, Deserialize)]
+/// The files one import rewrites together. Nothing is persisted about the
+/// transaction itself: a failed write restores the files already written.
 struct Transaction {
-    version: u32,
     home: PathBuf,
     config: Change,
     environment: Option<Change>,
@@ -362,54 +359,58 @@ impl Transaction {
         files
     }
     fn apply(&self, data: &Path) -> Result<()> {
-        if self.version != 1 || !self.home.is_absolute() {
-            return Err(error("Grok 导入恢复记录无效"));
-        }
         let files = self.files(data);
-        let mut staged = Vec::with_capacity(files.len());
-        // Preflight every participant before any further write; external edits
-        // are never rolled back, even following an interrupted commit.
         let store_path = data.join("gateway.json");
-        for (path, change) in files {
+        let write = |path: &Path, bytes: &[u8], expected: &str| {
+            if path == store_path {
+                storage::atomic_write(path, bytes, Some(expected))
+            } else {
+                storage::atomic_write_user(path, bytes, Some(expected))
+            }
+        };
+        // Preflight every participant before the first write.
+        for (path, change) in &files {
             if change.after.len() as u64 > FILE_LIMIT {
                 return Err(AppError::new(code::FILE_SIZE, "Grok 导入文件超过允许大小"));
             }
-            let raw = if path == store_path {
-                storage::read_optional(&path)?
+            let raw = if *path == store_path {
+                storage::read_optional(path)?
             } else {
-                storage::read_user_optional(&path)?
+                storage::read_user_optional(path)?
             };
-            if raw.as_deref() != change.before.as_deref().map(str::as_bytes)
-                && raw.as_deref() != Some(change.after.as_bytes())
-            {
+            if raw.as_deref() != change.before.as_deref().map(str::as_bytes) {
                 return Err(AppError::new(
                     code::CONFLICT,
-                    "Grok 导入文件被外部修改，已保留恢复事务和当前配置",
+                    "Grok 导入文件被外部修改，请重新预览",
                 ));
             }
-            staged.push((path, change, raw));
         }
-        for (path, change, raw) in staged {
-            if raw.as_deref() != Some(change.after.as_bytes()) {
-                let expected = storage::revision(change.before.as_deref().map(str::as_bytes));
-                if path == store_path {
-                    storage::atomic_write(&path, change.after.as_bytes(), Some(&expected))?;
-                } else {
-                    storage::atomic_write_user(&path, change.after.as_bytes(), Some(&expected))?;
-                }
+        for (index, (path, change)) in files.iter().enumerate() {
+            let expected = storage::revision(change.before.as_deref().map(str::as_bytes));
+            let Err(failure) = write(path, change.after.as_bytes(), &expected) else {
+                continue;
+            };
+            // Put back what this import already wrote; a file changed by
+            // someone else in the meantime is left alone.
+            let mut restored = true;
+            for (path, change) in files[..index].iter().rev() {
+                let written = storage::revision(Some(change.after.as_bytes()));
+                restored &= match &change.before {
+                    Some(before) => write(path, before.as_bytes(), &written).is_ok(),
+                    None => std::fs::remove_file(path).is_ok(),
+                };
             }
+            return Err(if restored {
+                failure
+            } else {
+                AppError::new(
+                    code::RECOVERY,
+                    "Grok 导入未完成且部分文件无法还原，请检查 Grok 配置后重新导入",
+                )
+            });
         }
-        std::fs::remove_file(data.join(JOURNAL)).map_err(storage::io_error)?;
-        storage::sync_parent(&data.join(JOURNAL))
+        Ok(())
     }
-}
-pub fn recover(data: &Path) -> Result<()> {
-    if let Some(raw) = storage::read_bounded(&data.join(JOURNAL), JOURNAL_LIMIT)? {
-        let transaction: Transaction = serde_json::from_slice(&raw)
-            .map_err(|_| error("Grok 导入恢复记录损坏，已保留原文件"))?;
-        transaction.apply(data)?;
-    }
-    Ok(())
 }
 impl Gateway {
     pub fn preview_grok_import(&self, home: &Path, selected: Option<&str>) -> Result<Preview> {
@@ -427,10 +428,7 @@ impl Gateway {
         }
         *self.0.grok_import.0.lock().unwrap() = None;
         let s = self.0.inner.lock().unwrap();
-        if s.running
-            || self.0.data.join("gateway-recovery.json").exists()
-            || self.0.data.join(JOURNAL).exists()
-        {
+        if s.running || self.0.data.join("gateway-recovery.json").exists() {
             return Err(error("请先停用 Grok 网关并完成配置恢复，再导入"));
         }
         let (_, config) = grok_config::read(home)?;
@@ -557,7 +555,6 @@ impl Gateway {
             .ok_or_else(|| error("导入预览已失效，请重新预览"))?;
         if s.running
             || s.recovery_error.is_some()
-            || self.0.data.join(JOURNAL).exists()
             || self.0.data.join("gateway-recovery.json").exists()
             || p.home != home
             || expected != p.revision
@@ -649,7 +646,6 @@ impl Gateway {
         let after =
             serde_json::to_string_pretty(&next).map_err(|_| error("无法保存 Grok 供应商"))?;
         let transaction = Transaction {
-            version: 1,
             home: home.to_owned(),
             config: Change {
                 before: Some(p.config.clone()),
@@ -667,28 +663,7 @@ impl Gateway {
                 after: after.clone(),
             },
         };
-        // Reject oversized participants before creating a durable transaction.
-        if transaction
-            .files(&self.0.data)
-            .iter()
-            .any(|(_, change)| change.after.len() as u64 > FILE_LIMIT)
-        {
-            return Err(AppError::new(code::FILE_SIZE, "Grok 导入文件超过允许大小"));
-        }
-        storage::atomic_write_bounded(
-            &self.0.data.join(JOURNAL),
-            &serde_json::to_vec(&transaction).map_err(|_| error("无法建立 Grok 导入事务"))?,
-            Some("missing"),
-            JOURNAL_LIMIT,
-        )?;
-        if let Err(e) = transaction.apply(&self.0.data) {
-            s.editable_mut().recovery_error = Some(e.clone());
-            s.error = Some(e.message.clone());
-            drop(pending);
-            drop(s);
-            self.changed();
-            return Err(e);
-        }
+        transaction.apply(&self.0.data)?;
         self.replace_store(&mut s, next);
         s.revision = storage::digest(after.as_bytes());
         s.editable_mut().home = Some(home.to_owned());

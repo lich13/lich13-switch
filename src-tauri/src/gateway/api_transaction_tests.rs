@@ -1,89 +1,59 @@
-// 覆盖 Codex API 多文件事务、中断恢复与外部冲突。
+// 覆盖 Codex API 多文件写入、失败还原与外部冲突。
 use super::*;
+use std::fs;
 
 fn config() -> &'static str {
     "model_provider='relay'\r\nmodel='keep'\r\n[model_providers.relay]\r\nbase_url='https://example.invalid/v1' # keep\r\nrequires_openai_auth=true\r\nsupports_websockets=false\r\n"
 }
-fn fixture() -> (tempfile::TempDir, Write) {
+struct Fixture {
+    home: std::path::PathBuf,
+    config_before: String,
+    auth_before: Vec<u8>,
+    auth_after: Vec<u8>,
+}
+fn fixture() -> (tempfile::TempDir, Fixture) {
     let t = tempfile::tempdir().unwrap();
-    let tx = Write {
-        version: 1,
+    let tx = Fixture {
         home: t.path().join("home"),
         config_before: config().into(),
-        config_after: patch_base(config(), "relay", "http://127.0.0.1:15722/v1").unwrap(),
-        auth_before: Some(br#"{"OPENAI_API_KEY":"fixture-original","extra":17}"#.to_vec()),
+        auth_before: br#"{"OPENAI_API_KEY":"fixture-original","extra":17}"#.to_vec(),
         auth_after: br#"{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-next","extra":17}"#
             .to_vec(),
     };
     fs::create_dir(&tx.home).unwrap();
-    storage::atomic_write(
-        &t.path().join(WRITE_FILE),
-        &serde_json::to_vec(&tx).unwrap(),
-        None,
-    )
-    .unwrap();
     (t, tx)
 }
 
+#[cfg(unix)]
 #[test]
-fn v020_api_crash_restores_both_files_exactly_in_all_write_phases() {
-    for phase in 0..3 {
-        let (t, tx) = fixture();
-        fs::write(
-            tx.home.join("config.toml"),
-            if phase > 0 {
-                &tx.config_after
-            } else {
-                &tx.config_before
-            },
-        )
-        .unwrap();
-        fs::write(
-            tx.home.join("auth.json"),
-            if phase > 1 {
-                &tx.auth_after
-            } else {
-                tx.auth_before.as_ref().unwrap()
-            },
-        )
-        .unwrap();
-        recover_write(t.path()).unwrap();
-        recover_write(t.path()).unwrap();
-        assert_eq!(
-            fs::read(tx.home.join("config.toml")).unwrap(),
-            tx.config_before.as_bytes()
-        );
-        assert_eq!(
-            fs::read(tx.home.join("auth.json")).unwrap(),
-            tx.auth_before.unwrap()
-        );
-        assert!(!t.path().join(WRITE_FILE).exists());
-    }
-}
-#[test]
-fn v020_api_partial_rollback_preserves_external_auth_and_restores_owned_config() {
-    let (t, tx) = fixture();
-    fs::write(tx.home.join("config.toml"), &tx.config_after).unwrap();
-    let foreign = br#"{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-external"}"#;
-    fs::write(tx.home.join("auth.json"), foreign).unwrap();
-    assert!(recover_write(t.path()).is_err());
-    assert_eq!(fs::read(tx.home.join("auth.json")).unwrap(), foreign);
+fn v020_api_failed_auth_write_restores_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_t, tx) = fixture();
+    fs::write(tx.home.join("config.toml"), &tx.config_before).unwrap();
+    // auth.json as a directory makes the second write fail after config.toml was written.
+    fs::create_dir(tx.home.join("auth.json")).unwrap();
+    let _ = fs::set_permissions(tx.home.join("auth.json"), fs::Permissions::from_mode(0o700));
+    assert!(write(
+        &tx.home,
+        "relay",
+        &Pair::new("https://next.example.invalid", "fixture-third"),
+        None,
+        None,
+    )
+    .is_err());
     assert_eq!(
         fs::read(tx.home.join("config.toml")).unwrap(),
         tx.config_before.as_bytes()
     );
-    assert!(t.path().join(WRITE_FILE).exists());
 }
 #[test]
 fn v020_api_auth_revision_conflict_does_not_touch_config() {
-    let (t, tx) = fixture();
-    fs::remove_file(t.path().join(WRITE_FILE)).unwrap();
+    let (_t, tx) = fixture();
     fs::write(tx.home.join("config.toml"), &tx.config_before).unwrap();
-    fs::write(tx.home.join("auth.json"), tx.auth_before.as_ref().unwrap()).unwrap();
+    fs::write(tx.home.join("auth.json"), &tx.auth_before).unwrap();
     let (revision, _) = read(&tx.home, "relay").unwrap();
     fs::write(tx.home.join("auth.json"), &tx.auth_after).unwrap();
     let error = write(
-        t.path(),
         &tx.home,
         "relay",
         &Pair::new("https://next.example.invalid", "fixture-third"),
@@ -97,7 +67,6 @@ fn v020_api_auth_revision_conflict_does_not_touch_config() {
         tx.config_before.as_bytes()
     );
     assert_eq!(fs::read(tx.home.join("auth.json")).unwrap(), tx.auth_after);
-    assert!(!t.path().join(WRITE_FILE).exists());
 }
 #[test]
 fn v020_api_missing_base_only_inserts_into_the_active_table() {
