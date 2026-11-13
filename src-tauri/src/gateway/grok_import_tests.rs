@@ -39,7 +39,7 @@ const IMPORT_ENV: &str = "# fixture-only values\nXAI_API_KEY=fixture-import-api-
 fn global_connection_import_keeps_only_current_api_configuration() {
     let before = "# native settings\n[models]\ndefault='native-model'\n[model.native-model]\napi_backend='responses'\n[model.other]\nmodel='other-model'\nbase_url='https://other.example.invalid/v1'\napi_key='fixture-other'\n[endpoints]\nmodels_base_url='https://api.example.invalid/v1'\n[auth]\npreferred_method='api_key'\n[features]\ncampaigns=true\n";
     let fixture = Fixture::new(before, Some(IMPORT_ENV));
-    let current = super::current::grok(
+    let current = super::current::tests::grok(
         &fixture.home,
         &super::model::Store::default(),
         &[43721],

@@ -108,12 +108,6 @@ fn string(s: &str, out: &mut Vec<u8>) {
 pub(super) fn encode(value: &Value) -> Vec<u8> {
     encode_version(value, false, false)
 }
-// v11 keeps its original byte representation. The v12 diagnostic codec also
-// stores canonical UUIDs losslessly as sixteen bytes.
-#[cfg(test)]
-pub(super) fn encode_v12(value: &Value) -> Vec<u8> {
-    encode_version(value, true, false)
-}
 // Keep the legacy encoders (including dictionary training bytes) immutable.
 // Tag 11 preserves arbitrary-precision JSON numbers without an f64 round trip.
 pub(super) fn encode_v13(value: &Value) -> Vec<u8> {
@@ -309,8 +303,13 @@ pub(super) fn decode(bytes: &[u8]) -> Option<Value> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+    // v11 keeps its original byte representation. The v12 diagnostic codec also
+    // stores canonical UUIDs losslessly as sixteen bytes.
+    pub fn encode_v12(value: &Value) -> Vec<u8> {
+        encode_version(value, true, false)
+    }
 
     #[test]
     fn wire_preserves_unknown_fields_extreme_numbers_and_literal_strings() {

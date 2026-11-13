@@ -259,14 +259,6 @@ pub(super) fn clean_headers(headers: &mut HeaderMap, upgrade: bool) {
         headers.remove(header::UPGRADE);
     }
 }
-#[cfg(test)]
-pub(super) fn capacity_message(status: StatusCode, body: &[u8]) -> bool {
-    super::failure_policy::decision(
-        Some(status.as_u16()),
-        &super::failure_policy::http(status.as_u16(), &HeaderMap::new(), body).0,
-    )
-    .temporary
-}
 pub(super) fn capacity_delay(settings: &Settings, retry: Option<Duration>) -> Duration {
     retry.unwrap_or(Duration::from_secs(settings.capacity_retry_seconds))
 }

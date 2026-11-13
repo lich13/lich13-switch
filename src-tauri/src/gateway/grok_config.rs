@@ -127,10 +127,6 @@ fn headers(
     }
     Ok(())
 }
-#[cfg(test)]
-pub fn profile(text: &str) -> Result<Profile> {
-    profile_with_env(text, &|name| std::env::var(name).ok())
-}
 pub fn profile_with_env(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Result<Profile> {
     let doc = parse(text)?;
     profile_doc_with_env(&doc, resolve)
@@ -587,10 +583,6 @@ impl Snapshot {
     pub fn apply(&self, path: &Path, expected: Option<&str>) -> Result<()> {
         self.write_owned(path, &self.applied, expected, false)
     }
-    #[cfg(test)]
-    pub fn restore(&self, path: &Path) -> Result<()> {
-        self.write_owned(path, &self.before, None, false)
-    }
     pub fn restore_gateway(&self, path: &Path) -> Result<()> {
         self.write_owned(path, &self.before, None, true)
     }
@@ -696,5 +688,18 @@ impl Snapshot {
     }
     pub fn applied(&self) -> &str {
         &self.applied
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    use super::*;
+    pub fn profile(text: &str) -> Result<Profile> {
+        profile_with_env(text, &|name| std::env::var(name).ok())
+    }
+    impl Snapshot {
+        pub fn restore(&self, path: &Path) -> Result<()> {
+            self.write_owned(path, &self.before, None, false)
+        }
     }
 }

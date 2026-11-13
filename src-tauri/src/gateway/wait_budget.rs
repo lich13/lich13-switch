@@ -141,10 +141,6 @@ pub(super) struct WaitBudget {
     pub seconds: u64,
 }
 impl WaitBudget {
-    #[cfg(test)]
-    pub fn new(seconds: u64) -> Self {
-        Self::with_registry(seconds, None)
-    }
     pub fn tracked(seconds: u64, registry: &Registry) -> Self {
         Self::with_registry(seconds, Some(registry.clone()))
     }
@@ -369,6 +365,11 @@ mod tests {
     use super::*;
     use crate::gateway::protocol::Protocol;
     use serde_json::json;
+    impl WaitBudget {
+        pub fn new(seconds: u64) -> Self {
+            Self::with_registry(seconds, None)
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn freeze_preserves_deadline_identity_and_only_live_wait_time_counts() {

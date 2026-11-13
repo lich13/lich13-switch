@@ -12,8 +12,6 @@ mod v02513_tests;
 #[path = "routing_log_v0259_tests.rs"]
 mod v0259_tests;
 
-#[cfg(test)]
-use crate::usage::model::BoundaryState;
 use crate::{
     events,
     usage::model::{RoutingDecision, RoutingEvidence},
@@ -305,21 +303,6 @@ impl RoutingLog {
             }
         }
     }
-    /// Build historical records for compatibility tests. Live save receipts
-    /// keep the log alive and pass through the final settlement filter instead.
-    #[cfg(test)]
-    pub fn take(&self, outcome: events::RoutingOutcome) -> Option<events::Record> {
-        let mut state = self.state.lock();
-        if state.handled {
-            return None;
-        }
-        state.handled = true;
-        let mut record = state.record.take()?;
-        if let Some(routing) = &mut record.details.routing {
-            routing.outcome = outcome;
-        }
-        Some(record)
-    }
 }
 impl Drop for RoutingLog {
     fn drop(&mut self) {
@@ -371,4 +354,25 @@ fn ordinary(decision: RoutingDecision) -> bool {
             | RoutingDecision::ModelDetourOwnerPreserved
             | RoutingDecision::ThreadUnidentified
     )
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    impl RoutingLog {
+        /// Build historical records for compatibility tests. Live save receipts
+        /// keep the log alive and pass through the final settlement filter instead.
+        pub fn take(&self, outcome: events::RoutingOutcome) -> Option<events::Record> {
+            let mut state = self.state.lock();
+            if state.handled {
+                return None;
+            }
+            state.handled = true;
+            let mut record = state.record.take()?;
+            if let Some(routing) = &mut record.details.routing {
+                routing.outcome = outcome;
+            }
+            Some(record)
+        }
+    }
 }

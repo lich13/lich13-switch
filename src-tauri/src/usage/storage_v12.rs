@@ -448,16 +448,6 @@ pub(super) struct AntigravityAttemptRow {
     pub provider_unpriced: bool,
 }
 
-#[cfg(test)]
-pub(super) fn scan_antigravity_attempts(
-    c: &Connection,
-    min_time: i64,
-    max_time: i64,
-    visit: impl FnMut(AntigravityAttemptRow) -> Result<()>,
-) -> Result<()> {
-    scan_client_attempts(c, "antigravity", min_time, max_time, None, visit)
-}
-
 struct StatsShape {
     display_name: Option<String>,
     cache_savings_rates: Option<(rust_decimal::Decimal, rust_decimal::Decimal)>,

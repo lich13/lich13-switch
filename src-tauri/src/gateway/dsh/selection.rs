@@ -268,15 +268,6 @@ pub(super) fn read_provider(
     })
 }
 
-#[cfg(test)]
-pub fn current(
-    home: &Path,
-    store: &Store,
-    ports: &[u16],
-    resolve: &impl Fn(&str) -> Option<String>,
-) -> Current {
-    status(home, store, ports, resolve).0
-}
 fn combined_current(selections: &[(String, Result<Selection>)]) -> Current {
     let Some((_, initial)) = selections.first() else {
         return Current::unknown("尚无可用 DSH profile");

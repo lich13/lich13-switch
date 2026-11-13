@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 fn classify(status: u16, value: Value) -> crate::events::Details {
-    policy::http(
+    policy::test_support::http(
         status,
         &HeaderMap::new(),
         &serde_json::to_vec(&value).unwrap(),
@@ -192,7 +192,7 @@ fn gemini_mixed_quota_dimensions_keep_hard_scope_and_long_retry_info() {
     assert_eq!(d.error_basis, Some(B::QuotaExhausted));
     assert_eq!(d.health_scope, Some(S::Provider));
     assert_eq!(
-        policy::retry_after_value(&v),
+        policy::test_support::retry_after_value(&v),
         Some(Duration::from_millis(172_800_250))
     );
     for (quota, value, expected) in [
@@ -237,14 +237,14 @@ fn headers_refine_messages_but_cannot_override_structured_hard_reasons() {
     ] {
         headers.insert(k, v.parse().unwrap());
     }
-    let (d, wait) = policy::http(
+    let (d, wait) = policy::test_support::http(
         429,
         &headers,
         br#"{"error":{"type":"rate_limit_error","message":"requests per minute exceeded"}}"#,
     );
     assert_eq!(d.error_basis, Some(B::Tpm));
     assert_eq!(wait, Some(Duration::from_secs(97_200)));
-    let (d, _) = policy::http(
+    let (d, _) = policy::test_support::http(
         429,
         &headers,
         br#"{"error":{"code":"insufficient_quota","message":"too many requests"}}"#,
@@ -252,7 +252,8 @@ fn headers_refine_messages_but_cannot_override_structured_hard_reasons() {
     assert_eq!(d.error_basis, Some(B::Billing));
     headers.remove("x-ratelimit-remaining-requests");
     headers.remove("x-ratelimit-remaining-tokens");
-    let (_, wait) = policy::http(429, &headers, br#"{"error":{"code":"tpm_limit_exceeded"}}"#);
+    let (_, wait) =
+        policy::test_support::http(429, &headers, br#"{"error":{"code":"tpm_limit_exceeded"}}"#);
     assert_eq!(wait, Some(Duration::from_secs(93_784)));
 }
 
@@ -356,7 +357,7 @@ fn streamed_projection_preserves_claude_and_gemini_error_details_and_deadlines()
             );
             assert_eq!(
                 protocol.observation.retry_after,
-                policy::retry_after_value(&event),
+                policy::test_support::retry_after_value(&event),
                 "{stream}"
             );
         }

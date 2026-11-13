@@ -560,10 +560,6 @@ impl Drop for Permit {
         }
     }
 }
-#[cfg(test)]
-pub fn retryable(status: u16) -> bool {
-    super::failure_policy::retryable_status(status)
-}
 pub fn is_server_error(status: u16) -> bool {
     (500..=599).contains(&status)
 }
@@ -608,6 +604,9 @@ pub fn retry_after(value: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn retryable(status: u16) -> bool {
+        super::super::failure_policy::retryable_status(status)
+    }
     // State-transition cases adapted from the pinned upstream circuit breaker tests.
     #[test]
     fn consecutive_failure_and_single_probe_with_cancel() {

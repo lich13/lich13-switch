@@ -1475,10 +1475,12 @@ fn v02614_migration_cleans_up_legacy_thinking_high_effort_and_streaming_stats_ma
         let streamed = store.antigravity_stats(&filter, now_ms).unwrap();
         if native {
             let mut batch_rows = Vec::new();
-            crate::usage::storage_v12::scan_antigravity_attempts(
+            crate::usage::storage_v12::scan_client_attempts(
                 &store.connection,
+                "antigravity",
                 filter.start.unwrap_or(i64::MIN),
                 filter.end.unwrap_or(i64::MAX),
+                None,
                 |row| {
                     batch_rows.push(row);
                     Ok(())

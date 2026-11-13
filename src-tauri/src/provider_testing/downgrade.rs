@@ -143,10 +143,6 @@ pub fn classify(requested: &str, predicted: &str) -> Option<bool> {
         Ordering::Equal => compare_versions(&pv, &rv) == Ordering::Less,
     })
 }
-#[cfg(test)]
-pub fn is_downgrade(requested: &str, predicted: &str) -> bool {
-    classify(requested, predicted) == Some(true)
-}
 pub fn verdict(requested: &str, report: &Value) -> &'static str {
     let Some(members) = report_members(report) else {
         return "unknown";
@@ -327,6 +323,9 @@ pub fn relaxed_verdict(job: &Job, report: &Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+    fn is_downgrade(requested: &str, predicted: &str) -> bool {
+        classify(requested, predicted) == Some(true)
+    }
 
     fn lm_job(models: &[&str], aggregate: &str) -> Job {
         let report = |model: &str, count| json!({"prediction":model,"prediction_name":model,"used_outputs":count,"decision":if count == 1 {"partial"} else {"scored"},"probability":null});

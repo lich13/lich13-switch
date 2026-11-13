@@ -2,21 +2,28 @@
 #[path = "v02512_failover_tests.rs"]
 mod v02512_failover_tests;
 use super::*;
+fn capacity_message(status: hyper::StatusCode, body: &[u8]) -> bool {
+    failure_policy::decision(
+        Some(status.as_u16()),
+        &failure_policy::test_support::http(status.as_u16(), &hyper::HeaderMap::new(), body).0,
+    )
+    .temporary
+}
 #[test]
 fn codex_capacity_messages_are_detected_without_matching_normal_errors() {
-    assert!(forward::capacity_message(
+    assert!(capacity_message(
         hyper::StatusCode::TOO_MANY_REQUESTS,
         b"any body"
     ));
-    assert!(forward::capacity_message(
+    assert!(capacity_message(
         hyper::StatusCode::SERVICE_UNAVAILABLE,
         b"Selected model is at capacity. Please try a different model."
     ));
-    assert!(forward::capacity_message(
+    assert!(capacity_message(
         hyper::StatusCode::BAD_GATEWAY,
         "模型当前限流".as_bytes()
     ));
-    assert!(!forward::capacity_message(
+    assert!(!capacity_message(
         hyper::StatusCode::BAD_REQUEST,
         b"model is at capacity"
     ));

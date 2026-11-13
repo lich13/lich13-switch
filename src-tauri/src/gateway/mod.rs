@@ -109,6 +109,8 @@ pub(crate) fn recover_transactions(data: &Path) -> Result<()> {
     takeover::recover(data)
 }
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 use crate::storage::{self, AppError, Result};
 use circuit::{Circuit, Health};
@@ -310,10 +312,14 @@ mod inner_state {
                 )
             })
         }
-
-        #[cfg(test)]
-        pub(in crate::gateway) fn has_cached_editable_digest(&self) -> bool {
-            self.editable_digest.get().is_some()
+    }
+    #[cfg(test)]
+    mod test_support {
+        use super::*;
+        impl Inner {
+            pub(in crate::gateway) fn has_cached_editable_digest(&self) -> bool {
+                self.editable_digest.get().is_some()
+            }
         }
     }
 }
@@ -841,36 +847,6 @@ impl Gateway {
     }
     pub fn try_listener_view(&self) -> Result<ListenerView> {
         self.0.registry.listener.view()
-    }
-    #[cfg(test)]
-    pub fn set_listener_port(&self, port: u16, expected: &str) -> Result<ListenerView> {
-        let _lifecycle = self
-            .0
-            .registry
-            .lifecycle
-            .try_lock()
-            .map_err(|_| AppError::new(code::GATEWAY_ACTIVE, "网关正在启停，请稍后再试"))?;
-        let _mutation = self.0.registry.mutation.lock();
-        for peer in self.0.registry.gateways() {
-            let state = peer.inner.lock();
-            for provider in &state.store.providers {
-                for url in Self::endpoint_urls(&state.store, provider) {
-                    model::base_url(&url, port)?;
-                }
-            }
-        }
-        self.0.registry.listener.set_port(port, expected)?;
-        self.0.registry.update_ports()?;
-        self.0.registry.changed();
-        self.try_listener_view()
-    }
-    #[cfg(test)]
-    pub fn view(&self) -> View {
-        self.try_view().expect("healthy test gateway")
-    }
-    #[cfg(test)]
-    pub fn listener_view(&self) -> ListenerView {
-        self.try_listener_view().expect("healthy test listener")
     }
     fn view_snapshot(&self) -> Result<(View, Option<PathBuf>, Store)> {
         let listener = self.0.registry.listener.view()?;
@@ -1675,10 +1651,6 @@ impl Gateway {
         self.0.registry.changed();
         self.try_view()
     }
-    #[cfg(test)]
-    pub async fn stop(&self) -> Result<View> {
-        self.stop_checked(None).await
-    }
     pub async fn stop_checked(&self, expected_config: Option<&str>) -> Result<View> {
         self.stop_internal(expected_config, false).await
     }
@@ -2167,21 +2139,6 @@ impl Gateway {
             .map(|p| p.id.clone())
             .collect()
     }
-    #[cfg(test)]
-    pub(crate) fn successful_user_agent(&self) -> Result<hyper::header::HeaderValue> {
-        self.request_state()
-            .store
-            .successful_user_agent
-            .as_deref()
-            .and_then(|raw| hyper::header::HeaderValue::from_bytes(raw).ok())
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                AppError::new(
-                    code::STATE,
-                    "请先通过该客户端完成一次正常请求，再运行供应商测试",
-                )
-            })
-    }
     fn remember_business_identity(&self, identity: testing::BusinessIdentity) {
         let raw = identity.user_agent.as_slice();
         if raw.is_empty() || raw.len() > 8192 {
@@ -2258,10 +2215,6 @@ impl Gateway {
             provider_circuit,
             model_circuits,
         })
-    }
-    #[cfg(test)]
-    fn remember(&self, id: &str, provider: &str) {
-        self.remember_model(id, provider, None);
     }
     fn remember_model(&self, id: &str, provider: &str, model: Option<&str>) {
         if id.is_empty() || id.len() > 1024 {

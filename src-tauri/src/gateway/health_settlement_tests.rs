@@ -102,7 +102,7 @@ fn http_json_sse_and_websocket_share_classification_scope_and_settlement() {
             let mut permits = permits(&route);
             let mut protocol = Protocol::new(transport != "json");
             if transport == "http" {
-                let (d, wait) = super::failure_policy::http(
+                let (d, wait) = super::failure_policy::test_support::http(
                     429,
                     &hyper::HeaderMap::new(),
                     event.to_string().as_bytes(),

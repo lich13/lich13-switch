@@ -26,15 +26,17 @@ fn daily_limit_reason_wins_over_429_capacity_and_stays_provider_scoped() {
         Some("DAILY_LIMIT_EXCEEDED")
     );
     assert_eq!(details.health_scope, Some(HealthScope::Provider));
-    assert!(!failure_policy::temporary_capacity_event(&json!({
-        "error": {
-            "type": "error",
-            "code": 429,
-            "reason": "DAILY_LIMIT_EXCEEDED",
-            "message": "model is at capacity"
-        }
-    })));
-    assert!(failure_policy::permanent_rejection(
+    assert!(!failure_policy::test_support::temporary_capacity_event(
+        &json!({
+            "error": {
+                "type": "error",
+                "code": 429,
+                "reason": "DAILY_LIMIT_EXCEEDED",
+                "message": "model is at capacity"
+            }
+        })
+    ));
+    assert!(failure_policy::test_support::permanent_rejection(
         br#"{"error":{"code":429,"reason":"DAILY_LIMIT_EXCEEDED"}}"#
     ));
 }
@@ -59,8 +61,10 @@ fn usage_limit_reason_remains_a_temporary_capacity_event() {
         Some("USAGE_LIMIT_EXCEEDED")
     );
     assert_eq!(details.health_scope, None);
-    assert!(failure_policy::temporary_capacity_event(&value));
-    assert!(!failure_policy::permanent_rejection(
+    assert!(failure_policy::test_support::temporary_capacity_event(
+        &value
+    ));
+    assert!(!failure_policy::test_support::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
@@ -95,7 +99,7 @@ fn wrapped_error_key_and_numeric_code_are_retained_without_opening_arbitrary_con
 #[test]
 fn text_error_extracts_code_and_keeps_the_complete_quoted_message() {
     let body = br#"error: code=429 reason="rate_limit_exceeded" message="fixture secret""#;
-    let details = failure_policy::details_http(body);
+    let details = failure_policy::test_support::details_http(body);
 
     assert_eq!(details.upstream_code.as_deref(), Some("429"));
     assert_eq!(
@@ -108,14 +112,14 @@ fn text_error_extracts_code_and_keeps_the_complete_quoted_message() {
 
 #[test]
 fn text_error_explicit_message_field_can_carry_the_daily_limit_reason() {
-    let details = failure_policy::details_http(
+    let details = failure_policy::test_support::details_http(
         br#"error: code=429 message="DAILY_LIMIT_EXCEEDED" detail="fixture""#,
     );
     assert_eq!(
         details.upstream_reason.as_deref(),
         Some("DAILY_LIMIT_EXCEEDED")
     );
-    assert!(failure_policy::permanent_rejection(
+    assert!(failure_policy::test_support::permanent_rejection(
         br#"error: code=429 message="DAILY_LIMIT_EXCEEDED""#
     ));
 }
@@ -134,7 +138,9 @@ fn successful_content_unknown_reason_and_user_text_never_become_upstream_reason(
         failure_policy::details_value(&success, false),
         Details::default()
     );
-    assert!(!failure_policy::temporary_capacity_event(&success));
+    assert!(!failure_policy::test_support::temporary_capacity_event(
+        &success
+    ));
 
     let unknown = failure_policy::details_value(
         &json!({
@@ -178,8 +184,10 @@ fn large_error_body_is_preserved_for_classification_and_logging() {
     body.extend_from_slice(b"\"");
 
     assert_eq!(
-        failure_policy::details_http(&body).message.as_deref(),
+        failure_policy::test_support::details_http(&body)
+            .message
+            .as_deref(),
         std::str::from_utf8(&body).ok()
     );
-    assert!(failure_policy::permanent_rejection(&body));
+    assert!(failure_policy::test_support::permanent_rejection(&body));
 }

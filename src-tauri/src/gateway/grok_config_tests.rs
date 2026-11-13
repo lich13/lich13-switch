@@ -63,7 +63,7 @@ fn parses_each_native_protocol_and_its_route() {
         let config = config_with_model_fields(&format!(
             "api_backend = \"{name}\"\nbase_url = \"https://api.example.invalid/v1\"\napi_key = \"fixture-api-key\""
         ));
-        let profile = grok_config::profile(&config).unwrap();
+        let profile = grok_config::test_support::profile(&config).unwrap();
 
         assert_eq!(profile.connection.protocol, expected, "{name}");
         assert!(profile.connection.protocol.accepts(route), "{name}");
@@ -93,7 +93,7 @@ fn inline_api_key_precedes_missing_env_keys_without_changing_process_environment
         "[models]\ndefault = \"grok-4.5\"\n\n[model.\"grok-4.5\"]\napi_key = \"fixture-inline-api-key\"\nenv_key = [{:?}, {:?}]\n",
         missing[0], missing[1]
     );
-    let profile = grok_config::profile(&config).unwrap();
+    let profile = grok_config::test_support::profile(&config).unwrap();
     assert_eq!(
         profile.pair.token.as_deref(),
         Some("fixture-inline-api-key")
@@ -108,7 +108,7 @@ fn inline_api_key_precedes_missing_env_keys_without_changing_process_environment
 
 #[test]
 fn shared_provider_is_resolved_and_snapshot_preserves_unowned_toml() {
-    let source_profile = grok_config::profile(SOURCE_CONFIG).unwrap();
+    let source_profile = grok_config::test_support::profile(SOURCE_CONFIG).unwrap();
     assert_eq!(
         source_profile.pair.base_url.as_deref(),
         Some("https://provider.example.invalid/v1")
@@ -264,7 +264,7 @@ fn shared_provider_is_resolved_and_snapshot_preserves_unowned_toml() {
         Some("fixture-shared-api-key")
     );
 
-    let managed_profile = grok_config::profile(&applied).unwrap();
+    let managed_profile = grok_config::test_support::profile(&applied).unwrap();
     assert_eq!(
         managed_profile.pair.base_url.as_deref(),
         Some("http://127.0.0.1:43127/v1")
@@ -333,7 +333,7 @@ fn restore_keeps_external_edits_outside_the_managed_selector_and_model() {
         .get("model")
         .and_then(|models| models.get(grok_config::MANAGED))
         .is_none());
-    let restored_profile = grok_config::profile(&restored).unwrap();
+    let restored_profile = grok_config::test_support::profile(&restored).unwrap();
     assert_eq!(
         restored_profile.pair.token.as_deref(),
         Some("fixture-original-key")
@@ -381,7 +381,7 @@ fn missing_config_does_not_guess_a_native_model_or_credentials() {
 #[test]
 fn rejects_mtls_and_transport_owned_headers() {
     let mtls = config_with_model_fields("mtls_cert_dir = \"/fixtures/client-cert\"");
-    let error = grok_config::profile(&mtls)
+    let error = grok_config::test_support::profile(&mtls)
         .err()
         .expect("mTLS configuration must be rejected");
     assert_eq!(error.code, "GROK_CONFIG");
@@ -400,7 +400,7 @@ fn rejects_mtls_and_transport_owned_headers() {
             "[models]\ndefault = \"grok-4.5\"\n\n[model.\"grok-4.5\"]\nextra_headers = {{ {:?} = \"fixture-value\" }}\n",
             header
         );
-        let error = grok_config::profile(&config)
+        let error = grok_config::test_support::profile(&config)
             .err()
             .unwrap_or_else(|| panic!("transport-owned header must be rejected: {header}"));
         assert_eq!(error.code, "GROK_CONFIG", "{header}");
@@ -512,7 +512,7 @@ fn persisted_snapshot_excludes_other_credentials_and_merges_current_config() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     fs::write(&path, SOURCE_CONFIG).unwrap();
-    let profile = grok_config::profile(SOURCE_CONFIG).unwrap();
+    let profile = grok_config::test_support::profile(SOURCE_CONFIG).unwrap();
     let snapshot = grok_config::Snapshot::api(
         SOURCE_CONFIG,
         &Pair::new("http://127.0.0.1:9", "fixture-local-token"),

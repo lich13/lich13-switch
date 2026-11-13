@@ -543,62 +543,6 @@ impl Registry {
             state.settled_version = state.save_version;
         }
     }
-    #[cfg(test)]
-    pub fn flush(&self) {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            {
-                let state = self.state.lock();
-                if state.settled_version == state.save_version {
-                    return;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < until,
-                "ownership write did not settle"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-    #[cfg(test)]
-    pub fn prepare(
-        self: &Arc<Self>,
-        session: String,
-        input: Option<&str>,
-        can_handoff: bool,
-        eligible: &[String],
-    ) -> Option<Arc<Lease>> {
-        // Fixture entry: every listed provider may receive a compaction handoff.
-        let queued: Vec<_> = eligible
-            .iter()
-            .map(|id| super::model::Provider {
-                id: id.clone(),
-                name: id.clone(),
-                base_url: String::new(),
-                token: String::new(),
-                queued: true,
-                version: String::new(),
-                max_concurrency: 0,
-                max_rpm: 0,
-                allowed_models: None,
-                handoff_after_compaction: true,
-                take_new_threads: false,
-                search_only: false,
-            })
-            .collect();
-        self.prepare_inner(
-            session,
-            input,
-            can_handoff,
-            eligible,
-            super::replay::TurnEvidence::Unknown,
-            RequestPolicy {
-                queued: &queued,
-                requirement: &super::routing::Requirement::Resource,
-                pinned: None,
-            },
-        )
-    }
     fn prepare_inner(
         self: &Arc<Self>,
         session: String,
@@ -749,23 +693,6 @@ impl Registry {
             routing_log: Mutex::new(None),
             usage: Mutex::new(None),
         }))
-    }
-    #[cfg(test)]
-    pub fn prepare_policy(
-        self: &Arc<Self>,
-        session: String,
-        hints: Option<&super::replay::RequestHints>,
-        can_handoff: bool,
-        eligible: &[super::model::Provider],
-    ) -> Option<Arc<Lease>> {
-        self.prepare_request(
-            session,
-            hints,
-            can_handoff,
-            eligible,
-            &super::routing::Requirement::Resource,
-            None,
-        )
     }
     pub fn prepare_request(
         self: &Arc<Self>,
@@ -1171,13 +1098,6 @@ impl Lease {
                 .get(&self.session)
                 .is_some_and(|entry| !entry.establishing && entry.provider == provider)
     }
-    /// The first actual admission, not the first successful response, establishes
-    /// ownership. Competing first requests release their slot and recheck it.
-    #[cfg(test)]
-    pub fn admitted(&self, provider: &str) -> bool {
-        let mut state = self.registry.state.lock();
-        self.admit_locked(&mut state, provider)
-    }
     /// Recheck the live queue and identity while both snapshots are locked.
     /// A changed model policy cannot turn a pending writable lease into an
     /// implicit transfer. Reject that stale admission before sending any bytes;
@@ -1276,6 +1196,8 @@ impl Lease {
         }
         Ok(self.admit_locked(&mut state, &provider.id))
     }
+    /// The first actual admission, not the first successful response, establishes
+    /// ownership. Competing first requests release their slot and recheck it.
     fn admit_locked(&self, state: &mut State, provider: &str) -> bool {
         use std::sync::atomic::Ordering;
         if self.request_only {
@@ -1315,10 +1237,6 @@ impl Lease {
             self.registry.save(state, true);
         }
         state.error.is_none()
-    }
-    #[cfg(test)]
-    pub fn candidates(&self, routes: Vec<super::Route>) -> Vec<super::Route> {
-        self.candidates_for(routes, &super::routing::Requirement::Unknown)
     }
     pub fn candidates_for(
         &self,
@@ -1605,6 +1523,87 @@ impl Drop for Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    impl Registry {
+        pub fn flush(&self) {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                {
+                    let state = self.state.lock();
+                    if state.settled_version == state.save_version {
+                        return;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < until,
+                    "ownership write did not settle"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        pub fn prepare(
+            self: &Arc<Self>,
+            session: String,
+            input: Option<&str>,
+            can_handoff: bool,
+            eligible: &[String],
+        ) -> Option<Arc<Lease>> {
+            // Fixture entry: every listed provider may receive a compaction handoff.
+            let queued: Vec<_> = eligible
+                .iter()
+                .map(|id| super::super::model::Provider {
+                    id: id.clone(),
+                    name: id.clone(),
+                    base_url: String::new(),
+                    token: String::new(),
+                    queued: true,
+                    version: String::new(),
+                    max_concurrency: 0,
+                    max_rpm: 0,
+                    allowed_models: None,
+                    handoff_after_compaction: true,
+                    take_new_threads: false,
+                    search_only: false,
+                })
+                .collect();
+            self.prepare_inner(
+                session,
+                input,
+                can_handoff,
+                eligible,
+                super::super::replay::TurnEvidence::Unknown,
+                RequestPolicy {
+                    queued: &queued,
+                    requirement: &super::super::routing::Requirement::Resource,
+                    pinned: None,
+                },
+            )
+        }
+        pub fn prepare_policy(
+            self: &Arc<Self>,
+            session: String,
+            hints: Option<&super::super::replay::RequestHints>,
+            can_handoff: bool,
+            eligible: &[super::super::model::Provider],
+        ) -> Option<Arc<Lease>> {
+            self.prepare_request(
+                session,
+                hints,
+                can_handoff,
+                eligible,
+                &super::super::routing::Requirement::Resource,
+                None,
+            )
+        }
+    }
+    impl Lease {
+        pub fn admitted(&self, provider: &str) -> bool {
+            let mut state = self.registry.state.lock();
+            self.admit_locked(&mut state, provider)
+        }
+        pub fn candidates(&self, routes: Vec<super::super::Route>) -> Vec<super::super::Route> {
+            self.candidates_for(routes, &super::super::routing::Requirement::Unknown)
+        }
+    }
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).into()).collect()
     }

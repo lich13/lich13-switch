@@ -39,7 +39,7 @@ fn daily_usage_limit_is_permanent_for_403_and_429_and_retains_reason_code() {
         );
         assert_eq!(details.error_basis, Some(ErrorBasis::QuotaExhausted));
         assert_eq!(details.health_scope, Some(HealthScope::Provider));
-        assert!(failure_policy::permanent_rejection(
+        assert!(failure_policy::test_support::permanent_rejection(
             value.to_string().as_bytes()
         ));
     }
@@ -54,7 +54,7 @@ fn daily_quota_exhausted_message_is_permanent_without_promoting_free_form_text()
     assert_eq!(details.upstream_reason, None);
     assert_eq!(details.error_basis, Some(ErrorBasis::QuotaExhausted));
     assert_eq!(details.health_scope, Some(HealthScope::Provider));
-    assert!(failure_policy::permanent_rejection(
+    assert!(failure_policy::test_support::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
@@ -97,7 +97,7 @@ fn daily_weekly_and_monthly_quota_reasons_messages_and_chinese_are_permanent() {
             "{message}"
         );
         assert!(
-            failure_policy::permanent_rejection(value.to_string().as_bytes()),
+            failure_policy::test_support::permanent_rejection(value.to_string().as_bytes()),
             "{message}"
         );
         if let Some(reason) = reason {
@@ -124,8 +124,10 @@ fn usage_limit_exceeded_stays_temporary_and_preserves_its_reason_code() {
     );
     assert_eq!(details.error_basis, Some(ErrorBasis::UsageLimit));
     assert_eq!(details.health_scope, None);
-    assert!(failure_policy::temporary_capacity_event(&value));
-    assert!(!failure_policy::permanent_rejection(
+    assert!(failure_policy::test_support::temporary_capacity_event(
+        &value
+    ));
+    assert!(!failure_policy::test_support::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
@@ -147,7 +149,7 @@ fn negative_and_descriptive_daily_quota_text_does_not_become_permanent() {
         );
         assert_eq!(details.health_scope, None, "{message}");
         assert!(
-            !failure_policy::permanent_rejection(value.to_string().as_bytes()),
+            !failure_policy::test_support::permanent_rejection(value.to_string().as_bytes()),
             "{message}"
         );
     }
@@ -168,8 +170,10 @@ fn successful_content_never_classifies_embedded_quota_text() {
         failure_policy::details_value(&value, false),
         Details::default()
     );
-    assert!(!failure_policy::temporary_capacity_event(&value));
-    assert!(!failure_policy::permanent_rejection(
+    assert!(!failure_policy::test_support::temporary_capacity_event(
+        &value
+    ));
+    assert!(!failure_policy::test_support::permanent_rejection(
         value.to_string().as_bytes()
     ));
 }
@@ -183,7 +187,7 @@ fn error_text_is_classified_and_preserved_without_content_redaction() {
     assert_eq!(details.message.as_deref(), Some(message));
     let message = format!("{} daily quota exhausted", "fixture ".repeat(20000));
     let bytes = serde_json::to_vec(&json!({"error":{"code":429,"message":message}})).unwrap();
-    let details = failure_policy::details_http(&bytes);
+    let details = failure_policy::test_support::details_http(&bytes);
     assert_eq!(details.message.as_deref(), Some(message.as_str()));
     assert_eq!(details.error_basis, Some(ErrorBasis::QuotaExhausted));
 }
@@ -238,7 +242,7 @@ fn retry_after_accepts_decimal_and_http_date_without_rounding_ahead_of_the_deadl
         "code":"rate_limit_exceeded","retry_after_seconds":1.25,
         "resets_in_seconds":"2.5"}});
     assert_eq!(
-        failure_policy::retry_after_value(&event),
+        failure_policy::test_support::retry_after_value(&event),
         Some(Duration::from_millis(2500))
     );
 }

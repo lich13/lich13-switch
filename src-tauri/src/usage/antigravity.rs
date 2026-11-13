@@ -618,14 +618,6 @@ impl Steps {
         indices.iter().filter_map(|i| self.times.get(i)).collect()
     }
 }
-#[cfg(test)]
-impl From<&[Value]> for Steps {
-    fn from(values: &[Value]) -> Self {
-        let mut result = Self::default();
-        result.extend(0, values);
-        result
-    }
-}
 fn tokens(u: &Value) -> Tokens {
     Tokens {
         input: number(&u["inputTokens"]),
@@ -1067,23 +1059,6 @@ thread_local! {
     static TEST_ENDPOINT: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 impl Api {
-    #[cfg(test)]
-    fn from_single(http: reqwest::Client, origin: String, token: String) -> Self {
-        Self {
-            http,
-            endpoints: vec![Endpoint { origin, token }],
-        }
-    }
-    #[cfg(test)]
-    fn from_endpoints(http: reqwest::Client, endpoints: Vec<(String, String)>) -> Self {
-        Self {
-            http,
-            endpoints: endpoints
-                .into_iter()
-                .map(|(origin, token)| Endpoint { origin, token })
-                .collect(),
-        }
-    }
     async fn bytes(request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
         let mut response = request
             .send()
@@ -2415,6 +2390,33 @@ impl UsageStatsAggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    impl From<&[Value]> for Steps {
+        fn from(values: &[Value]) -> Self {
+            let mut result = Self::default();
+            result.extend(0, values);
+            result
+        }
+    }
+    impl Api {
+        pub(super) fn from_single(http: reqwest::Client, origin: String, token: String) -> Self {
+            Self {
+                http,
+                endpoints: vec![Endpoint { origin, token }],
+            }
+        }
+        pub(super) fn from_endpoints(
+            http: reqwest::Client,
+            endpoints: Vec<(String, String)>,
+        ) -> Self {
+            Self {
+                http,
+                endpoints: endpoints
+                    .into_iter()
+                    .map(|(origin, token)| Endpoint { origin, token })
+                    .collect(),
+            }
+        }
+    }
     #[test]
     fn shared_execution_keeps_requests_separate_and_final_mirror_is_not_a_retry() {
         let steps = json!([{"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","finishedGeneratingAt":"2026-01-01T00:00:03Z"}}]);

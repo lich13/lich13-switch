@@ -773,7 +773,9 @@ async fn grok_initial_discovery_is_read_only_and_manual_connection_survives_reop
     let home = dir.path().join("grok-home");
     std::fs::create_dir_all(&home).unwrap();
     let official_config = native_config("https://fixture-native.example.invalid/v1");
-    let official_connection = grok_config::profile(&official_config).unwrap().connection;
+    let official_connection = grok_config::test_support::profile(&official_config)
+        .unwrap()
+        .connection;
     assert_eq!(official_connection.protocol, Protocol::Responses);
     assert!(!official_connection.headers.is_empty());
     assert!(!official_connection.query.is_empty());

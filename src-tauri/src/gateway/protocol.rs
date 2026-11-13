@@ -1332,12 +1332,6 @@ impl Protocol {
         let expected = "selected model is at capacity. please try a different model.";
         expected.starts_with(&text) || super::failure_policy::bare_capacity(&text)
     }
-    #[cfg(test)]
-    pub fn value(&mut self, value: &Value) {
-        self.observation.value(value);
-        self.terminal_received |= self.observation.terminal.is_some();
-        self.record_usage();
-    }
     pub fn value_raw(&mut self, value: &Value, bytes: &[u8]) {
         let sequence = self.observation.fault_sequence;
         self.observation.value_projected(value, false);
@@ -1913,5 +1907,17 @@ fn gemini_terminal(value: &Value) -> Option<Terminal> {
         Some(Terminal::Failure)
     } else {
         Some(Terminal::Rejected)
+    }
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    impl Protocol {
+        pub fn value(&mut self, value: &Value) {
+            self.observation.value(value);
+            self.terminal_received |= self.observation.terminal.is_some();
+            self.record_usage();
+        }
     }
 }

@@ -1343,10 +1343,12 @@ fn v12_antigravity_reasoning_survives_compaction_and_old_snapshots() {
         .unwrap();
     let reasoning = |store: &Store| {
         let mut values = Vec::new();
-        super::storage_v12::scan_antigravity_attempts(
+        super::storage_v12::scan_client_attempts(
             &store.connection,
+            "antigravity",
             BASE,
             BASE + 1000,
+            None,
             |attempt| {
                 values.push(attempt.tokens.reasoning);
                 Ok(())

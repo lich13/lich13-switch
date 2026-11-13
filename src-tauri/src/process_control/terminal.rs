@@ -188,10 +188,6 @@ pub(super) fn capture(entries: &[&Entry], inventory: &[Entry]) -> Vec<Captured> 
 }
 
 impl Captured {
-    #[cfg(test)]
-    pub(super) fn cleanup(self) -> bool {
-        self.cleanup_until(std::time::Instant::now() + super::EXIT_CONFIRMATION)
-    }
     pub(super) fn cleanup_until(self, deadline: std::time::Instant) -> bool {
         let Some(mut tty) = self.0 else {
             return false;

@@ -17,6 +17,12 @@ use std::{
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tempfile::TempDir;
 
+impl Captured {
+    fn cleanup(self) -> bool {
+        self.cleanup_until(std::time::Instant::now() + super::super::EXIT_CONFIRMATION)
+    }
+}
+
 const ENABLE_REPORTING: &[u8] =
     b"\x1b[?9h\x1b[?1000h\x1b[?1001h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1005h\x1b[?1006h\x1b[?1015h\x1b[?1016h";
 const READY_MARKER: &[u8] = b"__PTY_FIXTURE_READY__";

@@ -401,11 +401,11 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
         chinese_balance.as_slice(),
     ] {
         assert!(
-            super::failure_policy::permanent_rejection(body),
+            super::failure_policy::test_support::permanent_rejection(body),
             "expected explicit balance or key marker in {:?}",
             std::str::from_utf8(body).unwrap()
         );
-        let details = super::failure_policy::details_http(body);
+        let details = super::failure_policy::test_support::details_http(body);
         assert_eq!(
             details.health_scope,
             Some(crate::events::HealthScope::Provider)
@@ -417,11 +417,11 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
         br#"{"errorKey":"USAGE_LIMIT_EXCEEDED","errorMessage":"fixture quota"}"#.as_slice(),
     ] {
         assert!(
-            !super::failure_policy::permanent_rejection(body),
+            !super::failure_policy::test_support::permanent_rejection(body),
             "usage-limit marker should remain temporary: {:?}",
             std::str::from_utf8(body).unwrap()
         );
-        let details = super::failure_policy::details_http(body);
+        let details = super::failure_policy::test_support::details_http(body);
         assert_eq!(details.health_scope, None);
         assert_eq!(
             details.upstream_code.as_deref(),
@@ -429,8 +429,8 @@ fn v022_permanent_429_markers_are_provider_scope_and_usage_limit_stays_temporary
         );
     }
 
-    let temporary = super::failure_policy::details_http(V022_TEMPORARY_429);
-    assert!(!super::failure_policy::permanent_rejection(
+    let temporary = super::failure_policy::test_support::details_http(V022_TEMPORARY_429);
+    assert!(!super::failure_policy::test_support::permanent_rejection(
         V022_TEMPORARY_429
     ));
     assert_eq!(temporary.health_scope, None);

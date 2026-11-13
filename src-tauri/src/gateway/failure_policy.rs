@@ -13,6 +13,8 @@ pub(super) struct Decision {
     pub reason: Reason,
 }
 
+/// Explicit billing/account denials cannot recover by retrying every minute.
+/// Status 429 alone is deliberately insufficient to classify a permanent denial.
 pub(super) fn hard_rejection(d: &Details) -> bool {
     matches!(
         d.error_basis,
@@ -451,14 +453,6 @@ fn classification(error: &Value) -> (Option<ErrorBasis>, Option<HealthScope>) {
     (basis, scope)
 }
 
-#[cfg(test)]
-pub(super) fn http(
-    status: u16,
-    headers: &hyper::HeaderMap,
-    body: &[u8],
-) -> (Details, Option<Duration>) {
-    http_with_rules(status, headers, body, &[])
-}
 pub(super) fn http_with_rules(
     status: u16,
     headers: &hyper::HeaderMap,
@@ -892,16 +886,8 @@ pub fn model_error(value: &Value) -> bool {
     envelope(value, false, 0)
         .is_some_and(|e| classification(e).0 == Some(ErrorBasis::ModelUnavailable))
 }
-#[cfg(test)]
-pub fn temporary_capacity_event(value: &Value) -> bool {
-    temporary(&details_value(value, false))
-}
 /// Explicit retry/reset fields from an error envelope. Free-form text
 /// and successful response content are never interpreted as timing evidence.
-#[cfg(test)]
-pub(super) fn retry_after_value(value: &Value) -> Option<std::time::Duration> {
-    retry_after_fields(envelope(value, false, 0)?)
-}
 fn retry_after_fields(error: &Value) -> Option<std::time::Duration> {
     let number = |v: &Value| v.as_u64().or_else(|| v.as_str()?.parse().ok());
     let relative = ["retry_after", "retry_after_seconds", "resets_in_seconds"]
@@ -942,11 +928,6 @@ fn retry_after_fields(error: &Value) -> Option<std::time::Duration> {
         .filter_map(duration_value)
         .max();
     relative.max(absolute.map(Duration::from_secs)).max(nested)
-}
-#[cfg(test)]
-pub(super) fn retry_after_http(bytes: &[u8]) -> Option<std::time::Duration> {
-    let value = serde_json::from_slice::<Value>(bytes).ok()?;
-    retry_after_fields(envelope(&value, true, 0)?)
 }
 pub fn model_http(status: u16, bytes: &[u8]) -> bool {
     if status < 400 {
@@ -995,22 +976,6 @@ pub fn details_value(value: &Value, http_error: bool) -> Details {
         ..Details::default()
     }
     .sanitized()
-}
-#[cfg(test)]
-pub fn details_http(bytes: &[u8]) -> Details {
-    match serde_json::from_slice::<Value>(bytes) {
-        Ok(v) => details_value(&v, true),
-        Err(_) => std::str::from_utf8(bytes).map_or_else(
-            |_| Details::default(),
-            |text| details_value(&Value::String(text.into()), true),
-        ),
-    }
-}
-/// Explicit billing/account denials cannot recover by retrying every minute.
-/// Status 429 alone is deliberately insufficient to classify a permanent denial.
-#[cfg(test)]
-pub(super) fn permanent_rejection(body: &[u8]) -> bool {
-    hard_rejection(&details_http(body))
 }
 
 fn hard_message(text: &str) -> bool {
@@ -1214,4 +1179,38 @@ pub(super) fn details_with_rules(value: &Value, rules: &[super::failure_rules::R
         details.error_basis.get_or_insert(ErrorBasis::ServiceError);
     }
     details
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    use super::*;
+    pub fn http(
+        status: u16,
+        headers: &hyper::HeaderMap,
+        body: &[u8],
+    ) -> (Details, Option<Duration>) {
+        http_with_rules(status, headers, body, &[])
+    }
+    pub fn temporary_capacity_event(value: &Value) -> bool {
+        temporary(&details_value(value, false))
+    }
+    pub fn retry_after_value(value: &Value) -> Option<std::time::Duration> {
+        retry_after_fields(envelope(value, false, 0)?)
+    }
+    pub fn retry_after_http(bytes: &[u8]) -> Option<std::time::Duration> {
+        let value = serde_json::from_slice::<Value>(bytes).ok()?;
+        retry_after_fields(envelope(&value, true, 0)?)
+    }
+    pub fn details_http(bytes: &[u8]) -> Details {
+        match serde_json::from_slice::<Value>(bytes) {
+            Ok(v) => details_value(&v, true),
+            Err(_) => std::str::from_utf8(bytes).map_or_else(
+                |_| Details::default(),
+                |text| details_value(&Value::String(text.into()), true),
+            ),
+        }
+    }
+    pub fn permanent_rejection(body: &[u8]) -> bool {
+        hard_rejection(&details_http(body))
+    }
 }

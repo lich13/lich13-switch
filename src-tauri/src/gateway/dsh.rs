@@ -16,8 +16,6 @@ pub mod models;
 pub mod official;
 mod selection;
 pub use models::ModelMapping;
-#[cfg(test)]
-pub use selection::current;
 pub use selection::{status, ProfileCurrent};
 mod batch;
 pub mod editor;
@@ -531,28 +529,6 @@ fn credentials(raw: Option<&str>) -> Result<Document> {
         return Err(error("DSH 凭据文件版本不支持，请通过 DSH 升级"));
     }
     Ok(doc)
-}
-#[cfg(test)]
-fn prepare(
-    input: &mut Input,
-    options: Options,
-    token: &str,
-    port: u16,
-    models: &[serde_json::Value],
-    previous: Option<&Snapshot>,
-) -> Result<Snapshot> {
-    prepare_shared(
-        input,
-        options,
-        token,
-        &super::model::Settings {
-            port,
-            ..Default::default()
-        },
-        models,
-        previous,
-        previous,
-    )
 }
 fn prepare_shared(
     input: &mut Input,
@@ -1199,22 +1175,6 @@ impl Gateway {
             },
         })
     }
-    #[cfg(test)]
-    pub async fn attach_dsh(
-        &self,
-        home: &Path,
-        options: Options,
-        expected: &str,
-        preview: Option<&str>,
-    ) -> Result<View> {
-        if self.0.client != ClientId::Dsh {
-            return Err(error("此操作仅适用于 DSH"));
-        }
-        let _listener = self.0.registry.lifecycle.lock().await;
-        let _lifecycle = self.0.lifecycle.lock().await;
-        self.attach_dsh_locked(home, options, expected, preview, true)
-            .await
-    }
     async fn attach_dsh_locked(
         &self,
         home: &Path,
@@ -1592,6 +1552,52 @@ fn import_selection(
 mod tests {
     use super::*;
     use std::fs;
+    pub(super) fn prepare(
+        input: &mut Input,
+        options: Options,
+        token: &str,
+        port: u16,
+        models: &[serde_json::Value],
+        previous: Option<&Snapshot>,
+    ) -> Result<Snapshot> {
+        prepare_shared(
+            input,
+            options,
+            token,
+            &super::super::model::Settings {
+                port,
+                ..Default::default()
+            },
+            models,
+            previous,
+            previous,
+        )
+    }
+    pub(super) fn current(
+        home: &Path,
+        store: &crate::gateway::model::Store,
+        ports: &[u16],
+        resolve: &impl Fn(&str) -> Option<String>,
+    ) -> crate::gateway::current::Current {
+        status(home, store, ports, resolve).0
+    }
+    impl Gateway {
+        pub async fn attach_dsh(
+            &self,
+            home: &Path,
+            options: Options,
+            expected: &str,
+            preview: Option<&str>,
+        ) -> Result<View> {
+            if self.0.client != ClientId::Dsh {
+                return Err(error("此操作仅适用于 DSH"));
+            }
+            let _listener = self.0.registry.lifecycle.lock().await;
+            let _lifecycle = self.0.lifecycle.lock().await;
+            self.attach_dsh_locked(home, options, expected, preview, true)
+                .await
+        }
+    }
     const PATCH_TEXT: &str = "# profile comment\n- id: unrelated\n  config:\n    callback: !!js process.cwd() # keep tag\n- id: llm-pi-ai\n  config:\n    extra: keep\n    providers:\n      existing:\n        api: openai-completions\n        baseURL: https://example.invalid/v1 # keep endpoint\n        models: [{id: existing-model}]\n";
     pub(super) fn fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

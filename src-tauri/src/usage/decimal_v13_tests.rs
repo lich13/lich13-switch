@@ -154,13 +154,13 @@ fn legacy_encoders_keep_their_existing_bytes() {
     let mut old_decimal = vec![5];
     old_decimal.extend_from_slice(&decimal.as_number().unwrap().as_f64().unwrap().to_le_bytes());
     assert_eq!(body_wire::encode(&decimal), old_decimal);
-    assert_eq!(body_wire::encode_v12(&decimal), old_decimal);
+    assert_eq!(body_wire::tests::encode_v12(&decimal), old_decimal);
     assert_ne!(body_wire::decode(&old_decimal).unwrap(), decimal);
 
     let uuid = Value::String("00000000-0000-4000-8000-000000000000".into());
     let mut v12_uuid = vec![10];
     v12_uuid.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(body_wire::encode_v12(&uuid), v12_uuid);
+    assert_eq!(body_wire::tests::encode_v12(&uuid), v12_uuid);
     assert_eq!(
         body_wire::encode(&uuid),
         [6, 36]
@@ -282,7 +282,7 @@ fn replace_price_shape_with_v12(path: &Path) -> bool {
         if !has_price_basis(&value) {
             continue;
         }
-        let legacy = body_wire::encode_v12(&value);
+        let legacy = body_wire::tests::encode_v12(&value);
         let mut replacement = Sha256::digest(&legacy).to_vec();
         replacement.extend(legacy);
         c.execute(

@@ -590,10 +590,6 @@ impl Service {
         let _ = self.0.events.send(());
         Ok(view)
     }
-    #[cfg(test)]
-    pub fn begin(&self, client: &str, model: Option<&str>) -> Trace {
-        self.begin_operation(client, model, Operation::Model)
-    }
     pub fn begin_operation(
         &self,
         client: &str,
@@ -1060,3 +1056,13 @@ mod tests;
 mod metering_v02514_tests;
 #[cfg(test)]
 mod settings_tests;
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    impl Service {
+        pub fn begin(&self, client: &str, model: Option<&str>) -> Trace {
+            self.begin_operation(client, model, Operation::Model)
+        }
+    }
+}

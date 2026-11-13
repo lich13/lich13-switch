@@ -18,8 +18,6 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
-#[cfg(test)]
-const LIMIT: usize = 2 * 1024 * 1024;
 const UNAVAILABLE: &str = "模型缓存不可用，可手动刷新";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -462,6 +460,7 @@ mod v02514_tests {
         ClientId, Gateway,
     };
     use super::*;
+    const LIMIT: usize = 2 * 1024 * 1024;
     #[test]
     fn deleting_provider_evicts_all_versions_and_late_stale_query_cannot_keep_an_entry() {
         let dir = tempfile::tempdir().unwrap();

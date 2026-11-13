@@ -458,12 +458,6 @@ impl Store {
     }
     /// The exact set is selected while holding the writer lock. Each transaction
     /// accounts and deletes the same bounded set; no global age-based deletion.
-    #[cfg(test)]
-    pub(super) fn archive_batch(&mut self, ids: &[String]) -> Result<()> {
-        let tx = db(self.connection.transaction())?;
-        Self::archive_into(&tx, ids)?;
-        db(tx.commit())
-    }
     fn archive_into(tx: &rusqlite::Transaction<'_>, ids: &[String]) -> Result<()> {
         db(tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS archive_ids(id TEXT PRIMARY KEY,rid INTEGER); DELETE FROM archive_ids;"))?;
         let mut selected = db(tx.prepare_cached(
@@ -637,13 +631,6 @@ impl Store {
             query::changed(&tx)?;
         }
         db(tx.commit())?;
-        Ok(())
-    }
-    #[cfg(test)]
-    pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {
-        let prices = pricing.frozen();
-        let mut cursor = BackfillCursor::default();
-        while self.backfill_batch(&prices, &mut cursor)? {}
         Ok(())
     }
     pub(super) fn backfill_batch(
@@ -865,22 +852,6 @@ impl Store {
         query::changed(&tx)?;
         db(tx.commit())
     }
-    #[cfg(test)]
-    pub fn rebuild(
-        &mut self,
-        source: &str,
-        records: &[Record],
-        cursors: &[(String, String)],
-    ) -> Result<()> {
-        self.begin_rebuild(source)?;
-        for batch in records.chunks(2000) {
-            self.stage_rebuild(source, batch, None)?;
-        }
-        for (id, body) in cursors {
-            self.stage_rebuild(source, &[], Some((id, body)))?;
-        }
-        self.finish_rebuild(source)
-    }
 }
 fn insert(tx: &rusqlite::Transaction<'_>, incoming: &Record) -> Result<bool> {
     if db(tx.query_row(
@@ -989,3 +960,36 @@ pub(super) fn preserve_record(incoming: &Record, existing: Option<Record>) -> Re
 #[cfg(test)]
 #[path = "query_plan_tests.rs"]
 mod query_plan_tests;
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    impl Store {
+        pub(in crate::usage) fn archive_batch(&mut self, ids: &[String]) -> Result<()> {
+            let tx = db(self.connection.transaction())?;
+            Self::archive_into(&tx, ids)?;
+            db(tx.commit())
+        }
+        pub fn backfill(&mut self, pricing: &Pricing) -> Result<()> {
+            let prices = pricing.frozen();
+            let mut cursor = BackfillCursor::default();
+            while self.backfill_batch(&prices, &mut cursor)? {}
+            Ok(())
+        }
+        pub fn rebuild(
+            &mut self,
+            source: &str,
+            records: &[Record],
+            cursors: &[(String, String)],
+        ) -> Result<()> {
+            self.begin_rebuild(source)?;
+            for batch in records.chunks(2000) {
+                self.stage_rebuild(source, batch, None)?;
+            }
+            for (id, body) in cursors {
+                self.stage_rebuild(source, &[], Some((id, body)))?;
+            }
+            self.finish_rebuild(source)
+        }
+    }
+}

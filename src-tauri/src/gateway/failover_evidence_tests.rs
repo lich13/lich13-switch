@@ -37,7 +37,7 @@ fn failure_event(field: &str, value: Value) -> Value {
 fn retry_after_reads_explicit_relative_and_absolute_fields() {
     for field in ["retry_after", "retry_after_seconds", "resets_in_seconds"] {
         assert_eq!(
-            failure_policy::retry_after_value(&failure_event(field, json!(9))),
+            failure_policy::test_support::retry_after_value(&failure_event(field, json!(9))),
             Some(Duration::from_secs(9)),
             "field {field}"
         );
@@ -45,18 +45,22 @@ fn retry_after_reads_explicit_relative_and_absolute_fields() {
 
     let future = chrono::Utc::now().timestamp().max(0) as u64 + 120;
     for field in ["resets_at", "reset_at", "reset_at_unix"] {
-        let seconds = failure_policy::retry_after_value(&failure_event(field, json!(future)))
-            .expect("explicit reset field was ignored")
-            .as_secs();
+        let seconds =
+            failure_policy::test_support::retry_after_value(&failure_event(field, json!(future)))
+                .expect("explicit reset field was ignored")
+                .as_secs();
         assert!((119..=120).contains(&seconds), "field {field}: {seconds}");
     }
 
     let rfc3339 = chrono::DateTime::<chrono::Utc>::from_timestamp(future as i64, 0)
         .unwrap()
         .to_rfc3339();
-    let seconds = failure_policy::retry_after_value(&failure_event("resets_at", json!(rfc3339)))
-        .expect("RFC3339 reset timestamp was ignored")
-        .as_secs();
+    let seconds = failure_policy::test_support::retry_after_value(&failure_event(
+        "resets_at",
+        json!(rfc3339),
+    ))
+    .expect("RFC3339 reset timestamp was ignored")
+    .as_secs();
     assert!((119..=120).contains(&seconds), "RFC3339: {seconds}");
 }
 
@@ -72,21 +76,24 @@ fn retry_after_ignores_negative_unstructured_and_invalid_timestamps() {
             "message": "fixture retry_after=300"
         }
     });
-    assert_eq!(failure_policy::retry_after_value(&negative), None);
+    assert_eq!(
+        failure_policy::test_support::retry_after_value(&negative),
+        None
+    );
 
     let huge = failure_event("reset_at_unix", json!(u64::MAX));
-    assert_eq!(failure_policy::retry_after_value(&huge), None);
+    assert_eq!(failure_policy::test_support::retry_after_value(&huge), None);
 
     let http_body = br#"{"error":{"code":"rate_limit_exceeded","retry_after_seconds":"17"}}"#;
     assert_eq!(
-        failure_policy::retry_after_http(http_body),
+        failure_policy::test_support::retry_after_http(http_body),
         Some(Duration::from_secs(17))
     );
 
     let mut oversized = br#"{"error":{"code":"rate_limit_exceeded","retry_after":17}}"#.to_vec();
     oversized.resize(MAX_RETRY_BODY + 1, b' ');
     assert_eq!(
-        failure_policy::retry_after_http(&oversized),
+        failure_policy::test_support::retry_after_http(&oversized),
         Some(Duration::from_secs(17))
     );
 }
@@ -100,9 +107,15 @@ fn completed_responses_and_success_payload_text_do_not_supply_retry_timing() {
             "output": [{"type": "message", "text": "fixture retry_after=86400"}]
         }
     });
-    assert_eq!(failure_policy::retry_after_value(&completed), None);
+    assert_eq!(
+        failure_policy::test_support::retry_after_value(&completed),
+        None
+    );
 
     let success_body =
         br#"{"id":"fixture-response","status":"completed","output":[{"retry_after":86400}]}"#;
-    assert_eq!(failure_policy::retry_after_http(success_body), None);
+    assert_eq!(
+        failure_policy::test_support::retry_after_http(success_body),
+        None
+    );
 }

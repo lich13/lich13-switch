@@ -394,20 +394,3 @@ impl Gateway {
         Ok(())
     }
 }
-#[cfg(test)]
-impl Gateway {
-    pub(crate) fn test_usage(&self) -> crate::usage::Service {
-        self.0.usage.lock().clone().unwrap()
-    }
-    pub(crate) fn remember_test_user_agent(&self, raw: &[u8]) {
-        self.remember_business_identity(BusinessIdentity {
-            user_agent: raw.to_vec(),
-            codex: None,
-        });
-    }
-    pub(crate) fn remember_test_identity(&self, headers: &HeaderMap) {
-        if let Some(identity) = self.business_identity(headers) {
-            self.remember_business_identity(identity);
-        }
-    }
-}

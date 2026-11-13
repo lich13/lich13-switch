@@ -1,8 +1,6 @@
 //! Read effective selection without applying takeover-specific restrictions.
 use super::{grok_config, grok_layers, model::Store, takeover::Pair, ClientId};
 use serde::Serialize;
-#[cfg(test)]
-use std::path::Path;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Kind {
@@ -115,19 +113,6 @@ pub(super) fn pair(client: ClientId, pair: &Pair, store: &Store, ports: &[u16]) 
         .unwrap_or_default();
     Current::new(Kind::Unmatched { host })
 }
-#[cfg(test)]
-pub fn grok(
-    home: &Path,
-    store: &Store,
-    ports: &[u16],
-    resolve: &impl Fn(&str) -> Option<String>,
-) -> Current {
-    let effective = match grok_layers::read(home, resolve) {
-        Ok(value) => value,
-        Err(e) => return Current::unknown(&e.message),
-    };
-    grok_effective(&effective, store, ports, resolve)
-}
 pub(super) fn grok_effective(
     effective: &grok_layers::Effective,
     store: &Store,
@@ -193,8 +178,21 @@ pub(super) fn grok_effective(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+    use std::path::Path;
+    pub fn grok(
+        home: &Path,
+        store: &Store,
+        ports: &[u16],
+        resolve: &impl Fn(&str) -> Option<String>,
+    ) -> Current {
+        let effective = match grok_layers::read_with_environment(home, true, resolve) {
+            Ok(value) => value,
+            Err(e) => return Current::unknown(&e.message),
+        };
+        grok_effective(&effective, store, ports, resolve)
+    }
     #[test]
     fn selected_model_env_and_requirements_are_distinct_from_takeover() {
         let root = tempfile::tempdir().unwrap();

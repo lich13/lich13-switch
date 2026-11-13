@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     events::{Action, Reason, RoutingOutcome},
     gateway::{diagnostic_test_support::assert_no_interruptions_after_barrier, protocol::Protocol},
+    usage::model::BoundaryState,
 };
 
 #[tokio::test]

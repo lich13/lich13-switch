@@ -1,3 +1,4 @@
+use super::tests::{current, prepare};
 use super::*;
 use crate::gateway::{
     current::{Kind, Match},
@@ -167,7 +168,7 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
             ..
         }
     ));
-    let selected = super::current(home.path(), &store, &[43721], &|name| {
+    let selected = super::tests::current(home.path(), &store, &[43721], &|name| {
         (name == "FIXTURE_KEY").then(|| "wrong-environment".into())
     });
     assert!(matches!(
@@ -187,12 +188,12 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
         "- id: agent-default-model\n  config: {provider: deepseek-official, model: native}\n",
     )
     .unwrap();
-    let official = super::current(home.path(), &store, &[43721], &|_| None);
+    let official = super::tests::current(home.path(), &store, &[43721], &|_| None);
     assert_eq!(official.state, Kind::Official);
     assert!(official.warning.unwrap().contains("home patch"));
     fs::write(home.path().join(PATCH), "- id: llm-pi-ai\n  disabled: false\n- id: agent-default-model\n  name: different-plugin\n  config: {provider: deepseek-official}\n").unwrap();
     assert!(matches!(
-        super::current(home.path(), &store, &[43721], &|_| None).state,
+        super::tests::current(home.path(), &store, &[43721], &|_| None).state,
         Kind::Provider { .. }
     ));
     fs::write(
@@ -201,7 +202,7 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
     )
     .unwrap();
     assert_eq!(
-        super::current(home.path(), &store, &[43721], &|_| None).state,
+        super::tests::current(home.path(), &store, &[43721], &|_| None).state,
         Kind::Official
     );
     fs::remove_file(home.path().join("settings.yaml")).unwrap();
@@ -211,12 +212,12 @@ fn effective_profile_home_settings_and_credentials_are_reported_without_secrets(
     )
     .unwrap();
     assert!(matches!(
-        super::current(home.path(), &store, &[43721], &|_| None).state,
+        super::tests::current(home.path(), &store, &[43721], &|_| None).state,
         Kind::Unmatched { .. }
     ));
     extra_profile(home.path(), "desktop");
     assert!(matches!(
-        super::current(home.path(), &store, &[43721], &|_| None).state,
+        super::tests::current(home.path(), &store, &[43721], &|_| None).state,
         Kind::Mixed
     ));
 }
@@ -426,7 +427,7 @@ async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
     let listener_port = gateway.try_listener_view().unwrap().port;
     let store = gateway.0.inner.lock().store.clone();
     assert_eq!(
-        super::current(home.path(), &store, &[listener_port], &|_| None).state,
+        super::tests::current(home.path(), &store, &[listener_port], &|_| None).state,
         Kind::Gateway
     );
     gateway.stop_dsh(false).await.unwrap();
@@ -532,7 +533,7 @@ fn official_api_key_route_is_discoverable_and_matched_as_provider() {
             false,
         )
         .unwrap();
-    let current = super::current(home.path(), &store, &[43721], &|_| None);
+    let current = super::tests::current(home.path(), &store, &[43721], &|_| None);
     assert!(matches!(
         current.state,
         Kind::Provider {

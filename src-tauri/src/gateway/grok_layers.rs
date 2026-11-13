@@ -54,10 +54,6 @@ fn merge(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::TableLik
         }
     }
 }
-#[cfg(test)]
-pub fn read(home: &Path, resolve: &impl Fn(&str) -> Option<String>) -> Result<Effective> {
-    read_with_environment(home, true, resolve)
-}
 pub fn read_with_environment(
     home: &Path,
     include: bool,
@@ -118,14 +114,6 @@ fn read_effective(
     result.environment = environment;
     result.variables = variables;
     Ok(result)
-}
-#[cfg(test)]
-pub(super) fn read_at(
-    home: &Path,
-    system: Option<&Path>,
-    resolve: &impl Fn(&str) -> Option<String>,
-) -> Result<Effective> {
-    read_at_config(home, system, resolve, None)
 }
 fn read_at_config(
     home: &Path,
@@ -325,6 +313,13 @@ pub fn environment_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn read_at(
+        home: &Path,
+        system: Option<&Path>,
+        resolve: &impl Fn(&str) -> Option<String>,
+    ) -> Result<Effective> {
+        read_at_config(home, system, resolve, None)
+    }
     #[test]
     fn requirements_win_environment_and_managed_layers_never_write_back() {
         let root = tempfile::tempdir().unwrap();

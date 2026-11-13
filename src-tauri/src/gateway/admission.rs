@@ -422,29 +422,6 @@ impl Scheduler {
         self.0.wake.notify_waiters();
         let _ = self.0.events.send(());
     }
-    #[cfg(test)]
-    pub async fn acquire(
-        &self,
-        routes: &[Route],
-        manual: bool,
-        max_waiting: usize,
-        budget: &mut Budget,
-    ) -> Result<Admission, Rejected> {
-        self.acquire_for(routes, manual, max_waiting, budget, &Requirement::Resource)
-            .await
-    }
-    #[cfg(test)]
-    pub async fn acquire_for(
-        &self,
-        routes: &[Route],
-        manual: bool,
-        max_waiting: usize,
-        budget: &mut Budget,
-        requirement: &Requirement,
-    ) -> Result<Admission, Rejected> {
-        self.acquire_for_immediate(routes, manual, max_waiting, budget, requirement, false)
-            .await
-    }
     pub async fn acquire_for_immediate(
         &self,
         routes: &[Route],
@@ -815,4 +792,32 @@ impl Drop for CapacityWait {
 /// Whole seconds a caller should wait, never less than one.
 fn seconds(delay: Duration) -> u64 {
     delay.as_millis().div_ceil(1000).max(1) as u64
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    impl Scheduler {
+        pub async fn acquire(
+            &self,
+            routes: &[Route],
+            manual: bool,
+            max_waiting: usize,
+            budget: &mut Budget,
+        ) -> Result<Admission, Rejected> {
+            self.acquire_for(routes, manual, max_waiting, budget, &Requirement::Resource)
+                .await
+        }
+        pub async fn acquire_for(
+            &self,
+            routes: &[Route],
+            manual: bool,
+            max_waiting: usize,
+            budget: &mut Budget,
+            requirement: &Requirement,
+        ) -> Result<Admission, Rejected> {
+            self.acquire_for_immediate(routes, manual, max_waiting, budget, requirement, false)
+                .await
+        }
+    }
 }

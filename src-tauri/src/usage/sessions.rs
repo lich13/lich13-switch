@@ -1,7 +1,5 @@
 //! Codex high-water/replay and Claude message-ID merging, adapted from CC Switch.
 //! Source files are read-only. Only counters, hashed IDs and cursors survive parsing.
-#[cfg(test)]
-use super::store::Store;
 use super::{model::*, pricing::Pricing};
 use crate::storage::{self, Result};
 use serde::{Deserialize, Serialize};
@@ -265,50 +263,6 @@ pub trait Repository {
     ) -> Result<()>;
     fn finish_rebuild(&mut self, source: &str) -> Result<()>;
     fn progress(&mut self, _report: &Report) {}
-}
-#[cfg(test)]
-impl Repository for Store {
-    fn save_antigravity_quota(
-        &mut self,
-        id: &str,
-        periods: &super::antigravity::quota::Periods,
-    ) -> Result<()> {
-        Store::save_antigravity_quota(self, id, periods)
-    }
-    fn data_dir(&self) -> Option<&Path> {
-        self.data_dir()
-    }
-    fn cursor(&self, id: &str) -> Result<Option<String>> {
-        Store::cursor(self, id)
-    }
-    fn generation(&self, source: &str) -> Result<u64> {
-        Store::source_generation(self, source)
-    }
-    fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
-        Store::write_batch(self, rows, cursor)
-    }
-    fn write_batch_with_superseded(
-        &mut self,
-        rows: &[Record],
-        superseded_ids: &[String],
-        cursor: Option<(&str, &str)>,
-    ) -> Result<()> {
-        Store::write_batch_with_superseded(self, rows, superseded_ids, cursor)
-    }
-    fn begin_rebuild(&mut self, source: &str) -> Result<()> {
-        Store::begin_rebuild(self, source)
-    }
-    fn stage_rebuild(
-        &mut self,
-        source: &str,
-        rows: &[Record],
-        cursor: Option<(&str, &str)>,
-    ) -> Result<()> {
-        Store::stage_rebuild(self, source, rows, cursor)
-    }
-    fn finish_rebuild(&mut self, source: &str) -> Result<()> {
-        Store::finish_rebuild(self, source)
-    }
 }
 pub fn sync(
     store: &mut impl Repository,
@@ -832,4 +786,53 @@ fn claude(v: &Value, c: &mut Cursor, at: i64) -> Option<Record> {
     );
     r.attempts[0].response_id = Some(mid);
     Some(r)
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+    use crate::usage::store::Store;
+    impl Repository for Store {
+        fn save_antigravity_quota(
+            &mut self,
+            id: &str,
+            periods: &super::super::antigravity::quota::Periods,
+        ) -> Result<()> {
+            Store::save_antigravity_quota(self, id, periods)
+        }
+        fn data_dir(&self) -> Option<&Path> {
+            self.data_dir()
+        }
+        fn cursor(&self, id: &str) -> Result<Option<String>> {
+            Store::cursor(self, id)
+        }
+        fn generation(&self, source: &str) -> Result<u64> {
+            Store::source_generation(self, source)
+        }
+        fn write_batch(&mut self, rows: &[Record], cursor: Option<(&str, &str)>) -> Result<()> {
+            Store::write_batch(self, rows, cursor)
+        }
+        fn write_batch_with_superseded(
+            &mut self,
+            rows: &[Record],
+            superseded_ids: &[String],
+            cursor: Option<(&str, &str)>,
+        ) -> Result<()> {
+            Store::write_batch_with_superseded(self, rows, superseded_ids, cursor)
+        }
+        fn begin_rebuild(&mut self, source: &str) -> Result<()> {
+            Store::begin_rebuild(self, source)
+        }
+        fn stage_rebuild(
+            &mut self,
+            source: &str,
+            rows: &[Record],
+            cursor: Option<(&str, &str)>,
+        ) -> Result<()> {
+            Store::stage_rebuild(self, source, rows, cursor)
+        }
+        fn finish_rebuild(&mut self, source: &str) -> Result<()> {
+            Store::finish_rebuild(self, source)
+        }
+    }
 }
