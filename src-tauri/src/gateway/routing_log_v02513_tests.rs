@@ -138,7 +138,12 @@ fn seed_boundary(registry: &Arc<Registry>, session: &str, boundary: &str) {
     let owner = registry
         .prepare(session.into(), None, false, &[OLD.into()])
         .expect("fixture owner lease");
+    // Settle each write before asking for the next one. A wake-up queued behind
+    // a write that already covered it would rewrite the file after `flush`
+    // returns, racing the tests that replace the file afterwards.
+    registry.flush();
     owner.complete(OLD, None);
+    registry.flush();
     owner.complete(OLD, Some(boundary));
     registry.flush();
 }
