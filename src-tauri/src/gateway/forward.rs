@@ -677,6 +677,269 @@ async fn upstream_request(
     }
     Ok((upstream, upstream_model))
 }
+/// What is known about a request before the first attempt: what it asks for,
+/// which conversation it belongs to and which providers may serve it.
+struct Plan {
+    hints: Result<replay::RequestHints, BoxError>,
+    stream_hint: bool,
+    model: Option<String>,
+    /// The only provider allowed to serve this request, when one is fixed.
+    pinned: Option<String>,
+    /// A continuation whose owner is unknown: try one provider, never move.
+    unknown_affinity: bool,
+    continuation: bool,
+    operation: crate::usage::model::Operation,
+    requirement: Requirement,
+    fixed_dsh: Option<String>,
+    responses: bool,
+    thread: Option<String>,
+    thread_identity: crate::usage::model::ThreadIdentity,
+    auxiliary: bool,
+    owned_search: bool,
+    ownership: Option<std::sync::Arc<super::compaction::Lease>>,
+    dedicated_search: bool,
+    established_capacity_owner: Option<String>,
+    usage_trace: Option<crate::usage::Trace>,
+}
+/// Inspects the request and narrows `ids` to the providers it may use.
+async fn plan(
+    gateway: &Gateway,
+    parts: &hyper::http::request::Parts,
+    replay: &Replay,
+    mode: &str,
+    websocket: bool,
+    ids: &mut Vec<String>,
+    routes: &std::collections::HashMap<String, Route>,
+) -> Result<Plan, Box<Response<WireBody>>> {
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let hints = if content_type.contains("json") || content_type.starts_with("multipart/form-data")
+    {
+        replay
+            .inspect(
+                parts
+                    .headers
+                    .get(header::CONTENT_ENCODING)
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("identity"),
+                content_type,
+            )
+            .await
+    } else {
+        Ok(replay::RequestHints::default())
+    };
+    let stream_hint = websocket
+        || hints.as_ref().is_ok_and(|h| h.stream)
+        || parts
+            .headers
+            .get(header::ACCEPT)
+            .is_some_and(|h| h.as_bytes().windows(17).any(|w| w == b"text/event-stream"));
+    let mut model = hints.as_ref().ok().and_then(|h| h.model.clone());
+    let compaction_trigger = hints.as_ref().is_ok_and(|h| h.compaction_trigger);
+    let mut pinned = (mode == "manual").then(|| ids.first().cloned()).flatten();
+    let mut unknown_affinity = false;
+    let continuation = match &hints {
+        Ok(hints) if hints.previous_response_id.is_some() => {
+            let previous = hints.previous_response_id.as_ref().unwrap();
+            let owner = gateway
+                .request_state()
+                .affinity
+                .get(previous)
+                .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
+                .cloned();
+            if let Some((owner, previous_model, _)) = owner {
+                pinned = Some(owner.clone());
+                *ids = vec![owner];
+                if model.is_none() {
+                    model = previous_model;
+                }
+            } else {
+                ids.truncate(1);
+                unknown_affinity = true;
+            }
+            true
+        }
+        // The original bytes may contain an uninspectable continuation. Try only
+        // one eligible (unrestricted) route, without cutting off earlier filters.
+        Err(_) => {
+            unknown_affinity = true;
+            true
+        }
+        _ => false,
+    };
+    let operation = if compaction_trigger {
+        crate::usage::model::Operation::Compaction
+    } else {
+        crate::usage::model::Operation::for_path(parts.uri.path())
+    };
+    let requirement = if operation == crate::usage::model::Operation::WebSearch
+        || (!websocket && routing::resource(&parts.method, parts.uri.path()))
+    {
+        Requirement::Resource
+    } else {
+        Requirement::model(model.as_deref())
+    };
+    let fixed_dsh = if gateway.client_id() == super::ClientId::Dsh {
+        let mut eligible = ids.iter().filter(|id| {
+            routes
+                .get(*id)
+                .is_some_and(|route| requirement.allows(route.provider.allowed_models.as_deref()))
+        });
+        let first = eligible.next().cloned();
+        if eligible.next().is_none() {
+            first
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let responses = matches!(
+        parts.uri.path().trim_end_matches('/'),
+        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
+    );
+    let (thread, thread_identity) = if gateway.client_id() == super::ClientId::Codex
+        && operation == crate::usage::model::Operation::WebSearch
+        && !websocket
+    {
+        super::compaction::search_identity(&parts.headers)
+    } else {
+        super::compaction::identity(&parts.headers)
+    };
+    let auxiliary = hints.as_ref().is_ok_and(|h| h.auxiliary);
+    if (auxiliary || hints.is_err())
+        && gateway.client_id() == super::ClientId::Codex
+        && mode == "auto"
+    {
+        if let Some(owner) = thread
+            .as_deref()
+            .and_then(|s| gateway.0.compaction.owner(s))
+            .filter(|id| ids.contains(id))
+        {
+            *ids = vec![owner.clone()];
+            if hints.is_err() {
+                // Metadata failure cannot move a conversation we already know.
+                pinned = Some(owner);
+            }
+        }
+    }
+    let owned_search = gateway.client_id() == super::ClientId::Codex
+        && mode == "auto"
+        && !websocket
+        && operation == crate::usage::model::Operation::WebSearch
+        && !unknown_affinity
+        && pinned.is_none();
+    let ownership = if owned_search {
+        match thread
+            .clone()
+            .map(|session| gateway.0.compaction.prepare_search(session))
+            .transpose()
+        {
+            Ok(lease) => lease.flatten(),
+            Err(e) => {
+                return Err(Box::new(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &e.code,
+                    &e.message,
+                )))
+            }
+        }
+    } else if gateway.client_id() == super::ClientId::Codex
+        && mode == "auto"
+        && responses
+        && !unknown_affinity
+        && !auxiliary
+    {
+        let queued = match super::compaction::queued(gateway) {
+            Ok(queued) => queued,
+            Err(e) => {
+                return Err(Box::new(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &e.code,
+                    &e.message,
+                )))
+            }
+        };
+        if let Some(session) = thread.clone().filter(|_| {
+            queued
+                .iter()
+                .any(|p| requirement.allows(p.allowed_models.as_deref()))
+        }) {
+            let lease = gateway.0.compaction.prepare_request(
+                session,
+                hints.as_ref().ok(),
+                !continuation && operation == crate::usage::model::Operation::Model,
+                &queued,
+                &requirement,
+                pinned.as_deref(),
+            );
+            if lease.is_none() {
+                return Err(Box::new(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code::CONVERSATION_OWNERSHIP,
+                    "线程归属记录暂不可用，请检查网关状态",
+                )));
+            }
+            lease
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let search_backups = if mode == "auto"
+        && gateway.client_id() == super::ClientId::Codex
+        && operation == crate::usage::model::Operation::WebSearch
+        && !websocket
+    {
+        gateway
+            .search_backups()
+            .into_iter()
+            .filter(|id| routes.contains_key(id))
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+    let dedicated_search = !search_backups.is_empty();
+    if dedicated_search {
+        ids.extend(search_backups);
+    }
+    let established_capacity_owner = if dedicated_search {
+        None
+    } else {
+        routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref())
+    };
+    let usage_trace = if matches!(requirement, Requirement::Resource)
+        && operation != crate::usage::model::Operation::WebSearch
+    {
+        None
+    } else {
+        gateway.usage_operation(model.as_deref(), operation)
+    };
+    Ok(Plan {
+        hints,
+        stream_hint,
+        model,
+        pinned,
+        unknown_affinity,
+        continuation,
+        operation,
+        requirement,
+        fixed_dsh,
+        responses,
+        thread,
+        thread_identity,
+        auxiliary,
+        owned_search,
+        ownership,
+        dedicated_search,
+        established_capacity_owner,
+        usage_trace,
+    })
+}
 fn stopped() -> Response<WireBody> {
     error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
 }
@@ -811,201 +1074,32 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
     request_budget.begin();
     request_budget.attach_traffic(&traffic);
     let forwarding = async {
-        let content_type = parts
-            .headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        let hints =
-            if content_type.contains("json") || content_type.starts_with("multipart/form-data") {
-                replay
-                    .inspect(
-                        parts
-                            .headers
-                            .get(header::CONTENT_ENCODING)
-                            .and_then(|h| h.to_str().ok())
-                            .unwrap_or("identity"),
-                        content_type,
-                    )
-                    .await
-            } else {
-                Ok(replay::RequestHints::default())
-            };
-        let stream_hint = websocket
-            || hints.as_ref().is_ok_and(|h| h.stream)
-            || parts
-                .headers
-                .get(header::ACCEPT)
-                .is_some_and(|h| h.as_bytes().windows(17).any(|w| w == b"text/event-stream"));
-        let mut model = hints.as_ref().ok().and_then(|h| h.model.clone());
-        let compaction_trigger = hints.as_ref().is_ok_and(|h| h.compaction_trigger);
-        let mut pinned = (mode == "manual").then(|| ids.first().cloned()).flatten();
-        let mut unknown_affinity = false;
-        let continuation = match &hints {
-            Ok(hints) if hints.previous_response_id.is_some() => {
-                let previous = hints.previous_response_id.as_ref().unwrap();
-                let owner = gateway
-                    .request_state()
-                    .affinity
-                    .get(previous)
-                    .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
-                    .cloned();
-                if let Some((owner, previous_model, _)) = owner {
-                    pinned = Some(owner.clone());
-                    ids = vec![owner];
-                    if model.is_none() {
-                        model = previous_model;
-                    }
-                } else {
-                    ids.truncate(1);
-                    unknown_affinity = true;
-                }
-                true
-            }
-            // The original bytes may contain an uninspectable continuation. Try only
-            // one eligible (unrestricted) route, without cutting off earlier filters.
-            Err(_) => {
-                unknown_affinity = true;
-                true
-            }
-            _ => false,
-        };
-        let operation = if compaction_trigger {
-            crate::usage::model::Operation::Compaction
-        } else {
-            crate::usage::model::Operation::for_path(parts.uri.path())
-        };
-        let requirement = if operation == crate::usage::model::Operation::WebSearch
-            || (!websocket && routing::resource(&parts.method, parts.uri.path()))
+        let Plan {
+            hints,
+            stream_hint,
+            model,
+            mut pinned,
+            unknown_affinity,
+            continuation,
+            operation,
+            requirement,
+            fixed_dsh,
+            responses,
+            thread,
+            thread_identity,
+            auxiliary,
+            owned_search,
+            ownership,
+            dedicated_search,
+            established_capacity_owner,
+            usage_trace,
+        } = match plan(
+            &gateway, &parts, &replay, &mode, websocket, &mut ids, &routes,
+        )
+        .await
         {
-            Requirement::Resource
-        } else {
-            Requirement::model(model.as_deref())
-        };
-        let fixed_dsh = if gateway.client_id() == super::ClientId::Dsh {
-            let mut eligible = ids.iter().filter(|id| {
-                routes.get(*id).is_some_and(|route| {
-                    requirement.allows(route.provider.allowed_models.as_deref())
-                })
-            });
-            let first = eligible.next().cloned();
-            if eligible.next().is_none() {
-                first
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let responses = matches!(
-            parts.uri.path().trim_end_matches('/'),
-            "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
-        );
-        let (thread, thread_identity) = if gateway.client_id() == super::ClientId::Codex
-            && operation == crate::usage::model::Operation::WebSearch
-            && !websocket
-        {
-            super::compaction::search_identity(&parts.headers)
-        } else {
-            super::compaction::identity(&parts.headers)
-        };
-        let auxiliary = hints.as_ref().is_ok_and(|h| h.auxiliary);
-        if (auxiliary || hints.is_err())
-            && gateway.client_id() == super::ClientId::Codex
-            && mode == "auto"
-        {
-            if let Some(owner) = thread
-                .as_deref()
-                .and_then(|s| gateway.0.compaction.owner(s))
-                .filter(|id| ids.contains(id))
-            {
-                ids = vec![owner.clone()];
-                if hints.is_err() {
-                    // Metadata failure cannot move a conversation we already know.
-                    pinned = Some(owner);
-                }
-            }
-        }
-        let owned_search = gateway.client_id() == super::ClientId::Codex
-            && mode == "auto"
-            && !websocket
-            && operation == crate::usage::model::Operation::WebSearch
-            && !unknown_affinity
-            && pinned.is_none();
-        let ownership = if owned_search {
-            match thread
-                .clone()
-                .map(|session| gateway.0.compaction.prepare_search(session))
-                .transpose()
-            {
-                Ok(lease) => lease.flatten(),
-                Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, &e.code, &e.message),
-            }
-        } else if gateway.client_id() == super::ClientId::Codex
-            && mode == "auto"
-            && responses
-            && !unknown_affinity
-            && !auxiliary
-        {
-            let queued = match super::compaction::queued(&gateway) {
-                Ok(queued) => queued,
-                Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, &e.code, &e.message),
-            };
-            if let Some(session) = thread.clone().filter(|_| {
-                queued
-                    .iter()
-                    .any(|p| requirement.allows(p.allowed_models.as_deref()))
-            }) {
-                let lease = gateway.0.compaction.prepare_request(
-                    session,
-                    hints.as_ref().ok(),
-                    !continuation && operation == crate::usage::model::Operation::Model,
-                    &queued,
-                    &requirement,
-                    pinned.as_deref(),
-                );
-                if lease.is_none() {
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        code::CONVERSATION_OWNERSHIP,
-                        "线程归属记录暂不可用，请检查网关状态",
-                    );
-                }
-                lease
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let search_backups = if mode == "auto"
-            && gateway.client_id() == super::ClientId::Codex
-            && operation == crate::usage::model::Operation::WebSearch
-            && !websocket
-        {
-            gateway
-                .search_backups()
-                .into_iter()
-                .filter(|id| routes.contains_key(id))
-                .collect::<Vec<_>>()
-        } else {
-            vec![]
-        };
-        let dedicated_search = !search_backups.is_empty();
-        if dedicated_search {
-            ids.extend(search_backups);
-        }
-        let established_capacity_owner = if dedicated_search {
-            None
-        } else {
-            routing::capacity_owner(gateway.client_id(), mode == "manual", ownership.as_deref())
-        };
-        let usage_trace = if matches!(requirement, Requirement::Resource)
-            && operation != crate::usage::model::Operation::WebSearch
-        {
-            None
-        } else {
-            gateway.usage_operation(model.as_deref(), operation)
+            Ok(plan) => plan,
+            Err(response) => return *response,
         };
         let mut failover = super::failover::Tracker::new(usage_trace.clone());
         failover.attach_wait_budget(&request_budget);
