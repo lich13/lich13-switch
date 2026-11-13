@@ -5,6 +5,7 @@ use crate::storage::{self, AppError, Result};
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 use parking_lot::Mutex;
 use serde::Serialize;
+#[cfg(any(target_os = "macos", test))]
 use std::path::{Path, PathBuf};
 pub const LOGIN_ARG: &str = "--vela-login-startup";
 pub fn is_login_argument(arg: &str) -> bool {
@@ -103,6 +104,7 @@ fn system_error(_: auto_launch::Error) -> AppError {
         "系统登录项操作失败，请检查系统的登录项与自动化权限",
     )
 }
+#[cfg(any(target_os = "macos", test))]
 fn bundle_path(executable: &Path) -> PathBuf {
     executable
         .ancestors()
@@ -122,14 +124,13 @@ fn auto_launch() -> Result<AutoLaunch> {
             "安装路径含不支持的字符，请移动到标准应用目录",
         ));
     }
-    let args = vec![LOGIN_ARG];
     // auto-launch writes its Windows path verbatim into the Run command.
     let path = registration_path(path, cfg!(target_os = "windows"));
     AutoLaunchBuilder::new()
         .set_app_name("Vela")
         .set_app_path(&path)
         .set_use_launch_agent(false)
-        .set_args(&args)
+        .set_args(&[LOGIN_ARG])
         .build()
         .map_err(system_error)
 }
