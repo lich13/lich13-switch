@@ -1,4 +1,4 @@
-//! v0.25.10 quota evidence and cancellable probe regressions.
+//! Quota evidence and cancellable probe regressions.
 //!
 //! These tests stay below the quota service's public surface on purpose.  The
 //! module is included from `quota_probe.rs`, so it can assert the private

@@ -1,4 +1,4 @@
-//! v0.25.13 exact-response completion after a disconnected gateway attempt.
+//! Exact-response completion after a disconnected gateway attempt.
 //! Every row is synthetic and uses loopback-free fixture metadata.
 use super::{
     model::{safe_id, Attempt, Record, Tokens},

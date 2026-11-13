@@ -316,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn successful_catalog_persists_without_invalidating_mapping_drafts_or_changing_profiles()
     {
-        let (home, _parent, gateway) = tests_v02516::fixture();
+        let (home, _parent, gateway) = shared_profile_tests::fixture();
         let path = home.path().join(".credentials.yaml");
         let raw = "version: 1\nrefs: {FIXTURE_KEY: fixture-provider-secret}\nrecords:\n  deepseek-account-platform/default:\n    kind: grant\n    payload: {version: 1, issuer: 'https://platform.deepseek.com', token: fixture-account-token}\n";
         std::fs::write(&path, raw).unwrap();
@@ -360,7 +360,7 @@ mod tests {
     }
     #[tokio::test]
     async fn failed_refresh_retains_saved_catalog_and_does_not_change_credentials() {
-        let (home, _parent, gateway) = tests_v02516::fixture();
+        let (home, _parent, gateway) = shared_profile_tests::fixture();
         gateway.0.inner.lock().editable_mut().store.dsh_catalog =
             vec![json!({"id":"deepseek-future","name":"Future"})];
         let before = std::fs::read(home.path().join(".credentials.yaml")).unwrap();

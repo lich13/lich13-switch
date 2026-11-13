@@ -1619,8 +1619,8 @@ mod v016_tests {
     }
 }
 #[cfg(test)]
-#[path = "events_v02512_tests.rs"]
-mod v02512_tests;
+#[path = "events_durability_tests.rs"]
+mod durability_tests;
 
 #[cfg(test)]
 mod routing_visibility_tests {

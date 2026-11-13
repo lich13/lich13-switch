@@ -1,4 +1,4 @@
-//! v0.25.13 bounded compaction receiver and claim fixtures.
+//! Bounded compaction receiver and claim fixtures.
 
 use super::*;
 use crate::gateway::{

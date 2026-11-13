@@ -19,14 +19,14 @@ pub use models::ModelMapping;
 pub use selection::{status, ProfileCurrent};
 mod batch;
 pub mod editor;
+#[cfg(test)]
+mod model_choice_tests;
 mod overlays;
+#[cfg(test)]
+mod saved_route_tests;
+#[cfg(test)]
+mod shared_profile_tests;
 mod snapshot;
-#[cfg(test)]
-mod tests_v02516;
-#[cfg(test)]
-mod tests_v02518;
-#[cfg(test)]
-mod tests_v02521;
 pub use batch::Batch;
 
 const ROUTE: &str = "vela";
@@ -1893,7 +1893,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests_v02515;
+mod profile_editor_tests;
 
 #[cfg(test)]
-mod tests_v02517;
+mod routing_tests;

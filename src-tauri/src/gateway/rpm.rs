@@ -7,8 +7,8 @@ use std::{
 use tokio::time::Instant;
 
 #[cfg(test)]
-#[path = "v02510_rpm_tests.rs"]
-mod v02510_rpm_tests;
+#[path = "rpm_tests.rs"]
+mod tests;
 
 // Keep a one-second margin for upstream second-granularity windows.
 pub(super) const WINDOW: Duration = Duration::from_secs(61);

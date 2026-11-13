@@ -676,8 +676,6 @@ async fn websocket_eof_during_generation_closes_upstream_socket() {
 
 #[path = "usage_tail_tests.rs"]
 mod usage_tail_tests;
-#[path = "usage_tail_v02513_tests.rs"]
-mod usage_tail_v02513_tests;
 
 async fn read_panel_cancel(stream: &mut TcpStream) -> Vec<u8> {
     tokio::time::timeout(WAIT, async {

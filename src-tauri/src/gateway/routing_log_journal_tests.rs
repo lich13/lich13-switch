@@ -1,4 +1,4 @@
-//! v0.25.9 routing evidence and durable ownership journal coverage.
+//! Routing evidence and durable ownership journal coverage.
 use super::*;
 use crate::{
     events::{self, Action, Category, Reason, RoutingDetails, RoutingOutcome},

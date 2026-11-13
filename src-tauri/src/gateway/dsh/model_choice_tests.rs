@@ -18,11 +18,11 @@ fn change_default(home: &Path, profile: &str, model: &str, effort: &str) {
 
 #[tokio::test]
 async fn sync_restart_and_stop_preserve_each_profiles_model_and_reasoning() {
-    let (home, _parent, gateway) = tests_v02516::fixture();
+    let (home, _parent, gateway) = shared_profile_tests::fixture();
     gateway
         .attach_dsh_profiles(
             home.path(),
-            tests_v02516::options(),
+            shared_profile_tests::options(),
             true,
             &gateway.view().revision,
             None,
@@ -43,7 +43,7 @@ async fn sync_restart_and_stop_preserve_each_profiles_model_and_reasoning() {
         .restart_dsh(home.path(), &gateway.view().revision)
         .await
         .unwrap();
-    let mut options = tests_v02516::options();
+    let mut options = shared_profile_tests::options();
     options.model = None;
     gateway
         .attach_dsh_profiles(home.path(), options, true, &gateway.view().revision, None)
@@ -96,11 +96,11 @@ async fn sync_restart_and_stop_preserve_each_profiles_model_and_reasoning() {
 
 #[tokio::test]
 async fn mapping_save_updates_every_active_catalog_and_retains_model_choices() {
-    let (home, _parent, gateway) = tests_v02516::fixture();
+    let (home, _parent, gateway) = shared_profile_tests::fixture();
     gateway
         .attach_dsh_profiles(
             home.path(),
-            tests_v02516::options(),
+            shared_profile_tests::options(),
             true,
             &gateway.view().revision,
             None,
@@ -174,7 +174,7 @@ fn canonical_mapping_preserves_explicit_empty_and_canonical_values() {
 
 #[tokio::test]
 async fn global_default_edits_preserve_reasoning_and_do_not_overwrite_profile_choices_on_sync() {
-    let (home, _parent, gateway) = tests_v02516::fixture();
+    let (home, _parent, gateway) = shared_profile_tests::fixture();
     fs::write(
         home.path().join("settings.yaml"),
         "agent-default-model: {provider: relay, model: fixture-model, reasoningEffort: low}\n",
@@ -183,7 +183,7 @@ async fn global_default_edits_preserve_reasoning_and_do_not_overwrite_profile_ch
     gateway
         .attach_dsh_profiles(
             home.path(),
-            tests_v02516::options(),
+            shared_profile_tests::options(),
             true,
             &gateway.view().revision,
             None,
@@ -208,7 +208,7 @@ async fn global_default_edits_preserve_reasoning_and_do_not_overwrite_profile_ch
         )
         .await
         .unwrap();
-    let mut options = tests_v02516::options();
+    let mut options = shared_profile_tests::options();
     options.model = None;
     gateway
         .attach_dsh_profiles(home.path(), options, true, &gateway.view().revision, None)
@@ -243,11 +243,11 @@ async fn global_default_edits_preserve_reasoning_and_do_not_overwrite_profile_ch
 
 #[tokio::test]
 async fn actual_route_conflict_keeps_files_and_mapping_untouched() {
-    let (home, _parent, gateway) = tests_v02516::fixture();
+    let (home, _parent, gateway) = shared_profile_tests::fixture();
     gateway
         .attach_dsh_profiles(
             home.path(),
-            tests_v02516::options(),
+            shared_profile_tests::options(),
             true,
             &gateway.view().revision,
             None,

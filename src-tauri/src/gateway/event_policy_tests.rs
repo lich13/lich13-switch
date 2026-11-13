@@ -1,4 +1,4 @@
-//! v0.25.11 event policy regressions.
+//! Event policy regressions.
 //!
 //! These tests deliberately wait for the diagnostic writer's sentinel before
 //! checking the in-memory journal or JSONL.  A short sleep cannot prove that

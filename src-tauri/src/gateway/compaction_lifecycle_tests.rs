@@ -1,4 +1,4 @@
-//! v0.25.9 lifecycle composition checks for conversation ownership.
+//! Lifecycle composition checks for conversation ownership.
 //!
 //! These fixtures use only hashed thread/window identifiers and loopback-safe
 //! provider metadata.  The module is included below `compaction.rs`, so it can

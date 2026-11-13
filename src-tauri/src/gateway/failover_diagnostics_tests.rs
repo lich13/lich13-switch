@@ -1,4 +1,4 @@
-//! v0.25.12 failover diagnostics regressions.
+//! Failover diagnostics regressions.
 //!
 //! These integration tests use only loopback fixtures and synthetic thread data.
 

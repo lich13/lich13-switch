@@ -1,4 +1,4 @@
-//! v0.25.10 downstream delivery classification boundaries.
+//! Downstream delivery classification boundaries.
 //!
 //! These fixtures stay at the protocol/diagnostics boundary.  They use only
 //! loopback-free synthetic payloads and preserve the distinction between an

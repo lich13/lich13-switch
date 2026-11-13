@@ -41,7 +41,11 @@ mod config_poll_tests;
 mod connector;
 #[cfg(test)]
 mod diagnostic_test_support;
+#[cfg(test)]
+mod downstream_delivery_tests;
 mod endpoints;
+#[cfg(test)]
+mod event_policy_tests;
 pub(crate) mod failover;
 mod failure_policy;
 #[cfg(test)]
@@ -53,7 +57,7 @@ mod first_byte_timeout_tests;
 mod first_turn_structure_tests;
 mod forward;
 #[cfg(test)]
-mod handoff_v0259_tests;
+mod handoff_websocket_tests;
 mod health_settlement;
 #[cfg(test)]
 mod health_settlement_tests;
@@ -74,7 +78,9 @@ mod protocol;
 mod protocol_tests;
 mod quota;
 #[cfg(test)]
-mod quota_routing_v0257_tests;
+mod quota_probe_routing_tests;
+#[cfg(test)]
+mod quota_routing_tests;
 mod quota_wait;
 mod replay;
 #[cfg(test)]
@@ -87,17 +93,9 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod token_reveal_tests;
 #[cfg(test)]
-mod upstream_reason_v0257_tests;
+mod upstream_error_tests;
 #[cfg(test)]
 mod usage_stream_tests;
-#[cfg(test)]
-mod v02510_delivery_tests;
-#[cfg(test)]
-mod v02510_error_tests;
-#[cfg(test)]
-mod v02510_quota_routing_tests;
-#[cfg(test)]
-mod v02511_event_policy_tests;
 mod wait_budget;
 mod websocket;
 mod wire_progress;

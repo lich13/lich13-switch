@@ -1,4 +1,4 @@
-//! v0.25.13 routing outcome and durable save ordering fixtures.
+//! Routing outcome and durable save ordering fixtures.
 //!
 //! These tests use only bounded fixture identifiers.  Diagnostics are checked
 //! after both the ownership writer and the diagnostics queue have settled.

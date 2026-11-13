@@ -8,7 +8,7 @@ use std::{fs, sync::Arc, time::Duration};
 
 #[test]
 fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping() {
-    let (home, _parent, gateway) = super::tests_v02516::fixture();
+    let (home, _parent, gateway) = super::shared_profile_tests::fixture();
     let desktop = "- id: llm-pi-ai\n  config:\n    providers:\n      first: {displayName: Desktop, api: openai-completions, baseURL: 'https://one.example.invalid/v1', apiKeyEnv: FIXTURE_KEY, models: [{id: DeepSeek-V4.1-Flash}, {id: DeepSeek-V4-Pro}]}\n      second: {api: openai-completions, baseURL: 'https://two.example.invalid/v1', apiKey: fixture-two, models: [{id: deepseek-flash}]}\n- id: agent-default-model\n  config: {provider: second, model: deepseek-flash}\n";
     fs::write(home.path().join("profiles/desktop").join(PATCH), desktop).unwrap();
     fs::write(
@@ -28,7 +28,7 @@ fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping(
     let mut store = Store::default();
     import_selection(
         home.path(),
-        &super::tests_v02516::options(),
+        &super::shared_profile_tests::options(),
         &mut store,
         43721,
     )
@@ -60,7 +60,7 @@ fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping(
         .collect::<Vec<_>>();
     import_selection(
         home.path(),
-        &super::tests_v02516::options(),
+        &super::shared_profile_tests::options(),
         &mut store,
         43721,
     )
@@ -86,7 +86,7 @@ fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping(
 
 #[test]
 fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
-    let (home, _parent, gateway) = super::tests_v02516::fixture();
+    let (home, _parent, gateway) = super::shared_profile_tests::fixture();
     let path = home.path().join("profiles/desktop").join(PATCH);
     let raw = fs::read_to_string(&path)
         .unwrap()
@@ -100,7 +100,7 @@ fn incompatible_protocol_is_explained_and_ambiguous_mapping_is_left_empty() {
         .contains("Chat Completions"));
     assert!(import_selection(
         home.path(),
-        &super::tests_v02516::options(),
+        &super::shared_profile_tests::options(),
         &mut Store::default(),
         43721
     )

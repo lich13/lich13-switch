@@ -1,4 +1,4 @@
-//! v0.25.10 quota-triggered routing regressions.
+//! Quota-triggered routing regressions.
 //!
 //! The servers below are loopback-only fixtures.  They exercise the shared
 //! HTTP path while preserving the real request body and session headers.

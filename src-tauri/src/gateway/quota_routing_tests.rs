@@ -1,4 +1,4 @@
-//! v0.25.7 loopback regressions for quota and routing decisions.
+//! Loopback regressions for quota and routing decisions.
 //!
 //! Upstreams are synthetic loopback HTTP/WebSocket servers.  The fixtures use
 //! temporary gateway stores and never read or write an installed client store.

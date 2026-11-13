@@ -1,4 +1,4 @@
-//! v0.25.9 native WebSocket owner handoff regression.
+//! Native WebSocket owner handoff regression.
 //!
 //! The upstreams and client use loopback sockets and synthetic credentials only.
 

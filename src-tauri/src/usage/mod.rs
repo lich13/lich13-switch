@@ -11,7 +11,7 @@ pub mod commands;
 mod decimal_v13_tests;
 mod dedup;
 #[cfg(test)]
-mod disconnect_v02513_tests;
+mod disconnect_tests;
 #[cfg(test)]
 mod event_time_tests;
 #[cfg(test)]
@@ -27,7 +27,7 @@ mod query;
 #[cfg(test)]
 mod response_pricing_tests;
 #[cfg(test)]
-mod routing_outcome_v02513_tests;
+mod routing_outcome_tests;
 mod sessions;
 #[cfg(test)]
 mod source_dedup_tests;
@@ -1053,7 +1053,7 @@ mod pricing_tests;
 mod tests;
 
 #[cfg(test)]
-mod metering_v02514_tests;
+mod metering_tests;
 #[cfg(test)]
 mod settings_tests;
 

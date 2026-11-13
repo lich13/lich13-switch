@@ -9,14 +9,14 @@ const MAX_THREADS: usize = 4096;
 const RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 #[cfg(test)]
-#[path = "compaction_lifecycle_v0259_tests.rs"]
-mod lifecycle_v0259_tests;
+#[path = "compaction_lifecycle_tests.rs"]
+mod lifecycle_tests;
 #[cfg(test)]
 #[path = "model_detour_policy_tests.rs"]
 mod model_detour_policy_tests;
 #[cfg(test)]
-#[path = "compaction_v02513_tests.rs"]
-mod v02513_tests;
+#[path = "compaction_receiver_tests.rs"]
+mod receiver_tests;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) enum Intake {

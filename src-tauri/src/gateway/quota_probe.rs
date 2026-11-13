@@ -6,8 +6,8 @@ use tokio::{sync::Notify, task::AbortHandle, time::Instant};
 
 const DEADLINE: Duration = Duration::from_secs(10);
 #[cfg(test)]
-#[path = "v02510_quota_probe_tests.rs"]
-mod v02510_quota_probe_tests;
+#[path = "quota_probe_tests.rs"]
+mod tests;
 #[derive(Default)]
 pub(super) struct ProbeStore {
     entries: HashMap<(String, String), ProbeEntry>,

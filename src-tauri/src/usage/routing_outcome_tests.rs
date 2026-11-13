@@ -1,4 +1,4 @@
-//! v0.25.13 routing outcome persistence and completion-handle lifetimes.
+//! Routing outcome persistence and completion-handle lifetimes.
 //! All service data and identifiers are synthetic fixtures.
 use super::{
     model::{

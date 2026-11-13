@@ -14,7 +14,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn a_conflict_after_preflight_keeps_success_and_marks_remaining_profiles() {
-        let (home, _parent, gateway) = super::super::tests_v02516::fixture();
+        let (home, _parent, gateway) = super::super::shared_profile_tests::fixture();
         let profiles: Vec<String> = ["desktop", "headless", "web"]
             .into_iter()
             .map(str::to_owned)
@@ -34,7 +34,7 @@ mod tests {
         let result = gateway
             .apply_dsh_profiles(
                 home.path(),
-                super::super::tests_v02516::options(),
+                super::super::shared_profile_tests::options(),
                 &gateway.try_view().unwrap().revision,
                 None,
                 profiles,

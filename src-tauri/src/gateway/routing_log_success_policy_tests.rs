@@ -1,4 +1,4 @@
-//! v0.25.12 successful routing event policy regressions.
+//! Successful routing event policy regressions.
 //!
 //! Each ordinary success is repeated five times. A diagnostic sentinel on the
 //! same queue settles all earlier writes before memory, JSONL, reopen, and

@@ -1,6 +1,6 @@
 // End-to-end transport and configuration tests live here; all credentials are fixtures.
-#[path = "v02512_failover_tests.rs"]
-mod v02512_failover_tests;
+#[path = "failover_diagnostics_tests.rs"]
+mod failover_diagnostics_tests;
 use super::*;
 fn capacity_message(status: hyper::StatusCode, body: &[u8]) -> bool {
     failure_policy::decision(

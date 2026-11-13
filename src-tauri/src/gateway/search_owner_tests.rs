@@ -1,4 +1,4 @@
-//! v0.25.13 search ownership regressions.
+//! Search ownership regressions.
 //!
 //! The fixture starts an ordinary provider and a provider that only accepts
 //! new threads or compaction handoffs.  Search requests still carry a reliable

@@ -3,7 +3,7 @@ use std::fs;
 
 #[tokio::test]
 async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() {
-    let (home, _parent, gateway) = tests_v02516::fixture();
+    let (home, _parent, gateway) = shared_profile_tests::fixture();
     fs::write(home.path().join(".env"), "UNRELATED=fixture-env-secret\n").unwrap();
     let credential = home.path().join(".credentials.yaml");
     let original = fs::read_to_string(&credential).unwrap();
@@ -25,7 +25,7 @@ async fn saved_routes_keep_capabilities_budget_and_only_owned_snapshot_fields() 
             home.path(),
             Options {
                 model: Some(models::FLASH.into()),
-                ..tests_v02516::options()
+                ..shared_profile_tests::options()
             },
             true,
             &gateway.view().revision,
