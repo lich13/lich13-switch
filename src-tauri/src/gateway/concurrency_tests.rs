@@ -88,23 +88,13 @@ async fn freeze_keeps_fifo_limits_and_budget_without_reserving_rpm_or_capacity()
     assert_eq!(g.view().providers[0].rpm_used, 0);
     gate.set(false).unwrap();
     let mut first = tasks.remove(0).await.unwrap();
-    {
-        // Disk I/O uses a real worker; keep virtual time fixed while it runs.
-        let commit = first.commit_rpm();
-        tokio::pin!(commit);
-        loop {
-            tokio::select! {
-                result = &mut commit => { result.unwrap(); break; },
-                _ = tokio::task::yield_now() => {},
-            }
-        }
-    }
+    first.commit_rpm();
     assert!(!tasks[0].is_finished());
     assert_eq!(g.view().providers[0].rpm_used, 1);
     drop(first);
     tickets[0].finish();
     let mut second = tasks.remove(0).await.unwrap();
-    second.commit_rpm().await.unwrap();
+    second.commit_rpm();
     assert_eq!(g.view().providers[0].rpm_used, 2);
     drop(second);
     drop(tickets);
@@ -274,7 +264,7 @@ async fn rpm_window_counts_upstream_attempts_without_touching_circuit_health() {
     start(&g, &t).await;
     let routes = routes(&g);
     let mut first = slot(&g, &routes).await;
-    first.commit_rpm().await.unwrap();
+    first.commit_rpm();
     drop(first);
     let mut budget = Budget::new(0);
     let result =
@@ -322,7 +312,7 @@ async fn http_rpm_limit_waits_in_place_instead_of_spilling_to_the_next_provider(
         &t,
         Edit::Settings {
             settings: Settings {
-                queue_seconds: 1,
+                queue_seconds: 2,
                 ..g.view().settings
             },
         },
@@ -344,7 +334,7 @@ async fn http_rpm_limit_waits_in_place_instead_of_spilling_to_the_next_provider(
     {
         let second = request(&g, "/v1/responses", vec![], vec![]);
         tokio::pin!(second);
-        // The ordinary queue timeout must not end an RPM budget wait.
+        // The request waits for RPM budget on the preferred provider.
         assert!(
             tokio::time::timeout(Duration::from_millis(1_200), second.as_mut())
                 .await
@@ -354,6 +344,11 @@ async fn http_rpm_limit_waits_in_place_instead_of_spilling_to_the_next_provider(
         assert_eq!(g.view().providers[0].health.failures, 0);
         assert_eq!(g.view().waiting_requests, 1);
         assert_eq!(g.view().providers[1].active_requests, 0);
+        // The wait shares the queue budget and ends as a rate limit, not a spill.
+        let second = second.await;
+        assert_eq!(second.status(), 429);
+        assert!(second.headers().contains_key(hyper::header::RETRY_AFTER));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
     g.stop().await.unwrap();
 }
@@ -405,11 +400,11 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
     claude.0.admission.configure(&claude_providers, true);
 
     let mut codex_slot = slot(&codex, &routes(&codex)).await;
-    codex_slot.commit_rpm().await.unwrap();
+    codex_slot.commit_rpm();
     drop(codex_slot);
 
     let mut claude_slot = slot(&claude, &routes(&claude)).await;
-    claude_slot.commit_rpm().await.unwrap();
+    claude_slot.commit_rpm();
     drop(claude_slot);
 
     assert_eq!(codex.view().providers[0].rpm_used, 1);
@@ -1258,7 +1253,7 @@ async fn capacity_fallback_rechecks_owner_recovery_and_does_not_bypass_its_rpm()
     drop(backup);
     rpm_limit(&g, &t, 0, 1);
     let mut owner = slot(&g, &routes(&g)[..1]).await;
-    owner.commit_rpm().await.unwrap();
+    owner.commit_rpm();
     let mut budget = Budget::new(3);
     budget.capacity_owner = Some(candidates[0].provider.id.clone());
     assert!(tokio::time::timeout(

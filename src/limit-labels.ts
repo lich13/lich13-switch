@@ -58,7 +58,6 @@ export function rpmWaitLabel(reason?: string | null): string {
     (
       {
         send_window: "RPM 分钟额度已满",
-        completion_window: "RPM 完成窗口保护",
         upstream_backoff: "上游 RPM 退避",
       } as Record<string, string>
     )[reason ?? ""] ?? "RPM 已满"

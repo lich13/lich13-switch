@@ -973,7 +973,8 @@ impl Gateway {
                         rpm_used,
                         rpm_retry_in,
                         rpm_limited,
-                        rpm_wait_reason: self.0.admission.rpm_wait_reason(&p.id, p.max_rpm),
+                        rpm_wait_reason: rpm_limited
+                            .then_some(crate::events::RpmWaitReason::SendWindow),
                         quota: self
                             .0
                             .quota

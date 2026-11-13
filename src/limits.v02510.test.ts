@@ -5,7 +5,6 @@ import { limitLabel, quotaCheckLabel } from "./limit-labels";
 
 it.each([
   ["send_window", "RPM 分钟额度已满"],
-  ["completion_window", "RPM 完成窗口保护"],
   ["upstream_backoff", "上游 RPM 退避"],
 ])("shows %s separately from the sent request counter", (reason, label) => {
   const state = structuredClone(gatewayDemo);

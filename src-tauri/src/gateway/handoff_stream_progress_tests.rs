@@ -434,7 +434,7 @@ async fn seed_retained_owner(
         .await
         .unwrap();
     assert_eq!(admission.route.provider.id, owner.id);
-    admission.commit_rpm().await.unwrap();
+    admission.commit_rpm();
     drop(admission);
     drop(budget);
     lease.complete(
@@ -530,7 +530,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         )
         .await
         .unwrap();
-    receiver.commit_rpm().await.unwrap();
+    receiver.commit_rpm();
     assert_eq!(receiver.route.provider.id, receiver_id);
 
     let compacted = compacted_hints(&boundary);
@@ -567,7 +567,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         admission.handoff_wait,
         Some(crate::usage::model::RoutingDecision::ReceiverCapacityFull)
     );
-    admission.commit_rpm().await.unwrap();
+    admission.commit_rpm();
     drop(admission);
     drop(budget);
     handoff.complete(&owner_id, None);
@@ -607,7 +607,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         .await
         .unwrap();
     assert_eq!(receiver_admission.route.provider.id, receiver_id);
-    receiver_admission.commit_rpm().await.unwrap();
+    receiver_admission.commit_rpm();
     drop(receiver_admission);
     drop(continuation_budget);
     continuation.complete(&receiver_id, None);

@@ -754,7 +754,6 @@ pub struct Protocol {
     business: Option<(super::Gateway, super::testing::BusinessIdentity)>,
     wait_budget: Option<(super::wait_budget::WaitBudget, Option<tokio::time::Instant>)>,
     traffic: Option<super::freeze::Ticket>,
-    rpm_completion: Option<super::admission::Completion>,
     observer: Option<Observer>,
     transfer: crate::usage::model::TransferMetadata,
     delivery: std::sync::Arc<Delivery>,
@@ -795,7 +794,6 @@ impl Protocol {
             business: None,
             wait_budget: None,
             traffic: None,
-            rpm_completion: None,
             observer: None,
             transfer: crate::usage::model::TransferMetadata {
                 sent_at: crate::usage::model::now(),
@@ -859,9 +857,6 @@ impl Protocol {
                 budget.compaction_execution(*deadline, false);
             }
         }
-    }
-    pub(super) fn attach_rpm(&mut self, completion: Option<super::admission::Completion>) {
-        self.rpm_completion = completion;
     }
     pub fn diagnostics(&mut self, gateway: &super::Gateway, provider: &str, model: Option<&str>) {
         self.diagnostics = gateway
@@ -1217,24 +1212,6 @@ impl Protocol {
             || (self.terminal_received
                 && !matches!(self.terminal(), Some(Terminal::Success | Terminal::Limited)));
         self.observe_routing_fault();
-        // Count upstream completion at observation time, independently of a
-        // slow or closed downstream socket. The token can settle only once.
-        if self.terminal_received {
-            let result = match self.terminal() {
-                Some(Terminal::Success | Terminal::Limited) => {
-                    Some(super::rpm::Settlement::Success)
-                }
-                Some(Terminal::Failure | Terminal::Rejected | Terminal::ModelUnavailable) => {
-                    Some(super::rpm::Settlement::Failed)
-                }
-                _ => None,
-            };
-            if let Some(result) = result {
-                if let Some(mut completion) = self.rpm_completion.take() {
-                    completion.settle(result);
-                }
-            }
-        }
         if self.terminal_received {
             if self.transfer.terminal_at.is_none() {
                 self.delivery.event("upstream_terminal_observed");
@@ -1471,23 +1448,6 @@ impl Protocol {
                 code::CLIENT_DISCONNECTED | "UNSETTLED" => Terminal::Unknown,
                 _ => Terminal::Failure,
             });
-        }
-        if let Some(mut completion) = self.rpm_completion.take() {
-            use super::rpm::Settlement;
-            let result = if self.succeeded() {
-                Settlement::Success
-            } else if self.status.is_some_and(|s| s >= 400)
-                || (self.terminal_received
-                    && matches!(
-                        self.terminal(),
-                        Some(Terminal::Failure | Terminal::Rejected | Terminal::ModelUnavailable)
-                    ))
-            {
-                Settlement::Failed
-            } else {
-                Settlement::Uncertain
-            };
-            completion.settle(result);
         }
         self.record_usage();
         self.record_end(reason);

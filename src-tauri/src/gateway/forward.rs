@@ -1154,30 +1154,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             } else {
                 upstream.headers_mut().remove(header::CONTENT_LENGTH);
             }
-            if let Err(reason) = admission.commit_rpm().await {
-                admission.permits.neutral(&settings);
-                return match reason {
-                    Rejected::RateLimited(seconds) => {
-                        let mut response = error(
-                            StatusCode::TOO_MANY_REQUESTS,
-                            code::RPM_LIMIT,
-                            "RPM 发送保护生效，请稍后重试",
-                        );
-                        response
-                            .headers_mut()
-                            .insert(header::RETRY_AFTER, seconds.max(1).into());
-                        response
-                    }
-                    Rejected::Stopped => {
-                        error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
-                    }
-                    _ => error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        code::STALE,
-                        "供应商配置已变化，请重试",
-                    ),
-                };
-            }
+            admission.commit_rpm();
             attempted = attempted.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let rerouted = previous_provider
@@ -1189,7 +1166,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.attach_wait_budget(&request_budget);
             protocol.attach_failure_rules(&settings.custom_failure_rules);
             request_budget.describe(Some(&route.provider.id), model.as_deref(), "headers");
-            protocol.attach_rpm(admission.take_completion());
             protocol.set_operation(operation);
             protocol.diagnostics(&gateway, &route.provider.id, model.as_deref());
             protocol.attach_ownership(ownership.clone(), &route.provider.id);

@@ -1405,9 +1405,7 @@ async fn session_once(
             )
             .await
             .map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
-        if let Err(reason) = while_connecting(client, admission.commit_rpm()).await? {
-            return Err(rejected(reason));
-        }
+        admission.commit_rpm();
         ids.retain(|id| id != &admission.route.provider.id);
         attempts = attempts.saturating_add(1);
         ordinary_attempts = ordinary_attempts.saturating_add(1);
@@ -1427,7 +1425,6 @@ async fn session_once(
             current_model.as_deref(),
             "headers",
         );
-        attempt_protocol.attach_rpm(admission.take_completion());
         attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
         attempt_protocol.attach_routing_log(failover.routing());
@@ -2083,24 +2080,7 @@ async fn session_once(
                     None,
                 );
             }
-            match while_connecting(client, admission.commit_rpm()).await {
-                Ok(result) => result.map_err(rejected)?,
-                Err(TURN_CANCELLED) => {
-                    admission.permits.neutral(cfg);
-                    drop(admission);
-                    failover.finish(super::failover::Exit::Cancelled);
-                    protocol = None;
-                    usage_trace = None;
-                    ownership = None;
-                    failover.detach();
-                    retry_pending = false;
-                    traffic.finish();
-                    request_budget.complete(request_budget.deadline());
-                    cancellation(client).await?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
+            admission.commit_rpm();
             attempts = attempts.saturating_add(1);
             ordinary_attempts = ordinary_attempts.saturating_add(1);
             let mut next = super::protocol::Protocol::new(true);
@@ -2111,7 +2091,6 @@ async fn session_once(
                 current_model.as_deref(),
                 "headers",
             );
-            next.attach_rpm(admission.take_completion());
             next.diagnostics(g, &route.provider.id, current_model.as_deref());
             next.attach_ownership(ownership.clone(), &route.provider.id);
             next.attach_routing_log(failover.routing());
@@ -2647,18 +2626,7 @@ async fn session_once(
                             *next_turn = Some(frame);
                             return Err((1999, "compaction handoff"));
                         }
-                        match while_connecting(client, admission.commit_rpm()).await {
-                            Ok(result) => result.map_err(rejected)?,
-                            Err(TURN_CANCELLED) => {
-                                admission.permits.neutral(cfg);
-                                drop(admission);
-                                traffic.finish();
-                                request_budget.complete(request_budget.deadline());
-                                cancellation(client).await?;
-                                continue;
-                            }
-                            Err(error) => return Err(error),
-                        }
+                        admission.commit_rpm();
                         turn = Some(admission)
                     }
                     Err(TURN_CANCELLED) => {
@@ -2690,7 +2658,6 @@ async fn session_once(
                     current_model.as_deref(),
                     "headers",
                 );
-                next_protocol.attach_rpm(turn.as_mut().and_then(|a| a.take_completion()));
                 next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
                 next_protocol.attach_routing_log(failover.routing());

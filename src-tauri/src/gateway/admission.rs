@@ -1,6 +1,6 @@
 //! Request slots and bounded FIFO admission. Behavior informed by Sub2API
 //! a3eb7ef3 concurrency_service / account scheduler; independently implemented in Rust.
-use super::rpm::{Ledger, Settlement};
+use super::rpm::Ledger;
 use super::{
     circuit::Circuit, health_settlement::Permits, model::Provider, routing::Requirement, Route,
 };
@@ -35,7 +35,6 @@ struct State {
     intake: HashMap<String, (bool, bool)>,
     active: HashMap<String, usize>,
     rpm: Ledger,
-    rpm_pending: HashMap<String, usize>,
     waiting: VecDeque<(u64, Vec<String>)>,
     capacity_waits: HashMap<u64, (String, Instant, WaitKind)>,
     resets: HashMap<String, u64>,
@@ -67,35 +66,8 @@ pub struct Slot {
 struct RpmReservation {
     scheduler: Scheduler,
     id: String,
-    committed: bool,
-    version: String,
-    require_queued: bool,
-    epoch: u64,
-    completion: Option<Completion>,
-    committed_limit: u32,
-}
-/// Moved from admission to the protocol observer after actual send commitment.
-/// Drop retains an uncertainty guard, never inventing an upstream success.
-pub(super) struct Completion {
-    scheduler: Scheduler,
-    id: String,
-    token: Option<String>,
-}
-impl Completion {
-    pub(super) fn settle(&mut self, result: Settlement) {
-        let Some(token) = self.token.take() else {
-            return;
-        };
-        let mut s = self.scheduler.0.state.lock().unwrap();
-        s.rpm.settle(&self.id, &token, result);
-        drop(s);
-        self.scheduler.signal();
-    }
-}
-impl Drop for Completion {
-    fn drop(&mut self) {
-        self.settle(Settlement::Uncertain);
-    }
+    token: u64,
+    sent: bool,
 }
 
 struct Waiting {
@@ -137,78 +109,25 @@ pub struct Budget {
     intake: Option<(super::compaction::Intake, Option<String>)>,
 }
 impl Admission {
-    pub(super) fn take_completion(&mut self) -> Option<Completion> {
-        self.rpm.as_mut().and_then(|r| r.completion.take())
-    }
-    pub async fn commit_rpm(&mut self) -> Result<(), Rejected> {
+    /// Marks the request as sent; an unsent admission returns its RPM budget on drop.
+    pub fn commit_rpm(&mut self) {
         if let Some(rpm) = self.rpm.as_mut() {
-            rpm.commit().await?;
-        }
-        Ok(())
-    }
-}
-impl RpmReservation {
-    async fn commit(&mut self) -> Result<(), Rejected> {
-        if !self.committed {
-            let mut s = self.scheduler.0.state.lock().unwrap();
-            let limit = s.rpm_limits.get(&self.id).copied().unwrap_or(0);
-            s.rpm.prune();
-            let rejected = self.revalidate(&s).err().or_else(|| {
-                s.rpm.gate(&self.id, limit, 0).map(|(delay, _)| {
-                    Rejected::RateLimited(delay.as_millis().div_ceil(1000) as u64)
-                })
-            });
-            if let Some(reason) = rejected {
-                return Err(reason);
-            }
-            let token = s.rpm.charge(&self.id);
-            self.completion = Some(Completion {
-                scheduler: self.scheduler.clone(),
-                id: self.id.clone(),
-                token: Some(token),
-            });
-            Self::release_pending(&mut s, &self.id);
-            self.committed = true;
-            self.committed_limit = limit;
-            drop(s);
-            self.scheduler.signal();
-            return Ok(());
-        }
-        let s = self.scheduler.0.state.lock().unwrap();
-        self.revalidate(&s)?;
-        if s.rpm_limits.get(&self.id).copied().unwrap_or(0) != self.committed_limit {
-            return Err(Rejected::Unavailable);
-        }
-        Ok(())
-    }
-    fn revalidate(&self, s: &State) -> Result<(), Rejected> {
-        if !s.running || s.epoch != self.epoch {
-            Err(Rejected::Stopped)
-        } else if s.versions.get(&self.id) != Some(&self.version)
-            || (self.require_queued && !s.queued.contains(&self.id))
-        {
-            Err(Rejected::Unavailable)
-        } else {
-            Ok(())
-        }
-    }
-    fn release_pending(state: &mut State, id: &str) {
-        if let Some(value) = state.rpm_pending.get_mut(id) {
-            *value = value.saturating_sub(1);
-            if *value == 0 {
-                state.rpm_pending.remove(id);
-            }
+            rpm.sent = true;
         }
     }
 }
 impl Drop for RpmReservation {
     fn drop(&mut self) {
-        if self.committed {
+        if self.sent {
             return;
         }
-        let mut s = self.scheduler.0.state.lock().unwrap();
-        Self::release_pending(&mut s, &self.id);
-        drop(s);
+        self.scheduler
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .rpm
+            .refund(&self.id, self.token);
         self.scheduler.signal();
     }
 }
@@ -260,10 +179,6 @@ impl Scheduler {
             events,
         }))
     }
-    #[cfg(test)]
-    pub(super) fn rpm_ledger(&self) -> Ledger {
-        self.0.state.lock().unwrap().rpm.clone()
-    }
     fn available(s: &State, id: &str) -> bool {
         let limit = s.limits[id];
         limit == 0 || s.active.get(id).copied().unwrap_or(0) < limit as usize
@@ -296,11 +211,6 @@ impl Scheduler {
             .iter()
             .map(|p| (p.id.clone(), p.max_concurrency))
             .collect();
-        for provider in providers {
-            if provider.max_rpm > 0 && s.rpm_limits.get(&provider.id) == Some(&0) {
-                s.rpm.enable(&provider.id);
-            }
-        }
         s.rpm_limits = providers
             .iter()
             .map(|p| (p.id.clone(), p.max_rpm))
@@ -328,76 +238,15 @@ impl Scheduler {
             .filter(|p| p.queued)
             .map(|p| p.id.clone())
             .collect();
-        s.rpm.prune();
         drop(s);
         self.signal();
     }
+    /// Sends counted in the current window and seconds until the next one fits.
     pub fn rpm_status(&self, id: &str, limit: u32) -> (usize, u64, bool) {
         let mut s = self.0.state.lock().unwrap();
-        s.rpm.prune();
         let used = if limit == 0 { 0 } else { s.rpm.used(id) };
-        let gate = s.rpm.gate(
-            id,
-            limit,
-            s.rpm_pending.get(id).copied().unwrap_or_default(),
-        );
-        (
-            used,
-            gate.map_or(0, |(d, _)| d.as_millis().div_ceil(1000) as u64),
-            gate.is_some(),
-        )
-    }
-    pub(super) fn rpm_wait_reason(
-        &self,
-        id: &str,
-        limit: u32,
-    ) -> Option<crate::events::RpmWaitReason> {
-        let mut s = self.0.state.lock().unwrap();
-        s.rpm.prune();
-        s.rpm
-            .gate(
-                id,
-                limit,
-                s.rpm_pending.get(id).copied().unwrap_or_default(),
-            )
-            .map(|(_, reason)| reason)
-    }
-    pub(super) fn rpm_backoff(&self, id: &str, delay: Duration) {
-        let mut s = self.0.state.lock().unwrap();
-        s.rpm.prune();
-        s.rpm.backoff(id, delay);
-        drop(s);
-        self.signal();
-    }
-    fn reserve_rpm(
-        &self,
-        state: &mut State,
-        id: &str,
-        limit: u32,
-        require_queued: bool,
-    ) -> Result<RpmReservation, Rejected> {
-        state.rpm.prune();
-        if let Some((delay, _)) = state.rpm.gate(
-            id,
-            limit,
-            state.rpm_pending.get(id).copied().unwrap_or_default(),
-        ) {
-            return Err(Rejected::RateLimited(
-                delay.as_millis().div_ceil(1000) as u64
-            ));
-        }
-        // Unlimited reservations still revalidate on commit, including 0 -> N edits.
-        *state.rpm_pending.entry(id.into()).or_default() += 1;
-        Ok(RpmReservation {
-            scheduler: self.clone(),
-            id: id.into(),
-            committed: false,
-            version: state.versions.get(id).cloned().unwrap_or_default(),
-            require_queued,
-            epoch: state.epoch,
-            completion: None,
-            committed_limit: limit,
-        })
+        let gate = s.rpm.gate(id, limit);
+        (used, gate.map_or(0, seconds), gate.is_some())
     }
     pub fn counts(&self) -> (HashMap<String, usize>, usize) {
         let s = self.0.state.lock().unwrap();
@@ -634,7 +483,6 @@ impl Scheduler {
         let epoch = self.0.state.lock().unwrap().epoch;
         let mut waiting: Option<Waiting> = None;
         let mut deadline = tokio::time::Instant::now() + budget.remaining;
-        let mut rpm_waited = Duration::ZERO;
         let mut cooling;
         let mut rate_retry;
         let result = 'admission: loop {
@@ -757,16 +605,8 @@ impl Scheduler {
                     let Some(route) = eligible.iter().find(|r| r.provider.id == *owner) else {
                         break Err(Rejected::Unavailable);
                     };
-                    s.rpm.prune();
                     let rpm_limit = s.rpm_limits.get(owner).copied().unwrap_or_default();
-                    let rpm_blocked = s
-                        .rpm
-                        .gate(
-                            owner,
-                            rpm_limit,
-                            s.rpm_pending.get(owner).copied().unwrap_or_default(),
-                        )
-                        .is_some();
+                    let rpm_blocked = s.rpm.gate(owner, rpm_limit).is_some();
                     if !route.health_for(requirement).available
                         || rpm_blocked
                         || Self::available(&s, owner)
@@ -843,12 +683,9 @@ impl Scheduler {
                         // A FIFO follower also waits for this provider's RPM
                         // budget. It must not time out before the head waiter
                         // gets a chance to send when the minute rolls forward.
-                        s.rpm.prune();
                         let limit = s.rpm_limits.get(id).copied().unwrap_or_default();
-                        let pending = s.rpm_pending.get(id).copied().unwrap_or_default();
-                        if let Some((delay, _)) = s.rpm.gate(id, limit, pending) {
-                            let retry = delay.as_millis().div_ceil(1000).max(1) as u64;
-                            rate_retry = Some(rate_retry.unwrap_or(0).max(retry));
+                        if let Some(delay) = s.rpm.gate(id, limit) {
+                            rate_retry = Some(rate_retry.unwrap_or(0).max(seconds(delay)));
                         }
                         if first_turn && route.provider.take_new_threads {
                             intake_skip =
@@ -857,13 +694,8 @@ impl Scheduler {
                         continue;
                     }
                     let rpm_limit = s.rpm_limits.get(id).copied().unwrap_or_default();
-                    s.rpm.prune();
-                    if let Some((delay, _)) = s.rpm.gate(
-                        id,
-                        rpm_limit,
-                        s.rpm_pending.get(id).copied().unwrap_or_default(),
-                    ) {
-                        rate_retry = Some(delay.as_millis().div_ceil(1000).max(1) as u64);
+                    if let Some(delay) = s.rpm.gate(id, rpm_limit) {
+                        rate_retry = Some(seconds(delay));
                         break;
                     }
                     if budget
@@ -880,47 +712,28 @@ impl Scheduler {
                             drop(permits);
                             continue 'admission;
                         }
-                        match self.reserve_rpm(
-                            &mut s,
-                            id,
-                            rpm_limit,
-                            !manual && !budget.fixed_provider,
-                        ) {
-                            Ok(rpm) => {
-                                *s.active.entry(id.clone()).or_default() += 1;
-                                accepted = Some(Admission {
-                                    handoff_wait: (capacity_blocked
-                                        && budget.handoff_owner.as_deref() == Some(id))
-                                    .then_some(
-                                        crate::usage::model::RoutingDecision::ReceiverCapacityFull,
-                                    )
-                                    .or(intake_skip),
-                                    route: (**route).clone(),
-                                    permits,
-                                    rpm: Some(rpm),
-                                    reset_generation: s.resets.get(id).copied().unwrap_or(0),
-                                    slot: Slot {
-                                        scheduler: self.clone(),
-                                        id: id.clone(),
-                                    },
-                                });
-                                break;
-                            }
-                            Err(Rejected::RateLimited(retry)) => {
-                                if let Some(t) = &budget.traffic {
-                                    t.waiting();
-                                }
-                                rate_retry = Some(retry);
-                                drop(permits);
-                                break;
-                            }
-                            Err(_) => {
-                                if let Some(t) = &budget.traffic {
-                                    t.waiting();
-                                }
-                                drop(permits);
-                            }
-                        }
+                        let rpm = (rpm_limit > 0).then(|| RpmReservation {
+                            scheduler: self.clone(),
+                            id: id.clone(),
+                            token: s.rpm.charge(id),
+                            sent: false,
+                        });
+                        *s.active.entry(id.clone()).or_default() += 1;
+                        accepted = Some(Admission {
+                            handoff_wait: (capacity_blocked
+                                && budget.handoff_owner.as_deref() == Some(id))
+                            .then_some(crate::usage::model::RoutingDecision::ReceiverCapacityFull)
+                            .or(intake_skip),
+                            route: (**route).clone(),
+                            permits,
+                            rpm,
+                            reset_generation: s.resets.get(id).copied().unwrap_or(0),
+                            slot: Slot {
+                                scheduler: self.clone(),
+                                id: id.clone(),
+                            },
+                        });
+                        break;
                     }
                 }
                 cooling = (!any_ready).then_some(if retry_in == u64::MAX { 1 } else { retry_in });
@@ -956,40 +769,26 @@ impl Scheduler {
                     let _ = self.0.events.send(());
                 }
             }
-            let wait_started = Instant::now();
-            let pause_started = budget
-                .traffic
-                .as_ref()
-                .map_or(Duration::ZERO, |t| t.paused_for());
-            let waiting_for_rpm = rate_retry.is_some();
             tokio::select! {
                 biased;
                 _ = super::freeze::changed(&mut freeze_changes) => {},
                 _ = notified => {},
-                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity && !waiting_for_rpm => break Err(cooling.map_or(Rejected::Timeout, Rejected::Cooling)),
+                // RPM waits share the request's waiting budget with every other wait.
+                _ = tokio::time::sleep_until(deadline), if !budget.protected_capacity => break Err(match (rate_retry, cooling) {
+                    (Some(retry), _) => Rejected::RateLimited(retry),
+                    (None, Some(retry)) => Rejected::Cooling(retry),
+                    (None, None) => Rejected::Timeout,
+                }),
                 _ = async {
                     if let Some(at) = next_wake { tokio::time::sleep_until(at).await; }
                     else { std::future::pending::<()>().await; }
                 } => {},
             }
-            if waiting_for_rpm {
-                let paused = budget
-                    .traffic
-                    .as_ref()
-                    .map_or(Duration::ZERO, |t| t.paused_for())
-                    .saturating_sub(pause_started);
-                let elapsed = wait_started.elapsed().saturating_sub(paused);
-                deadline += elapsed;
-                rpm_waited += elapsed;
-            }
         };
         if waiting.is_some() {
-            budget.remaining = budget.remaining.saturating_sub(
-                started
-                    .elapsed()
-                    .saturating_sub(rpm_waited)
-                    .saturating_sub(paused),
-            );
+            budget.remaining = budget
+                .remaining
+                .saturating_sub(started.elapsed().saturating_sub(paused));
         }
         drop(waiting);
         self.signal();
@@ -1029,4 +828,9 @@ impl Drop for CapacityWait {
             .remove(&self.ticket);
         self.scheduler.signal();
     }
+}
+
+/// Whole seconds a caller should wait, never less than one.
+fn seconds(delay: Duration) -> u64 {
+    delay.as_millis().div_ceil(1000).max(1) as u64
 }

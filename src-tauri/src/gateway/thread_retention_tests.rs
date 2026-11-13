@@ -102,7 +102,7 @@ async fn scheduler_lowering_limit_preserves_existing_active_slots() {
         )
         .await
         .unwrap();
-    first.commit_rpm().await.unwrap();
+    first.commit_rpm();
     let mut second_budget = Budget::new(2);
     let mut second = gateway
         .0
@@ -117,7 +117,7 @@ async fn scheduler_lowering_limit_preserves_existing_active_slots() {
         )
         .await
         .unwrap();
-    second.commit_rpm().await.unwrap();
+    second.commit_rpm();
     assert_eq!(gateway.view().providers[0].active_requests, 2);
 
     super::update(

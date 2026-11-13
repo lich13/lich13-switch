@@ -89,7 +89,6 @@ pub struct QuotaCheck {
 #[serde(rename_all = "snake_case")]
 pub enum RpmWaitReason {
     SendWindow,
-    CompletionWindow,
     UpstreamBackoff,
     #[serde(other)]
     Unknown,
