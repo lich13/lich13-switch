@@ -11,6 +11,7 @@ use super::{
     routing_log::RoutingLog,
     ClientId, Gateway,
 };
+use crate::gateway::test_support::digest;
 use crate::{
     events::{self, Filter as EventFilter, Reason as EventReason},
     usage::{
@@ -69,10 +70,6 @@ impl Fixture {
             usage,
         }
     }
-}
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
 }
 
 fn hints(boundary: &str) -> RequestHints {

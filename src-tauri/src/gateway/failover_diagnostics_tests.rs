@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::events::{self, Action, Reason};
+use crate::gateway::test_support::digest;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -16,10 +17,6 @@ use std::time::Duration;
 const MODEL: &str = "fixture-model";
 const THREAD_ID: &str = "fixture-v02512-steady-thread";
 const WINDOW: &str = "fixture-v02512-window";
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
-}
 
 fn seed_consumed_boundary(gateway: &Gateway, provider_id: &str) {
     let session = digest(THREAD_ID);

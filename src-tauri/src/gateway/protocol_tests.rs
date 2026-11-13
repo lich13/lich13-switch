@@ -1,6 +1,6 @@
 use crate::gateway::protocol::{Observation, Observer, Protocol, Terminal};
+use crate::gateway::test_support::encoded;
 use serde_json::json;
-use std::io::Write;
 
 const OBSERVATION_LIMIT: usize = 2 * 1024 * 1024;
 
@@ -53,24 +53,6 @@ fn responses_tail_does_not_accept_an_unscoped_done_marker() {
     protocol.begin_usage_tail(false);
     protocol.feed(b"data: [DONE]\n\n");
     assert!(!protocol.terminal_observed());
-}
-
-fn encoded(encoding: &str, raw: &[u8]) -> Vec<u8> {
-    match encoding {
-        "identity" => raw.to_vec(),
-        "gzip" => {
-            let mut encoder = flate2::write::GzEncoder::new(vec![], flate2::Compression::fast());
-            encoder.write_all(raw).unwrap();
-            encoder.finish().unwrap()
-        }
-        "deflate" => {
-            let mut encoder = flate2::write::ZlibEncoder::new(vec![], flate2::Compression::fast());
-            encoder.write_all(raw).unwrap();
-            encoder.finish().unwrap()
-        }
-        "zstd" => zstd::encode_all(raw, 1).unwrap(),
-        _ => panic!("unsupported fixture encoding"),
-    }
 }
 
 #[test]

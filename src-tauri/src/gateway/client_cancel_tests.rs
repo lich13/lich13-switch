@@ -1,12 +1,16 @@
 //! Real loopback TCP regressions for downstream cancellation.
 use super::{Edit, Gateway};
+use crate::gateway::test_support::downstream::{
+    attach_observers, downstream_websocket, edit, local_auth, read_http_request, usage_records,
+    REQUEST_BODY,
+};
 use crate::{
     events::{
         Action, Category, ClassifiedRecord, Filter as EventFilter, Level, Reason as EventReason,
         Service as EventService,
     },
     usage::{
-        model::{EndCause, Filter as UsageFilter, Record as UsageRecord},
+        model::{EndCause, Record as UsageRecord},
         Service as UsageService,
     },
 };
@@ -22,7 +26,6 @@ use tokio::{
     sync::oneshot,
 };
 
-const REQUEST_BODY: &[u8] = br#"{"model":"fixture-model","input":"fixture","stream":true}"#;
 const WAIT: Duration = Duration::from_secs(4);
 const FAST_RELEASE: Duration = Duration::from_millis(300);
 const USAGE_TAIL: Duration = Duration::from_millis(1500);
@@ -79,36 +82,6 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
         .await
         .unwrap();
     (dir, gateway)
-}
-
-fn edit(gateway: &Gateway, dir: &tempfile::TempDir, edit: Edit) {
-    gateway
-        .edit(edit, &gateway.view().revision, dir.path())
-        .unwrap();
-}
-
-fn local_auth(gateway: &Gateway) -> (u16, String) {
-    let port = gateway.view().settings.port;
-    let token = gateway.0.inner.lock().store.local_token.clone();
-    (port, token)
-}
-
-fn attach_observers(dir: &tempfile::TempDir, gateway: &Gateway) -> (UsageService, EventService) {
-    let usage = UsageService::new(&dir.path().join("usage"));
-    let events = EventService::new(&dir.path().join("events"));
-    gateway.set_usage(usage.clone());
-    gateway.set_diagnostics(events.clone());
-    (usage, events)
-}
-
-fn usage_records(service: &UsageService) -> Vec<UsageRecord> {
-    service
-        .query(|store| {
-            let page = store.logs(&UsageFilter::default())?;
-            assert_eq!(page.total, page.rows.len() as u64);
-            Ok(page.rows)
-        })
-        .unwrap()
 }
 
 async fn wait_for_usage_record(service: &UsageService) -> UsageRecord {
@@ -222,37 +195,6 @@ fn assert_not_successful_usage(record: &UsageRecord) {
         attempt.end.as_ref().map(|end| end.cause),
         Some(EndCause::Completed)
     );
-}
-
-async fn read_http_request(stream: &mut TcpStream) -> io::Result<()> {
-    let mut header = Vec::new();
-    let mut byte = [0u8; 1];
-    while !header.windows(4).any(|window| window == b"\r\n\r\n") {
-        if stream.read(&mut byte).await? == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "request ended in headers",
-            ));
-        }
-        header.push(byte[0]);
-        if header.len() > 32 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "request headers too large",
-            ));
-        }
-    }
-    let header = String::from_utf8_lossy(&header).to_ascii_lowercase();
-    let length = header
-        .lines()
-        .find_map(|line| line.strip_prefix("content-length:"))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    if length != 0 {
-        let mut body = vec![0; length];
-        stream.read_exact(&mut body).await?;
-    }
-    Ok(())
 }
 
 async fn wait_for_disconnect(mut stream: TcpStream) -> Instant {
@@ -523,19 +465,6 @@ async fn fin_half_close_keeps_the_response_stream_readable() {
     assert!(String::from_utf8_lossy(&response).contains("response.completed"));
     upstream_task.await.unwrap();
     gateway.stop().await.unwrap();
-}
-
-async fn downstream_websocket(gateway: &Gateway) -> yawc::TcpWebSocket {
-    let (port, token) = local_auth(gateway);
-    yawc::WebSocket::connect(
-        format!("ws://127.0.0.1:{port}/v1/responses")
-            .parse()
-            .unwrap(),
-    )
-    .with_options(yawc::Options::default().with_balanced_compression())
-    .with_request(yawc::HttpRequest::builder().header("authorization", format!("Bearer {token}")))
-    .await
-    .unwrap()
 }
 
 const CREATE: &str = r#"{"type":"response.create","model":"fixture-model","input":"fixture"}"#;

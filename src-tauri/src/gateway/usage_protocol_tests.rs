@@ -1,28 +1,11 @@
 use super::protocol::{Protocol, Terminal};
+use crate::gateway::test_support::encoded;
 use crate::usage::{
     model::{safe_id, Filter, Record},
     Service,
 };
 use serde_json::{json, Value};
-use std::{io::Write, time::Duration};
-
-fn encoded(encoding: &str, raw: &[u8]) -> Vec<u8> {
-    match encoding {
-        "identity" => raw.to_vec(),
-        "gzip" => {
-            let mut encoder = flate2::write::GzEncoder::new(vec![], flate2::Compression::fast());
-            encoder.write_all(raw).unwrap();
-            encoder.finish().unwrap()
-        }
-        "deflate" => {
-            let mut encoder = flate2::write::ZlibEncoder::new(vec![], flate2::Compression::fast());
-            encoder.write_all(raw).unwrap();
-            encoder.finish().unwrap()
-        }
-        "zstd" => zstd::encode_all(raw, 1).unwrap(),
-        _ => panic!("unsupported fixture encoding"),
-    }
-}
+use std::time::Duration;
 
 fn sse(values: &[Value]) -> Vec<u8> {
     let mut bytes = Vec::new();

@@ -12,6 +12,8 @@ use super::{
     replay::{self, RequestHints, WireBody},
     *,
 };
+use crate::gateway::test_support::digest;
+use crate::gateway::test_support::loopback::{start, update};
 use crate::usage::Service;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response};
@@ -78,10 +80,6 @@ mod model_detour_ws_tests;
 
 fn hints(value: Value) -> RequestHints {
     RequestHints::from_value(value, false).expect("fixture request metadata")
-}
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
 }
 
 #[test]
@@ -477,19 +475,6 @@ async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
         )
         .unwrap();
     (dir, gateway)
-}
-
-fn update(gateway: &Gateway, dir: &tempfile::TempDir, edit: Edit) {
-    gateway
-        .edit(edit, &gateway.view().revision, dir.path())
-        .unwrap();
-}
-
-async fn start(gateway: &Gateway, dir: &tempfile::TempDir) {
-    gateway
-        .start(&gateway.view().revision, dir.path())
-        .await
-        .unwrap();
 }
 
 async fn request(gateway: &Gateway, session: &str, body: Vec<u8>) -> Response<Incoming> {

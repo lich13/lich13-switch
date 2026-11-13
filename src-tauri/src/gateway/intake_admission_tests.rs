@@ -4,10 +4,12 @@
 //! This file is registered by the v0.20 fixture module so it can reuse its
 //! loopback server, gateway, and request helpers.
 use super::*;
+use crate::gateway::test_support::policy_provider;
+use crate::gateway::test_support::settled;
 use crate::gateway::{
     admission::{Budget, Rejected},
     compaction::{Intake, Registry},
-    model::{Edit, Provider, Store},
+    model::{Edit, Store},
     routing::Requirement,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -17,41 +19,9 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::{fs, net::TcpListener, sync::Arc, time::Duration};
 
-fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
-    Provider {
-        id: id.into(),
-        name: id.into(),
-        base_url: format!("https://{id}.example.invalid/v1"),
-        token: "fixture-token".into(),
-        queued: true,
-        version: format!("{id}-version"),
-        max_concurrency: 0,
-        max_rpm: 0,
-        allowed_models: None,
-        handoff_after_compaction: handoff,
-        take_new_threads: take,
-        search_only: false,
-    }
-}
-
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     listener.local_addr().unwrap().port()
-}
-
-async fn settled(gateway: &Gateway) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while gateway
-            .view()
-            .providers
-            .iter()
-            .any(|provider| provider.active_requests != 0)
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("fixture request did not settle");
 }
 
 #[test]

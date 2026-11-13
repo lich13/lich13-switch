@@ -3,6 +3,7 @@
 //!
 //! This module is registered below the v0.20 fixture module so the loopback
 //! gateway helpers remain available. Every persisted value is synthetic.
+use crate::gateway::test_support::compacted_hints;
 use crate::gateway::{
     admission::{Budget, Rejected},
     compaction::Registry,
@@ -35,13 +36,6 @@ fn ordinary_hints() -> RequestHints {
         false,
     )
     .expect("fixture request metadata")
-}
-
-fn compacted_hints(boundary: &str) -> RequestHints {
-    RequestHints {
-        compacted_window: Some(boundary.to_owned()),
-        ..Default::default()
-    }
 }
 
 #[test]

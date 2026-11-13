@@ -1,16 +1,8 @@
 use super::*;
 use crate::gateway::admission::{Budget, Rejected};
 use crate::gateway::routing::Requirement;
+use crate::gateway::test_support::until;
 
-async fn until(f: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !f() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("state did not settle");
-}
 fn limit(g: &Gateway, t: &tempfile::TempDir, index: usize, max: u32) {
     update(
         g,

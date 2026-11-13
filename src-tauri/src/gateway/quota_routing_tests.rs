@@ -2,20 +2,18 @@
 //!
 //! Upstreams are synthetic loopback HTTP/WebSocket servers.  The fixtures use
 //! temporary gateway stores and never read or write an installed client store.
-use super::{
-    model::Edit,
-    replay::{self, WireBody},
-    *,
+use super::replay::{self, WireBody};
+use crate::gateway::test_support::loopback::{
+    configure, fixture, json_response, next_frame, request, server, start, ws_client,
+    LoopbackServer, COMPLETED, CREATE, CREATED, TEMPORARY_429,
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
-use hyper::{body::Incoming, Request, Response, StatusCode};
-use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use hyper::{Response, StatusCode};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::{
-    convert::Infallible,
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -23,238 +21,16 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
 
-const CREATED: &str =
-    r#"{"type":"response.created","response":{"id":"fixture-response","model":"fixture-model"}}"#;
-const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-response","model":"fixture-model","status":"completed"}}"#;
-const TEMPORARY_429: &str = r#"{"type":"error","error":{"code":"USAGE_LIMIT_EXCEEDED","message":"try again later","status":429}}"#;
 const DAILY_LIMIT: &str =
     r#"{"error":{"code":"429","reason":"DAILY_LIMIT_EXCEEDED","message":"daily quota exhausted"}}"#;
 const DAILY_LIMIT_TEXT: &str = "code=429 reason=\"DAILY_LIMIT_EXCEEDED\" daily quota exhausted";
-const CREATE: &str = r#"{"type":"response.create","model":"fixture-model","input":[{"role":"user","content":"fixture"}]}"#;
-
-struct LoopbackServer {
-    port: u16,
-    stop: Option<oneshot::Sender<()>>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl LoopbackServer {
-    async fn stop(mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
-}
-
-impl Drop for LoopbackServer {
-    fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
-async fn server<F, Fut>(handler: F) -> LoopbackServer
-where
-    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response<WireBody>> + Send + 'static,
-{
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let (stop, mut stopped) = oneshot::channel();
-    let handler = Arc::new(handler);
-    let task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = &mut stopped => break,
-                accepted = listener.accept() => {
-                    let Ok((stream, _)) = accepted else { break };
-                    let handler = handler.clone();
-                    tokio::spawn(async move {
-                        let _ = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(
-                                hyper_util::rt::TokioIo::new(stream),
-                                hyper::service::service_fn(move |request| {
-                                    let handler = handler.clone();
-                                    async move { Ok::<_, Infallible>(handler(request).await) }
-                                }),
-                            )
-                            .with_upgrades()
-                            .await;
-                    });
-                }
-            }
-        }
-    });
-    LoopbackServer {
-        port,
-        stop: Some(stop),
-        task: Some(task),
-    }
-}
-
-fn json_response(
-    status: StatusCode,
-    body: impl Into<Bytes>,
-    retry_after: Option<&str>,
-) -> Response<WireBody> {
-    let mut response = Response::builder()
-        .status(status)
-        .header("content-type", "application/json");
-    if let Some(retry_after) = retry_after {
-        response = response.header("retry-after", retry_after);
-    }
-    response.body(replay::full(body.into())).unwrap()
-}
-
 fn sse_response(body: impl Into<Bytes>) -> Response<WireBody> {
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
         .body(replay::full(body.into()))
         .unwrap()
-}
-
-async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
-    let dir = tempfile::tempdir().unwrap();
-    let first = urls
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "https://fixture.example.invalid/v1".into());
-    std::fs::write(
-        dir.path().join("config.toml"),
-        format!(
-            "model_provider='custom'\n[model_providers.custom]\nbase_url = {}\nexperimental_bearer_token = \"fixture-token\"\nwire_api='responses'\nsupports_websockets=false\n",
-            serde_json::to_string(&first).unwrap()
-        ),
-    )
-    .unwrap();
-    let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut settings = gateway.view().settings;
-    settings.port = port;
-    update(&gateway, &dir, Edit::Settings { settings });
-    for url in urls {
-        update(
-            &gateway,
-            &dir,
-            Edit::SaveProvider {
-                search_only: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "fixture-token".into(),
-                name: None,
-            },
-        );
-    }
-    update(
-        &gateway,
-        &dir,
-        Edit::Mode {
-            mode: "auto".into(),
-        },
-    );
-    (dir, gateway)
-}
-
-fn update(gateway: &Gateway, dir: &tempfile::TempDir, edit: Edit) {
-    gateway
-        .edit(edit, &gateway.view().revision, dir.path())
-        .unwrap();
-}
-
-fn configure(gateway: &Gateway, dir: &tempfile::TempDir) {
-    update(
-        gateway,
-        dir,
-        Edit::Settings {
-            settings: Settings {
-                max_retries: 2,
-                capacity_retry_seconds: 1,
-                websocket_retry_seconds: 1,
-                queue_seconds: 1,
-                rate_limit_seconds: 1,
-                first_byte_seconds: 3,
-                idle_seconds: 3,
-                failure_threshold: 10,
-                transient_failure_threshold: 10,
-                ..gateway.view().settings
-            },
-        },
-    );
-    for provider in gateway.view().providers {
-        update(
-            gateway,
-            dir,
-            Edit::RpmProvider {
-                id: provider.id,
-                max_rpm: 100,
-            },
-        );
-    }
-}
-
-async fn start(gateway: &Gateway, dir: &tempfile::TempDir) {
-    gateway
-        .start(&gateway.view().revision, dir.path())
-        .await
-        .unwrap();
-}
-
-async fn request(gateway: &Gateway, session: &str, body: impl AsRef<[u8]>) -> Response<Incoming> {
-    let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
-        .build(super::connector::Connector::new(Duration::from_secs(3), 0));
-    let (token, port) = {
-        let state = gateway.0.inner.lock();
-        (state.store.local_token.clone(), state.store.settings.port)
-    };
-    let req = Request::builder()
-        .method("POST")
-        .uri(format!("http://127.0.0.1:{port}/v1/responses"))
-        .header("authorization", format!("Bearer {token}"))
-        .header("content-type", "application/json")
-        .header("session_id", session)
-        .body(replay::full(Bytes::copy_from_slice(body.as_ref())))
-        .unwrap();
-    client.request(req).await.unwrap()
-}
-
-async fn ws_client(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {
-    let (token, port) = {
-        let state = gateway.0.inner.lock();
-        (state.store.local_token.clone(), state.store.settings.port)
-    };
-    yawc::WebSocket::connect(
-        format!("ws://127.0.0.1:{port}/v1/responses?future=keep")
-            .parse()
-            .unwrap(),
-    )
-    .with_options(yawc::Options::default().with_balanced_compression())
-    .with_request(
-        yawc::HttpRequest::builder()
-            .header("authorization", format!("Bearer {token}"))
-            .header("session_id", session),
-    )
-    .await
-    .unwrap()
-}
-
-async fn next_frame(ws: &mut yawc::TcpWebSocket) -> yawc::Frame {
-    tokio::time::timeout(Duration::from_secs(8), ws.next())
-        .await
-        .expect("fixture WebSocket timed out")
-        .expect("fixture WebSocket closed")
 }
 
 async fn native_ws_server<F, Fut>(handler: F) -> LoopbackServer

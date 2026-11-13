@@ -12,6 +12,8 @@ use super::{
     routing::Requirement,
     wire_progress, *,
 };
+use crate::gateway::test_support::compacted_hints;
+use crate::gateway::test_support::policy_provider;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, StreamBody};
@@ -25,23 +27,6 @@ use std::{
     time::Duration,
 };
 use tokio::io::AsyncWriteExt;
-
-fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
-    Provider {
-        id: id.into(),
-        name: id.into(),
-        base_url: format!("https://{id}.example.invalid/v1"),
-        token: "fixture-token".into(),
-        queued: true,
-        version: format!("{id}-version"),
-        max_concurrency: 0,
-        max_rpm: 0,
-        allowed_models: None,
-        handoff_after_compaction: handoff,
-        take_new_threads: take,
-        search_only: false,
-    }
-}
 
 fn projected_hints(raw: &[u8], chunk: usize) -> RequestHints {
     let mut projector = Projector::default();
@@ -160,13 +145,6 @@ fn ordinary_hints() -> RequestHints {
         false,
     )
     .unwrap()
-}
-
-fn compacted_hints(boundary: &str) -> RequestHints {
-    RequestHints {
-        compacted_window: Some(boundary.to_owned()),
-        ..Default::default()
-    }
 }
 
 fn seed_boundary(

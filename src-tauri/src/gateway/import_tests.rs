@@ -1,14 +1,5 @@
 use super::*;
-
-async fn settle(g: &Gateway) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while g.view().providers.iter().any(|p| p.active_requests != 0) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("fixture request did not settle");
-}
+use crate::gateway::test_support::settle;
 
 fn import_link(base_url: &str, token: &str, display_name: &str) -> Edit {
     Edit::ImportLink {

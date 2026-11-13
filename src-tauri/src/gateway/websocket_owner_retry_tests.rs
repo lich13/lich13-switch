@@ -2,6 +2,8 @@
 use super::*;
 use crate::events::{Action, Reason, Record};
 use crate::gateway::circuit::{Circuit, CircuitState, Outcome};
+use crate::gateway::test_support::loopback::{COMPLETED, CREATED};
+use crate::gateway::test_support::settled;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -9,10 +11,6 @@ use std::sync::{
 };
 
 const CREATE: &str = r#"{"type":"response.create","model":"fixture-model","input":"followup"}"#;
-const CREATED: &str =
-    r#"{"type":"response.created","response":{"id":"fixture-response","model":"fixture-model"}}"#;
-const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-response","model":"fixture-model","status":"completed"}}"#;
-
 fn retry_settings(gateway: &Gateway, dir: &tempfile::TempDir) {
     update(
         gateway,
@@ -45,21 +43,6 @@ async fn next_frame(ws: &mut yawc::TcpWebSocket) -> yawc::Frame {
         .await
         .expect("fixture websocket timed out")
         .expect("fixture websocket closed")
-}
-
-async fn settled(gateway: &Gateway) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while gateway
-            .view()
-            .providers
-            .iter()
-            .any(|provider| provider.active_requests != 0)
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("fixture request did not settle");
 }
 
 async fn responses_client(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {

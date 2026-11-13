@@ -5,6 +5,7 @@
 //! decimal classifier and the service's single-flight state without adding a
 //! product-facing hook.
 use super::*;
+use crate::gateway::test_support::loopback::LoopbackServer;
 use bytes::Bytes;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
@@ -46,34 +47,6 @@ fn query(base: String, id: &str, version: &str) -> Query {
         base,
         token: "fixture-token".into(),
         client: http_client(),
-    }
-}
-
-struct LoopbackServer {
-    port: u16,
-    stop: Option<oneshot::Sender<()>>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl LoopbackServer {
-    async fn stop(mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
-}
-
-impl Drop for LoopbackServer {
-    fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
     }
 }
 

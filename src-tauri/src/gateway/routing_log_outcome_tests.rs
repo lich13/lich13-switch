@@ -5,6 +5,7 @@
 
 use super::super::{compaction::Registry, failover::Failure, protocol::Protocol};
 use super::RoutingLog;
+use crate::gateway::test_support::digest;
 use crate::{
     events::{self, Action, Filter, Reason, Record, RoutingOutcome},
     gateway::{ClientId, Gateway},
@@ -18,10 +19,6 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 const OLD: &str = "00000000-0000-0000-0000-000000000001";
 const MODEL: &str = "fixture-model";
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
-}
 
 fn evidence(input: RoutingInput, boundary: BoundaryState) -> RoutingEvidence {
     RoutingEvidence {

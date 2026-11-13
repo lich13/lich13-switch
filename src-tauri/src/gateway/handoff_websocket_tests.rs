@@ -4,6 +4,9 @@
 
 use super::*;
 use crate::gateway::compaction::Registry;
+use crate::gateway::test_support::digest;
+use crate::gateway::test_support::ids;
+use crate::gateway::test_support::loopback::{fixture, start};
 use futures_util::{SinkExt, StreamExt};
 use hyper::{body::Incoming, Request, Response};
 use hyper_util::rt::TokioIo;
@@ -85,64 +88,6 @@ async fn native_endpoint(name: &'static str) -> (u16, Arc<Mutex<Vec<Vec<u8>>>>) 
     (port, seen)
 }
 
-async fn fixture(urls: Vec<String>) -> (tempfile::TempDir, Gateway) {
-    let dir = tempfile::tempdir().unwrap();
-    let first = urls
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "https://fixture.example.invalid/v1".into());
-    std::fs::write(
-        dir.path().join("config.toml"),
-        format!(
-            "model_provider='custom'\n[model_providers.custom]\nbase_url = {}\nexperimental_bearer_token = \"fixture-token\"\nwire_api='responses'\nsupports_websockets=false\n",
-            serde_json::to_string(&first).unwrap()
-        ),
-    )
-    .unwrap();
-    let gateway = Gateway::new(dir.path().to_path_buf()).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut settings = gateway.view().settings;
-    settings.port = port;
-    update(&gateway, &dir, Edit::Settings { settings });
-    for url in urls {
-        update(
-            &gateway,
-            &dir,
-            Edit::SaveProvider {
-                search_only: None,
-                quota_access_token: None,
-                id: None,
-                base_url: url,
-                token: "fixture-token".into(),
-                name: None,
-            },
-        );
-    }
-    update(
-        &gateway,
-        &dir,
-        Edit::Mode {
-            mode: "auto".into(),
-        },
-    );
-    (dir, gateway)
-}
-
-fn update(gateway: &Gateway, dir: &tempfile::TempDir, edit: Edit) {
-    gateway
-        .edit(edit, &gateway.view().revision, dir.path())
-        .unwrap();
-}
-
-async fn start(gateway: &Gateway, dir: &tempfile::TempDir) {
-    gateway
-        .start(&gateway.view().revision, dir.path())
-        .await
-        .unwrap();
-}
-
 async fn ws_turn(peer: &mut yawc::TcpWebSocket, body: &str) -> Value {
     peer.send(yawc::Frame::text(body.to_owned())).await.unwrap();
     let frame = tokio::time::timeout(Duration::from_secs(4), peer.next())
@@ -151,14 +96,6 @@ async fn ws_turn(peer: &mut yawc::TcpWebSocket, body: &str) -> Value {
         .unwrap();
     assert_eq!(frame.opcode(), yawc::OpCode::Text);
     serde_json::from_slice(frame.payload()).unwrap()
-}
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
-}
-
-fn ids(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).into()).collect()
 }
 
 #[tokio::test]

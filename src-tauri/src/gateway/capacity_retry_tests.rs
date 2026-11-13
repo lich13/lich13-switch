@@ -1,12 +1,10 @@
 // 覆盖容量等待、临时限流与准入资源释放。
 use super::*;
+use crate::gateway::test_support::loopback::{COMPLETED, CREATED};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CREATE: &str = r#"{ "type":"response.create", "model":"fixture-model", "input":["fixture"], "future":{"keep":true} }"#;
-const CREATED: &str =
-    r#"{"type":"response.created","response":{"id":"fixture-response","model":"fixture-model"}}"#;
-const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"fixture-response","model":"fixture-model","status":"completed"}}"#;
 const CAPACITY_EVENT: &str = r#"{"type":"error","error":{"code":"rate_limit_exceeded","message":"selected model is at capacity. please try a different model.","status":429}}"#;
 // These cases assert retry counts, content and health; this only bounds a hung
 // loopback request, including scheduler and socket overhead on Windows runners.

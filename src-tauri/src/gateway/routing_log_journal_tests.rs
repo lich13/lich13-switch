@@ -1,5 +1,7 @@
 //! Routing evidence and durable ownership journal coverage.
 use super::*;
+use crate::gateway::test_support::digest;
+use crate::gateway::test_support::ids;
 use crate::{
     events::{self, Action, Category, Reason, RoutingDetails, RoutingOutcome},
     gateway::{compaction::Registry, failover::Failure, replay::RequestHints, ClientId, Gateway},
@@ -19,14 +21,6 @@ const ATTEMPT_ONE: &str = "00000000-0000-0000-0000-000000000011";
 const ATTEMPT_TWO: &str = "00000000-0000-0000-0000-000000000012";
 const SESSION: &str = "fixture-routing-session";
 const BOUNDARY: &str = "fixture-routing-boundary";
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
-}
-
-fn ids(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).into()).collect()
-}
 
 fn evidence(identity: Option<ThreadIdentity>, boundary: Option<BoundaryState>) -> RoutingEvidence {
     RoutingEvidence {

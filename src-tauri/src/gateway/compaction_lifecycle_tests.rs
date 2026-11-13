@@ -5,6 +5,8 @@
 //! inspect the in-memory ledger without widening the production API.
 
 use super::*;
+use crate::gateway::test_support::digest;
+use crate::gateway::test_support::ids;
 use crate::gateway::{
     model::Provider,
     protocol::{Protocol, Terminal},
@@ -17,14 +19,6 @@ use std::sync::Arc;
 
 const OLD: &str = "fixture-old";
 const NEW: &str = "fixture-new";
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
-}
-
-fn ids(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).into()).collect()
-}
 
 fn provider(id: &str, allowed_models: Option<&str>, handoff: bool) -> Provider {
     Provider {

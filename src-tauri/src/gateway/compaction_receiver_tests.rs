@@ -1,31 +1,22 @@
 //! Bounded compaction receiver and claim fixtures.
 
 use super::*;
+use crate::gateway::test_support::digest;
+use crate::gateway::test_support::ids;
+use crate::gateway::test_support::route;
 use crate::gateway::{
-    circuit::{Circuit, Outcome},
-    connector::Connector,
+    circuit::Outcome,
     model::{Provider, Settings},
-    model_health::Models,
     replay::RequestHints,
     routing::Requirement,
-    ClientId, Route,
 };
 use crate::usage::{model::Filter as UsageFilter, Service as UsageService};
-use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 
 const OLD: &str = "fixture-old";
 const NEW: &str = "fixture-new";
 const NEWER: &str = "fixture-newer";
-
-fn digest(value: &str) -> String {
-    crate::storage::digest(value.as_bytes())
-}
-
-fn ids(values: &[&str]) -> Vec<String> {
-    values.iter().map(|value| (*value).into()).collect()
-}
 
 fn provider(id: &str, queued: bool, allowed_models: Option<&str>, handoff: bool) -> Provider {
     Provider {
@@ -64,20 +55,6 @@ fn seed_boundary(registry: &Arc<Registry>, session: &str, boundary: &str) {
     owner.complete(OLD, None);
     owner.complete(OLD, Some(boundary));
     registry.flush();
-}
-
-fn route(provider: Provider) -> Route {
-    let client =
-        Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(1), 0));
-    Route {
-        dsh_models: None,
-        grok: None,
-        client_id: ClientId::Codex,
-        provider,
-        client,
-        provider_circuit: Circuit::default(),
-        model_circuits: Models::default(),
-    }
 }
 
 fn snapshot(registry: &Registry, session: &str) -> (Value, u64) {

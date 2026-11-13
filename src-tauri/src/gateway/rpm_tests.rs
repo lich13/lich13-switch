@@ -1,14 +1,13 @@
 //! RPM send-window ledger and scheduler boundaries.
 use super::*;
+use crate::gateway::test_support::route;
 use crate::gateway::{
     admission::{Budget, Rejected, Scheduler},
-    circuit::Circuit,
     connector::Connector,
     model::Provider,
-    model_health::Models,
     replay::{self, full, WireBody},
     routing::Requirement,
-    ClientId, Edit, Gateway, Route,
+    Edit, Gateway, Route,
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -58,20 +57,6 @@ fn provider_with_models(version: &str, max_rpm: u32) -> Provider {
     Provider {
         allowed_models: Some(vec!["fixture-model-a".into(), "fixture-model-b".into()]),
         ..provider(version, true, max_rpm)
-    }
-}
-
-fn route(provider: Provider) -> Route {
-    let client =
-        Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(1), 0));
-    Route {
-        dsh_models: None,
-        grok: None,
-        client_id: ClientId::Codex,
-        provider,
-        client,
-        provider_circuit: Circuit::default(),
-        model_circuits: Models::default(),
     }
 }
 
