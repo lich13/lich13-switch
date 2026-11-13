@@ -420,7 +420,6 @@ pub struct Lease {
     ordinary_receivers: Vec<String>,
     initial_bound: std::sync::atomic::AtomicBool,
     failure_fallback: std::sync::atomic::AtomicBool,
-    strict: bool,
     confirmed: bool,
     capacity_fallback: bool,
     intake: Intake,
@@ -569,13 +568,35 @@ impl Registry {
         can_handoff: bool,
         eligible: &[String],
     ) -> Option<Arc<Lease>> {
+        // Fixture entry: every listed provider may receive a compaction handoff.
+        let queued: Vec<_> = eligible
+            .iter()
+            .map(|id| super::model::Provider {
+                id: id.clone(),
+                name: id.clone(),
+                base_url: String::new(),
+                token: String::new(),
+                queued: true,
+                version: String::new(),
+                max_concurrency: 0,
+                max_rpm: 0,
+                allowed_models: None,
+                handoff_after_compaction: true,
+                take_new_threads: false,
+                search_only: false,
+            })
+            .collect();
         self.prepare_inner(
             session,
             input,
             can_handoff,
             eligible,
             super::replay::TurnEvidence::Unknown,
-            None,
+            RequestPolicy {
+                queued: &queued,
+                requirement: &super::routing::Requirement::Resource,
+                pinned: None,
+            },
         )
     }
     fn prepare_inner(
@@ -585,7 +606,7 @@ impl Registry {
         can_handoff: bool,
         eligible: &[String],
         turn: super::replay::TurnEvidence,
-        policy: Option<RequestPolicy<'_>>,
+        policy: RequestPolicy<'_>,
     ) -> Option<Arc<Lease>> {
         use super::replay::TurnEvidence;
         let first_turn = can_handoff && turn == TurnEvidence::First;
@@ -593,11 +614,11 @@ impl Registry {
         let mut state = self.state.lock();
         // Check the unfiltered queue under the ownership lock, before touching
         // history, sequence, timestamps or the one-use compaction claim.
-        if let Some(entry) = state.entries.get(&session).filter(|entry| {
-            policy
-                .as_ref()
-                .is_some_and(|policy| policy.request_only(entry))
-        }) {
+        if let Some(entry) = state
+            .entries
+            .get(&session)
+            .filter(|entry| policy.request_only(entry))
+        {
             return Some(Arc::new(Lease {
                 registry: self.clone(),
                 session,
@@ -613,7 +634,6 @@ impl Registry {
                 ordinary_receivers: eligible.to_vec(),
                 initial_bound: std::sync::atomic::AtomicBool::new(true),
                 failure_fallback: std::sync::atomic::AtomicBool::new(false),
-                strict: true,
                 confirmed: true,
                 capacity_fallback: false,
                 intake: Intake::Ordinary,
@@ -666,18 +686,7 @@ impl Registry {
         // health, concurrency and RPM checks remain in ordinary admission.
         let mut receivers = owner
             .as_ref()
-            .map(|owner| {
-                policy
-                    .as_ref()
-                    .map(|policy| policy.receivers(owner))
-                    .unwrap_or_else(|| {
-                        eligible
-                            .iter()
-                            .take_while(|id| *id != owner)
-                            .cloned()
-                            .collect()
-                    })
-            })
+            .map(|owner| policy.receivers(owner))
             .unwrap_or_default();
         let compacted = can_handoff
             && entry.claim.is_none()
@@ -724,7 +733,6 @@ impl Registry {
             ordinary_receivers: eligible.to_vec(),
             initial_bound: std::sync::atomic::AtomicBool::new(false),
             failure_fallback: std::sync::atomic::AtomicBool::new(false),
-            strict: false,
             confirmed: true,
             capacity_fallback: false,
             intake: if entry_establishing && first_turn {
@@ -788,14 +796,13 @@ impl Registry {
             can_handoff,
             &ordered.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             hints.map_or(super::replay::TurnEvidence::Unknown, |h| h.turn),
-            Some(RequestPolicy {
+            RequestPolicy {
                 queued,
                 requirement,
                 pinned,
-            }),
+            },
         )?;
         let inner = Arc::get_mut(&mut lease)?;
-        inner.strict = true;
         inner.confirmed = hints.is_some_and(|h| h.turn != super::replay::TurnEvidence::Unknown);
         inner.capacity_fallback = can_handoff
             && pinned.is_none()
@@ -926,7 +933,6 @@ impl Registry {
             ordinary_receivers: vec![],
             initial_bound: std::sync::atomic::AtomicBool::new(true),
             failure_fallback: std::sync::atomic::AtomicBool::new(false),
-            strict: true,
             confirmed: true,
             capacity_fallback: false,
             intake: Intake::Ordinary,
@@ -1296,7 +1302,6 @@ impl Lease {
         }
         if entry.establishing
             && entry.history_seen
-            && self.strict
             && self.intake == Intake::NewThread
             && !self.ordinary_receivers.iter().any(|id| id == provider)
         {
@@ -1363,17 +1368,14 @@ impl Lease {
         if self.handoff {
             routes.retain(|r| {
                 self.receivers.contains(&r.provider.id)
-                    && (!self.strict
-                        || self.owner.as_deref() == Some(&r.provider.id)
+                    && (self.owner.as_deref() == Some(&r.provider.id)
                         || r.provider.handoff_after_compaction)
             });
             return routes;
         }
         let (intake, bound) = self.admission_policy();
         if self.fresh && bound.is_none() {
-            if self.strict {
-                routes.retain(|r| accepts(&r.provider, intake));
-            }
+            routes.retain(|r| accepts(&r.provider, intake));
             routes.sort_by_key(|r| {
                 self.preferred
                     .iter()
@@ -1412,11 +1414,8 @@ impl Lease {
         {
             return vec![owner];
         }
-        if self.strict {
-            routes.retain(|r| {
-                current.as_deref() == Some(&r.provider.id) || accepts(&r.provider, intake)
-            });
-        }
+        routes
+            .retain(|r| current.as_deref() == Some(&r.provider.id) || accepts(&r.provider, intake));
         routes
     }
     /// A failed attempt before any output opens the ordinary fallback queue.
@@ -1451,7 +1450,6 @@ impl Lease {
         }
         routes.retain(|route| {
             self.owner.as_deref() == Some(&route.provider.id)
-                || !self.strict
                 || accepts(&route.provider, Intake::Compacted)
         });
         routes
