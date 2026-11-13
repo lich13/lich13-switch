@@ -594,11 +594,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
         request_budget.describe(pinned.as_deref(), model.as_deref(), "admission");
         let mut wait_budget = Budget::new(settings.queue_seconds);
         wait_budget.traffic = Some(traffic.clone());
-        wait_budget.track(
-            &gateway.0.admission,
-            ownership.as_deref(),
-            settings.thread_idle_release_seconds,
-        );
+        wait_budget.follow(ownership.as_deref());
         if pinned.is_some() || unknown_affinity {
             wait_budget.pin_provider();
         }
@@ -852,8 +848,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 &candidates,
                 &requirement,
                 parts.uri.path(),
-                &wait_budget,
-                mode == "manual",
             );
             if matches_model
                 && !candidates
@@ -1200,7 +1194,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             protocol.diagnostics(&gateway, &route.provider.id, model.as_deref());
             protocol.attach_ownership(ownership.clone(), &route.provider.id);
             protocol.attach_routing_log(failover.routing());
-            protocol.attach_thread(wait_budget.thread.clone());
             protocol.request_headers(&parts.headers);
             if !routing::resource(&parts.method, parts.uri.path()) {
                 protocol.business_request(&gateway, &parts.headers);
@@ -1321,7 +1314,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             parts.uri.path(),
                             ownership.as_deref(),
                             gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            &wait_budget,
                             mode != "manual"
                                 && pinned.is_none()
                                 && !unknown_affinity
@@ -1410,7 +1402,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                                 parts.uri.path(),
                                 ownership.as_deref(),
                                 false,
-                                &wait_budget,
                                 mode != "manual"
                                     && pinned.is_none()
                                     && !unknown_affinity
@@ -1662,7 +1653,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             parts.uri.path(),
                             ownership.as_deref(),
                             gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            &wait_budget,
                             mode != "manual"
                                 && pinned.is_none()
                                 && !unknown_affinity
@@ -1982,7 +1972,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     parts.uri.path(),
                     ownership.as_deref(),
                     gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                    &wait_budget,
                     mode != "manual"
                         && pinned.is_none()
                         && !unknown_affinity
@@ -2199,7 +2188,6 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                             parts.uri.path(),
                             ownership.as_deref(),
                             gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            &wait_budget,
                             mode != "manual"
                                 && pinned.is_none()
                                 && !unknown_affinity
@@ -2376,7 +2364,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
             tokio::spawn(async move {
                 let mut active = Some(active);
                 let traffic = traffic;
-                let mut slot = Some(slot);
+                // The concurrency slot is held until the response has been relayed.
+                let _slot = slot;
                 remember(&protocol, &g, &route, model.as_deref());
                 observe_protocol(
                     &protocol,
@@ -2427,15 +2416,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         )
                         .await;
                     }
-                    if protocol.succeeded() {
-                        if protocol.delivered_success() {
-                            if let Some(slot) = &mut slot {
-                                slot.complete();
-                            }
-                        }
-                        if !dedicated_search {
-                            g.persist_success(&route.provider).await;
-                        }
+                    if protocol.succeeded() && !dedicated_search {
+                        g.persist_success(&route.provider).await;
                     }
                     return;
                 }
@@ -2580,15 +2562,8 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     Some(status.as_u16()),
                     attempted,
                 );
-                if protocol.succeeded() {
-                    if protocol.delivered_success() {
-                        if let Some(slot) = &mut slot {
-                            slot.complete();
-                        }
-                    }
-                    if !dedicated_search {
-                        g.persist_success(&route.provider).await;
-                    }
+                if protocol.succeeded() && !dedicated_search {
+                    g.persist_success(&route.provider).await;
                 }
             });
             // Hyper may drop a Content-Length body immediately after its last frame,

@@ -48,14 +48,6 @@ export default function Advanced({
   ][] = [
     ["port", "共享本地端口"],
     ["endpointProbeSeconds", "端点测速间隔 / 秒"],
-    ...(clientId === "codex"
-      ? [
-          ["threadIdleReleaseSeconds", "线程空闲释放 / 秒"] as [
-            Exclude<keyof GatewaySettings, "customFailureRules">,
-            string,
-          ],
-        ]
-      : []),
   ];
   const groups: {
     name: string;

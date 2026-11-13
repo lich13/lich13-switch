@@ -60,8 +60,6 @@ pub struct Settings {
     pub capacity_retry_seconds: u64,
     #[serde(default = "default_request_seconds")]
     pub websocket_retry_seconds: u64,
-    #[serde(default = "default_thread_idle_seconds")]
-    pub thread_idle_release_seconds: u64,
     #[serde(default = "default_endpoint_probe_seconds")]
     pub endpoint_probe_seconds: u64,
     pub first_byte_seconds: u64,
@@ -73,9 +71,6 @@ pub struct Settings {
     pub queue_seconds: u64,
     #[serde(default = "default_max_waiting")]
     pub max_waiting: usize,
-}
-fn default_thread_idle_seconds() -> u64 {
-    300
 }
 fn default_endpoint_probe_seconds() -> u64 {
     300
@@ -112,7 +107,6 @@ impl Default for Settings {
             hard_failure_cooldown_seconds: default_request_seconds(),
             capacity_retry_seconds: default_capacity_retry_seconds(),
             websocket_retry_seconds: default_request_seconds(),
-            thread_idle_release_seconds: default_thread_idle_seconds(),
             endpoint_probe_seconds: default_endpoint_probe_seconds(),
             first_byte_seconds: DEFAULT_FIRST_BYTE_SECONDS,
             idle_seconds: DEFAULT_IDLE_SECONDS,
@@ -140,7 +134,6 @@ impl Settings {
                 self.hard_failure_cooldown_seconds,
                 self.capacity_retry_seconds,
                 self.websocket_retry_seconds,
-                self.thread_idle_release_seconds,
                 self.first_byte_seconds,
                 self.idle_seconds,
                 self.retry_budget_seconds,

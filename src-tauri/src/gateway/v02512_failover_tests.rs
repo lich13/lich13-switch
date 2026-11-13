@@ -777,7 +777,6 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
 
     let stale_backup = gateway.route(&backup_id).expect("backup route snapshot");
     let requirement = super::routing::Requirement::model(Some(MODEL));
-    let budget = super::admission::Budget::new(1);
     assert_eq!(
         super::routing::fallback_action(
             &gateway,
@@ -787,7 +786,6 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
             "/v1/responses",
             None,
             true,
-            &budget,
             true,
         ),
         Action::Returned,
@@ -819,7 +817,6 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
             "/v1/responses",
             None,
             true,
-            &budget,
             true,
         ),
         Action::Returned,
@@ -852,7 +849,6 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
             "/v1/responses",
             None,
             true,
-            &budget,
             true,
         ),
         Action::Returned,

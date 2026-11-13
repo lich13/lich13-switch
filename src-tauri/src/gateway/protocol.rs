@@ -756,7 +756,6 @@ pub struct Protocol {
     traffic: Option<super::freeze::Ticket>,
     rpm_completion: Option<super::admission::Completion>,
     observer: Option<Observer>,
-    thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
     transfer: crate::usage::model::TransferMetadata,
     delivery: std::sync::Arc<Delivery>,
     last_progress: std::time::Instant,
@@ -798,7 +797,6 @@ impl Protocol {
             traffic: None,
             rpm_completion: None,
             observer: None,
-            thread: None,
             transfer: crate::usage::model::TransferMetadata {
                 sent_at: crate::usage::model::now(),
                 ..Default::default()
@@ -864,12 +862,6 @@ impl Protocol {
     }
     pub(super) fn attach_rpm(&mut self, completion: Option<super::admission::Completion>) {
         self.rpm_completion = completion;
-    }
-    pub fn attach_thread(
-        &mut self,
-        thread: Option<std::sync::Arc<super::admission::ThreadRequest>>,
-    ) {
-        self.thread = thread;
     }
     pub fn diagnostics(&mut self, gateway: &super::Gateway, provider: &str, model: Option<&str>) {
         self.diagnostics = gateway

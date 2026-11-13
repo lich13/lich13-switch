@@ -43,7 +43,6 @@ export const gatewayDemo: GatewayState = {
     firstByteSeconds: 300,
     idleSeconds: 300,
     retryBudgetSeconds: 300,
-    threadIdleReleaseSeconds: 300,
     endpointProbeSeconds: 300,
     connectSeconds: 300,
     queueSeconds: 300,
@@ -145,12 +144,10 @@ if (densePreview) {
   Object.assign(primary, {
     handoffAfterCompaction: true,
     activeRequests: 1,
-    reservedThreads: 2,
   });
   Object.assign(backup, {
     handoffAfterCompaction: true,
     activeRequests: 1,
-    reservedThreads: 1,
     maxConcurrency: 2,
   });
   receiver.handoffAfterCompaction = true;
@@ -173,7 +170,6 @@ export const grokGatewayDemo: GatewayState = {
     protocol: "responses",
     handoffAfterCompaction: false,
     takeNewThreads: false,
-    reservedThreads: 0,
   })),
 };
 export const dshGatewayDemo: GatewayState = {

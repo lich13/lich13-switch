@@ -105,7 +105,6 @@ pub(super) fn fallback_action(
     path: &str,
     lease: Option<&super::compaction::Lease>,
     unidentified: bool,
-    budget: &super::admission::Budget,
     allowed: bool,
 ) -> crate::events::Action {
     use crate::events::Action;
@@ -145,7 +144,7 @@ pub(super) fn fallback_action(
     if candidates.iter().any(|route| {
         let p = &route.provider;
         route.health_for(requirement).available
-            && gateway.0.admission.capacity_available(&p.id, budget, false)
+            && gateway.0.admission.capacity_available(&p.id)
             && !gateway.0.admission.rpm_status(&p.id, p.max_rpm).2
     }) {
         Action::TryingNext

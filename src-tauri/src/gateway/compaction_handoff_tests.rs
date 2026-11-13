@@ -507,9 +507,6 @@ async fn hold(g: &Gateway, id: &str) -> admission::Admission {
         .unwrap()
 }
 fn one_slot(g: &Gateway, t: &tempfile::TempDir) {
-    let mut settings = g.view().settings;
-    settings.thread_idle_release_seconds = 1;
-    update(g, t, Edit::Settings { settings });
     for provider in g.view().providers {
         update(
             g,

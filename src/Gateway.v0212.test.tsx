@@ -87,31 +87,6 @@ it("renders handoff waiting as neutral, non-clickable provider state", async () 
   );
 });
 
-it("adds active requests and reserved threads in concurrency controls and exposes both counts", async () => {
-  const provider = state.providers[0];
-  provider.activeRequests = 2;
-  provider.reservedThreads = 3;
-  provider.maxConcurrency = 8;
-  const user = userEvent.setup();
-  render(<Gateway notify={() => {}} />);
-
-  const control = await screen.findByRole("button", {
-    name: `${provider.name} 并发上限`,
-  });
-  expect(control).toHaveTextContent("并发 5/8");
-  await user.click(control);
-  const popover = await screen.findByRole("dialog", {
-    name: `${provider.name} 并发上限`,
-  });
-  const active = within(popover).getByText("正在请求");
-  const reserved = within(popover).getByText("线程预留");
-  expect(active.nextElementSibling).toHaveTextContent("2");
-  expect(reserved.nextElementSibling).toHaveTextContent("3");
-  expect(mock.command.mock.calls.some(([name]) => name === "open_main")).toBe(
-    false,
-  );
-});
-
 it("uses the waiting budget label and preserves explicitly saved timeout values", async () => {
   state.settings = {
     ...state.settings,
@@ -119,16 +94,12 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
     idleSeconds: 600,
     retryBudgetSeconds: 37,
   };
-  delete state.settings.threadIdleReleaseSeconds;
   const user = userEvent.setup();
   render(<Gateway notify={() => {}} />);
   await screen.findByRole("button", { name: "添加" });
   await user.click(screen.getByText("高级设置", { selector: "summary" }));
   await user.click(screen.getByText("故障策略", { selector: "summary" }));
 
-  expect(
-    screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" }),
-  ).toHaveValue(300);
   expect(screen.getByRole("spinbutton", { name: "首字节 / 秒" })).toHaveValue(
     600,
   );
@@ -142,9 +113,11 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
     screen.queryByRole("spinbutton", { name: "非流式总时限 / 秒" }),
   ).not.toBeInTheDocument();
 
-  const idle = screen.getByRole("spinbutton", { name: "线程空闲释放 / 秒" });
-  await user.clear(idle);
-  await user.type(idle, "420");
+  const budget = screen.getByRole("spinbutton", {
+    name: "等待与重试预算 / 秒",
+  });
+  await user.clear(budget);
+  await user.type(budget, "42");
   await user.click(screen.getByRole("button", { name: "保存参数" }));
   await vi.waitFor(() =>
     expect(mock.command).toHaveBeenCalledWith(
@@ -153,10 +126,9 @@ it("uses the waiting budget label and preserves explicitly saved timeout values"
         edit: expect.objectContaining({
           op: "settings",
           settings: expect.objectContaining({
-            threadIdleReleaseSeconds: 420,
             firstByteSeconds: 600,
             idleSeconds: 600,
-            retryBudgetSeconds: 37,
+            retryBudgetSeconds: 42,
           }),
         }),
       }),

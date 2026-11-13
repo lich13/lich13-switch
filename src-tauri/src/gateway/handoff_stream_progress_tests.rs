@@ -419,7 +419,7 @@ async fn seed_retained_owner(
         .unwrap();
     let mut budget = Budget::new(5);
     budget.set_intake(Intake::Ordinary, None);
-    budget.track(&gateway.0.admission, Some(&lease), 30);
+    budget.follow(Some(&lease));
     let mut admission = gateway
         .0
         .admission
@@ -435,7 +435,6 @@ async fn seed_retained_owner(
         .unwrap();
     assert_eq!(admission.route.provider.id, owner.id);
     admission.commit_rpm().await.unwrap();
-    admission.slot.complete();
     drop(admission);
     drop(budget);
     lease.complete(
@@ -461,7 +460,6 @@ async fn configure_capacity_fixture(
         );
     }
     super::start(&gateway, &dir).await;
-    gateway.0.admission.configure_retention(30);
     let routes = provider_routes(&gateway);
     let providers: Vec<_> = routes.iter().map(|route| route.provider.clone()).collect();
     (dir, gateway, routes, providers)
@@ -500,151 +498,6 @@ fn enable_receiver_before_owner(
     let routes = provider_routes(gateway);
     let providers = routes.iter().map(|route| route.provider.clone()).collect();
     (routes, providers)
-}
-
-#[tokio::test]
-async fn v0212_failed_handoff_releases_receiver_reservation_but_keeps_owner_reservation() {
-    let (dir, gateway) = super::fixture(vec![
-        "https://fixture-old.example.invalid/v1".into(),
-        "https://fixture-new.example.invalid/v1".into(),
-    ])
-    .await;
-    for provider in gateway.view().providers {
-        super::update(
-            &gateway,
-            &dir,
-            Edit::ConcurrencyProvider {
-                id: provider.id,
-                max_concurrency: 1,
-            },
-        );
-    }
-    super::start(&gateway, &dir).await;
-    gateway.0.admission.configure_retention(30);
-    let routes = provider_routes(&gateway);
-    let providers: Vec<_> = routes.iter().map(|route| route.provider.clone()).collect();
-    let session = crate::storage::digest(b"fixture-v0212-capacity-failure");
-    let (owner_id, boundary) = seed_retained_owner(&gateway, &routes, &providers, &session).await;
-    let receiver_id = providers[1].id.clone();
-    let (routes, providers) = enable_receiver_before_owner(&gateway, &dir, &owner_id, &receiver_id);
-    assert_eq!(gateway.0.admission.reserved(&owner_id), 1);
-
-    let compacted = compacted_hints(&boundary);
-    let handoff = gateway
-        .0
-        .compaction
-        .prepare_policy(
-            session,
-            Some(&compacted),
-            true,
-            &[providers[0].clone(), providers[1].clone()],
-        )
-        .unwrap();
-    let mut budget = Budget::new(5);
-    budget.set_intake(Intake::Compacted, Some(owner_id.clone()));
-    budget.track(&gateway.0.admission, Some(&handoff), 30);
-    assert!(handoff.handoff);
-    let candidates = handoff.candidates(routes.clone());
-    let mut admission = gateway
-        .0
-        .admission
-        .acquire_for_immediate(
-            &candidates,
-            false,
-            10,
-            &mut budget,
-            &Requirement::Resource,
-            true,
-        )
-        .await
-        .unwrap();
-    assert_eq!(admission.route.provider.id, receiver_id);
-    admission.commit_rpm().await.unwrap();
-    // Dropping without completion models a receiver that failed before a
-    // usable response. Its reservation must not block another request.
-    drop(admission);
-    drop(budget);
-    drop(handoff);
-    assert_eq!(gateway.0.admission.reserved(&receiver_id), 0);
-    assert_eq!(gateway.0.admission.reserved(&owner_id), 1);
-    let (_, waiting) = gateway.0.admission.counts();
-    assert_eq!(waiting, 0);
-    gateway.stop().await.unwrap();
-}
-
-#[tokio::test]
-async fn v0212_successful_receiver_is_reserved_until_idle_retention_expires_and_counts_stay_active_only(
-) {
-    let (dir, gateway) = super::fixture(vec![
-        "https://fixture-old.example.invalid/v1".into(),
-        "https://fixture-new.example.invalid/v1".into(),
-    ])
-    .await;
-    for provider in gateway.view().providers {
-        super::update(
-            &gateway,
-            &dir,
-            Edit::ConcurrencyProvider {
-                id: provider.id,
-                max_concurrency: 1,
-            },
-        );
-    }
-    super::start(&gateway, &dir).await;
-    gateway.0.admission.configure_retention(30);
-    let routes = provider_routes(&gateway);
-    let providers: Vec<_> = routes.iter().map(|route| route.provider.clone()).collect();
-    let session = crate::storage::digest(b"fixture-v0212-capacity-success");
-    let (owner_id, boundary) = seed_retained_owner(&gateway, &routes, &providers, &session).await;
-    let receiver_id = providers[1].id.clone();
-    let (routes, providers) = enable_receiver_before_owner(&gateway, &dir, &owner_id, &receiver_id);
-    let compacted = compacted_hints(&boundary);
-    let handoff = gateway
-        .0
-        .compaction
-        .prepare_policy(
-            session,
-            Some(&compacted),
-            true,
-            &[providers[0].clone(), providers[1].clone()],
-        )
-        .unwrap();
-    let mut budget = Budget::new(5);
-    budget.set_intake(Intake::Compacted, Some(owner_id.clone()));
-    budget.track(&gateway.0.admission, Some(&handoff), 30);
-    assert!(handoff.handoff);
-    let candidates = handoff.candidates(routes.clone());
-    let mut admission = gateway
-        .0
-        .admission
-        .acquire_for_immediate(
-            &candidates,
-            false,
-            10,
-            &mut budget,
-            &Requirement::Resource,
-            true,
-        )
-        .await
-        .unwrap();
-    assert_eq!(admission.route.provider.id, receiver_id);
-    admission.commit_rpm().await.unwrap();
-    admission.slot.complete();
-    drop(admission);
-    drop(budget);
-    drop(handoff);
-    assert_eq!(gateway.0.admission.reserved(&receiver_id), 1);
-    assert_eq!(gateway.0.admission.reserved(&owner_id), 1);
-    let (active, waiting) = gateway.0.admission.counts();
-    assert_eq!(waiting, 0);
-    assert_eq!(active.get(&receiver_id).copied().unwrap_or_default(), 0);
-    assert_eq!(active.get(&owner_id).copied().unwrap_or_default(), 0);
-
-    gateway.0.admission.configure_retention(0);
-    let _ = gateway.0.admission.counts();
-    assert_eq!(gateway.0.admission.reserved(&receiver_id), 0);
-    assert_eq!(gateway.0.admission.reserved(&owner_id), 0);
-    gateway.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -693,7 +546,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         .unwrap();
     let mut budget = Budget::new(2);
     budget.set_intake(Intake::Compacted, Some(owner_id.clone()));
-    budget.track(&gateway.0.admission, Some(&handoff), 30);
+    budget.follow(Some(&handoff));
     assert!(handoff.handoff);
     let candidates = handoff.candidates(routes.clone());
     let mut admission = gateway
@@ -715,7 +568,6 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         Some(crate::usage::model::RoutingDecision::ReceiverCapacityFull)
     );
     admission.commit_rpm().await.unwrap();
-    admission.slot.complete();
     drop(admission);
     drop(budget);
     handoff.complete(&owner_id, None);
@@ -739,7 +591,7 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
     );
     let mut continuation_budget = Budget::new(2);
     continuation_budget.set_intake(Intake::Compacted, Some(owner_id.clone()));
-    continuation_budget.track(&gateway.0.admission, Some(&continuation), 30);
+    continuation_budget.follow(Some(&continuation));
     let continuation_candidates = continuation.candidates(routes);
     let mut receiver_admission = gateway
         .0
@@ -756,7 +608,6 @@ async fn v0212_full_receiver_falls_back_to_owner_and_marks_capacity_wait() {
         .unwrap();
     assert_eq!(receiver_admission.route.provider.id, receiver_id);
     receiver_admission.commit_rpm().await.unwrap();
-    receiver_admission.slot.complete();
     drop(receiver_admission);
     drop(continuation_budget);
     continuation.complete(&receiver_id, None);
@@ -844,7 +695,6 @@ async fn v0212_http_completed_event_keeps_slot_until_delayed_tail_is_forwarded()
         );
     }
     super::start(&gateway, &dir).await;
-    gateway.0.admission.configure_retention(30);
     let provider_id = gateway.view().providers[0].id.clone();
     let response = super::request(
         &gateway,
@@ -902,14 +752,14 @@ async fn v0212_http_completed_event_keeps_slot_until_delayed_tail_is_forwarded()
                 .into_iter()
                 .find(|provider| provider.id == provider_id)
                 .expect("fixture provider disappeared");
-            if provider.active_requests == 0 && provider.reserved_threads == 1 {
+            if provider.active_requests == 0 {
                 break;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("HTTP slot did not settle with one retained thread");
+    .expect("HTTP slot was not released after the delayed tail");
     gateway.stop().await.unwrap();
 }
 

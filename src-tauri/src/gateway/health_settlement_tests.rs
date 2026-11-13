@@ -63,7 +63,6 @@ fn default_settings_match_current_serialization() {
             "customFailureRules": [],
             "hardFailureCooldownSeconds": 300,
             "websocketRetrySeconds": 300,
-            "threadIdleReleaseSeconds": 300,
             "endpointProbeSeconds": 300,
             "firstByteSeconds": 300,
             "idleSeconds": 300,

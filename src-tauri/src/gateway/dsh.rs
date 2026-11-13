@@ -1392,9 +1392,6 @@ impl Gateway {
                 }
                 s.error = None;
                 self.0.admission.configure(&s.store.providers, true);
-                self.0
-                    .admission
-                    .configure_retention(s.store.settings.thread_idle_release_seconds);
                 self.0.compaction.provider_names(&s.store.providers);
                 self.wake_endpoint_prober();
                 Ok(())

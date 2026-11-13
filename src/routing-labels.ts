@@ -18,7 +18,7 @@ export function routingReason(reason: string): string {
         auxiliary: "辅助请求，不建立线程归属",
         ordinary_queue: "按普通队列建立归属",
         first_turn_unconfirmed: "首轮证据不足，按普通队列",
-        new_thread_capacity_full: "新线程接收方并发预留已满",
+        new_thread_capacity_full: "新线程接收方并发已满",
         new_thread_model_denied: "新线程接收方的白名单不匹配",
         new_thread_model_cooling: "新线程接收方的当前模型正在冷却",
         new_thread_provider_unavailable: "新线程接收方当前不可用",
@@ -50,7 +50,7 @@ export function routingRestriction(value: string): string {
         model_mismatch: "模型白名单不匹配",
         model_cooling: "当前模型正在冷却",
         provider_unavailable: "供应商健康状态不可用",
-        capacity_full: "并发或线程预留名额已满",
+        capacity_full: "并发名额已满",
         queue_waiting: "已有请求排队等待",
       } as Record<string, string>
     )[value] ?? "未记录"

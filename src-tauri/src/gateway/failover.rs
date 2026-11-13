@@ -115,8 +115,6 @@ impl Tracker {
         eligible: &[Route],
         requirement: &Requirement,
         path: &str,
-        budget: &super::admission::Budget,
-        manual: bool,
     ) {
         self.evidence.stage = stage;
         self.evidence.exit = None;
@@ -132,11 +130,7 @@ impl Tracker {
                 Some(Exclusion::ConversationPolicy)
             } else if !route.health_for(requirement).available {
                 Some(Exclusion::Health)
-            } else if !gateway
-                .0
-                .admission
-                .capacity_available(&p.id, budget, manual)
-            {
+            } else if !gateway.0.admission.capacity_available(&p.id) {
                 Some(Exclusion::Capacity)
             } else if gateway.0.admission.rpm_status(&p.id, p.max_rpm).2 {
                 Some(Exclusion::Rpm)

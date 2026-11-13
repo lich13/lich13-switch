@@ -84,7 +84,6 @@ mod routing;
 mod routing_log;
 mod rpm;
 pub(crate) mod testing;
-mod thread_capacity;
 #[cfg(test)]
 mod token_reveal_tests;
 #[cfg(test)]
@@ -154,7 +153,6 @@ pub struct ProviderView {
     pub max_concurrency: u32,
     pub max_rpm: u32,
     pub active_requests: usize,
-    pub reserved_threads: usize,
     pub rpm_used: usize,
     pub rpm_retry_in: u64,
     pub rpm_limited: bool,
@@ -626,7 +624,6 @@ impl Gateway {
         let (events, _) = broadcast::channel(32);
         let admission = admission::Scheduler::new(events.clone());
         admission.configure(&store.providers, false);
-        admission.configure_retention(store.settings.thread_idle_release_seconds);
         let local_token = store.local_token.clone();
         let gateway = Self(Arc::new(Shared {
             #[cfg(test)]
@@ -757,9 +754,6 @@ impl Gateway {
         s.revision = next.persist(&self.0.data.join("gateway.json"), &s.revision)?;
         self.replace_store(&mut s, next);
         self.0.admission.configure(&s.store.providers, false);
-        self.0
-            .admission
-            .configure_retention(s.store.settings.thread_idle_release_seconds);
         self.0.compaction.provider_names(&s.store.providers);
         Ok(())
     }
@@ -974,11 +968,6 @@ impl Gateway {
                         take_new_threads: p.take_new_threads,
                         search_only: p.search_only,
                         active_requests: occupied.get(&p.id).copied().unwrap_or(0),
-                        reserved_threads: if s.store.mode == "auto" {
-                            self.0.admission.reserved(&p.id)
-                        } else {
-                            0
-                        },
                         quota_checking,
                         quota_check,
                         rpm_used,
@@ -1560,9 +1549,6 @@ impl Gateway {
         s.editable_mut().home = Some(home.to_owned());
         self.sync_single_protection(&s);
         self.0.admission.configure(&s.store.providers, s.running);
-        self.0
-            .admission
-            .configure_retention(s.store.settings.thread_idle_release_seconds);
         self.0.compaction.provider_names(&s.store.providers);
         self.0.endpoints.retain(&s.store.providers);
         self.0.quota.retain(
@@ -1710,9 +1696,6 @@ impl Gateway {
                     s.shutdown = Some(tx);
                     s.error = None;
                     self.0.admission.configure(&s.store.providers, true);
-                    self.0
-                        .admission
-                        .configure_retention(s.store.settings.thread_idle_release_seconds);
                     self.0.compaction.provider_names(&s.store.providers);
                     self.wake_endpoint_prober();
                     Ok(())
@@ -1922,9 +1905,6 @@ impl Gateway {
                 editable.recovery_error = None;
             }
             self.0.admission.configure(&s.store.providers, false);
-            self.0
-                .admission
-                .configure_retention(s.store.settings.thread_idle_release_seconds);
             self.0.compaction.provider_names(&s.store.providers);
             self.wake_endpoint_prober();
             s.error = None;

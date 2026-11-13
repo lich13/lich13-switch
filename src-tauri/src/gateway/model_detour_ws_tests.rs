@@ -216,37 +216,6 @@ fn owner_entry(dir: &tempfile::TempDir, session: &str) -> Value {
     entries[session].clone()
 }
 
-fn reservation_entry(snapshot: &Value, session: &str, provider: &str) -> Value {
-    snapshot
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["thread"] == session && entry["provider"] == provider)
-        .cloned()
-        .expect("thread reservation was not persisted")
-}
-
-async fn wait_for_reservation(gateway: &Gateway, session: &str, provider: &str) -> Value {
-    tokio::time::timeout(FIXTURE_WAIT, async {
-        loop {
-            let snapshot: Value =
-                serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
-            if snapshot.as_array().is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry["thread"] == session
-                        && entry["provider"] == provider
-                        && entry["busy"] == false
-                })
-            }) {
-                break snapshot;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("initial owner reservation was not recorded")
-}
-
 async fn wait_for_usage_record(
     usage: &crate::usage::Service,
     provider: &str,
@@ -282,7 +251,6 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
     ])
     .await;
     let (owner, side) = configure_models(&gateway, &dir);
-    assert_eq!(gateway.view().settings.thread_idle_release_seconds, 300);
     let usage = crate::usage::Service::new(dir.path());
     gateway.set_usage(usage.clone());
     super::start(&gateway, &dir).await;
@@ -309,12 +277,6 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
     let before_owner = owner_entry(&dir, &session_hash);
     assert_eq!(before_owner["provider"], owner);
     assert_eq!(before_owner["boundary"], boundary);
-
-    wait_until(|| gateway.0.admission.reserved(&owner) == 1).await;
-    assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let before_reservations = wait_for_reservation(&gateway, &session_hash, &owner).await;
-    let before_reservation = reservation_entry(&before_reservations, &session_hash, &owner);
-    assert!(!before_reservation["idle_since"].is_null());
 
     let mut side_peer = connect(&gateway, SESSION).await;
     let detour = complete_turn(&mut side_peer, side_turn).await;
@@ -354,17 +316,6 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
     assert_eq!(
         after_owner["boundary_sequence"],
         before_owner["boundary_sequence"]
-    );
-
-    assert_eq!(gateway.view().settings.thread_idle_release_seconds, 300);
-    assert_eq!(gateway.0.admission.reserved(&owner), 1);
-    assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let after_reservations: Value =
-        serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
-    assert_eq!(after_reservations.as_array().unwrap().len(), 1);
-    assert_eq!(
-        reservation_entry(&after_reservations, &session_hash, &owner)["idle_since"],
-        before_reservation["idle_since"]
     );
 
     let diagnostic = wait_for_usage_record(&usage, &side, "fixture-side").await;
@@ -413,7 +364,7 @@ async fn native_websocket_known_cursor_stays_on_its_owner_after_priority_changes
         format!("http://127.0.0.1:{port_b}/v1"),
     ])
     .await;
-    let (owner, side) = configure_models(&gateway, &dir);
+    let (owner, _side) = configure_models(&gateway, &dir);
     super::start(&gateway, &dir).await;
     let first_turn = r#"{"type":"response.create","model":"fixture-main","input":[{"role":"user","content":"fixture first"}]}"#;
     let mut first_peer = connect(&gateway, "fixture-known-cursor-thread").await;
@@ -454,7 +405,6 @@ async fn native_websocket_known_cursor_stays_on_its_owner_after_priority_changes
             .as_deref(),
         Some(owner.as_str())
     );
-    assert_eq!(gateway.0.admission.reserved(&side), 0);
 
     known_peer
         .send(yawc::Frame::close(1000.into(), "fixture done"))
@@ -500,9 +450,6 @@ async fn native_websocket_side_detour_followup_main_without_cursor_is_rejected_w
     let before_owner = owner_entry(&dir, &session_hash);
     assert_eq!(before_owner["provider"], owner);
     assert_eq!(before_owner["boundary"], boundary);
-    let before_reservations = wait_for_reservation(&gateway, &session_hash, &owner).await;
-    let before_reservation = reservation_entry(&before_reservations, &session_hash, &owner);
-    assert!(!before_reservation["idle_since"].is_null());
 
     let mut side_peer = connect(&gateway, session).await;
     let side_response = complete_turn(&mut side_peer, side_turn).await;
@@ -537,17 +484,6 @@ async fn native_websocket_side_detour_followup_main_without_cursor_is_rejected_w
     assert_eq!(
         after_owner["boundary_sequence"],
         before_owner["boundary_sequence"]
-    );
-    assert_eq!(gateway.view().settings.thread_idle_release_seconds, 300);
-    assert_eq!(gateway.0.admission.reserved(&owner), 1);
-    assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let after_reservations: Value =
-        serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
-    assert_eq!(after_reservations.as_array().unwrap().len(), 1);
-    let after_reservation = reservation_entry(&after_reservations, &session_hash, &owner);
-    assert_eq!(
-        after_reservation["idle_since"],
-        before_reservation["idle_since"]
     );
 
     // reject_turn already observed the server closing this connection.
@@ -596,9 +532,6 @@ async fn native_websocket_known_side_cursor_stays_pinned_without_rebinding_owner
     let before_owner = owner_entry(&dir, &session_hash);
     assert_eq!(before_owner["provider"], owner);
     assert_eq!(before_owner["boundary"], boundary);
-    let before_reservations = wait_for_reservation(&gateway, &session_hash, &owner).await;
-    let before_reservation = reservation_entry(&before_reservations, &session_hash, &owner);
-    assert!(!before_reservation["idle_since"].is_null());
 
     let mut side_peer = connect(&gateway, session).await;
     let side_response = complete_turn(&mut side_peer, side_turn).await;
@@ -634,17 +567,6 @@ async fn native_websocket_known_side_cursor_stays_pinned_without_rebinding_owner
     assert_eq!(
         after_owner["boundary_sequence"],
         before_owner["boundary_sequence"]
-    );
-    assert_eq!(gateway.view().settings.thread_idle_release_seconds, 300);
-    assert_eq!(gateway.0.admission.reserved(&owner), 1);
-    assert_eq!(gateway.0.admission.reserved(&side), 0);
-    let after_reservations: Value =
-        serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
-    assert_eq!(after_reservations.as_array().unwrap().len(), 1);
-    let after_reservation = reservation_entry(&after_reservations, &session_hash, &owner);
-    assert_eq!(
-        after_reservation["idle_since"],
-        before_reservation["idle_since"]
     );
 
     side_peer

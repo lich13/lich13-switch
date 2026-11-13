@@ -109,8 +109,7 @@ export function providerStatus(p: Provider): string {
     return ["待请求探测", reason].filter(Boolean).join(" · ");
   if (p.rpmLimited)
     return `${rpmWaitLabel(p.rpmWaitReason)} · 等待${Math.max(1, p.rpmRetryIn)}秒`;
-  const occupied = p.activeRequests + (p.reservedThreads ?? 0);
-  if (p.maxConcurrency > 0 && occupied >= p.maxConcurrency)
-    return `并发已满 · ${occupied}/${p.maxConcurrency}`;
+  if (p.maxConcurrency > 0 && p.activeRequests >= p.maxConcurrency)
+    return `并发已满 · ${p.activeRequests}/${p.maxConcurrency}`;
   return "";
 }

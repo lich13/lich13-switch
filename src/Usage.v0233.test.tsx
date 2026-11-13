@@ -189,7 +189,7 @@ it("explains known routing evidence in request details", async () => {
   );
   expect(detailValue(dialog, "初始化声明")).toHaveTextContent(/^包含工具声明$/);
   expect(detailValue(dialog, "准入限制")).toHaveTextContent(
-    /^并发或线程预留名额已满$/,
+    /^并发名额已满$/,
   );
 });
 

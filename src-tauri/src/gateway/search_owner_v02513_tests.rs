@@ -13,7 +13,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -91,42 +91,6 @@ fn metadata_headers(values: &[&str]) -> hyper::HeaderMap {
     headers
 }
 
-fn reservation_entry(snapshot: &Value, thread: &str, provider: &str) -> Option<Value> {
-    snapshot
-        .as_array()?
-        .iter()
-        .find(|entry| entry["thread"] == thread && entry["provider"] == provider)
-        .cloned()
-}
-
-async fn wait_for_idle_reservation(
-    _dir: &tempfile::TempDir,
-    gateway: &Gateway,
-    thread: &str,
-    provider: &str,
-) -> (Value, Value) {
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let memory: Value =
-                serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
-            if let Some(entry) = reservation_entry(&memory, thread, provider) {
-                if entry["busy"] == false {
-                    return (memory, entry);
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        let memory = serde_json::from_slice(&gateway.0.admission.retention_snapshot()).unwrap();
-        panic!(
-            "fixture owner reservation did not become idle: memory={:?}",
-            reservation_entry(&memory, thread, provider),
-        )
-    })
-}
-
 fn usage_rows(usage: &Service) -> Vec<Record> {
     usage
         .query(|store| Ok(store.logs(&Filter::default())?.rows))
@@ -194,7 +158,7 @@ async fn seed_owner(
     gateway: &Gateway,
     thread: &str,
     owner: &str,
-) -> (Service, String, Value, Value) {
+) -> (Service, String) {
     let usage = Service::new(dir.path());
     gateway.set_usage(usage.clone());
     super::v022_start(gateway, dir).await;
@@ -212,10 +176,7 @@ async fn seed_owner(
         &thread_hash,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    let (snapshot, entry) = wait_for_idle_reservation(dir, gateway, &thread_hash, owner).await;
-    assert_eq!(entry["busy"], false);
-    assert_eq!(gateway.0.admission.reserved(owner), 1);
-    (usage, thread_hash, snapshot, entry)
+    (usage, thread_hash)
 }
 
 #[tokio::test]
@@ -258,7 +219,6 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
     ])
     .await;
     let ids = super::v022_ids(&gateway);
-    let ordinary = ids[0].clone();
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
     assert!(gateway
@@ -270,8 +230,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
             provider.handoff_after_compaction && provider.take_new_threads
         }));
     let thread = "fixture-v02513-search-owner";
-    let (usage, thread_hash, baseline, baseline_entry) =
-        seed_owner(&dir, &gateway, thread, &owner).await;
+    let (usage, thread_hash) = seed_owner(&dir, &gateway, thread, &owner).await;
 
     for (index, path) in ["/v1/alpha/search", "/alpha/search"]
         .into_iter()
@@ -281,19 +240,6 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
             search_request(&gateway, path, &[("thread-id", thread)], SEARCH_REQUEST).await;
         assert_eq!(response.status(), StatusCode::OK, "{path}");
         assert_eq!(response_bytes(response).await, SEARCH_RESPONSE, "{path}");
-        let (after, entry) = wait_for_idle_reservation(&dir, &gateway, &thread_hash, &owner).await;
-        assert_eq!(entry["busy"], false, "{path}");
-        assert!(
-            entry["idle_since"].as_i64().unwrap() >= baseline_entry["idle_since"].as_i64().unwrap(),
-            "{path}"
-        );
-        assert_eq!(
-            reservation_entry(&after, &thread_hash, &ordinary),
-            None,
-            "{path}"
-        );
-        assert_eq!(gateway.0.admission.reserved(&owner), 1, "{path}");
-        assert_eq!(gateway.0.admission.reserved(&ordinary), 0, "{path}");
         assert_eq!(
             gateway.0.compaction.owner(&thread_hash),
             Some(owner.clone()),
@@ -337,11 +283,6 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
             SEARCH_REQUEST.to_vec(),
             SEARCH_REQUEST.to_vec(),
         ]
-    );
-    assert_eq!(
-        baseline.as_array().unwrap().len(),
-        1,
-        "search must reuse the original owner reservation"
     );
     gateway.stop().await.unwrap();
 }
@@ -518,8 +459,7 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
     let thread = "fixture-v02513-search-negative";
-    let (usage, thread_hash, baseline, baseline_entry) =
-        seed_owner(&dir, &gateway, thread, &owner).await;
+    let (usage, thread_hash) = seed_owner(&dir, &gateway, thread, &owner).await;
 
     let no_thread = search_request(&gateway, "/v1/alpha/search", &[], SEARCH_REQUEST).await;
     assert_eq!(no_thread.status(), StatusCode::OK);
@@ -548,13 +488,6 @@ async fn v02513_search_without_thread_or_with_conflicting_thread_does_not_borrow
         &thread_hash,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    let (after, entry) = wait_for_idle_reservation(&dir, &gateway, &thread_hash, &owner).await;
-    assert_eq!(entry["busy"], false);
-    assert_eq!(entry["idle_since"], baseline_entry["idle_since"]);
-    assert_eq!(reservation_entry(&after, &thread_hash, &ordinary), None);
-    assert_eq!(gateway.0.admission.reserved(&owner), 1);
-    assert_eq!(gateway.0.admission.reserved(&ordinary), 0);
-    assert_eq!(baseline.as_array().unwrap().len(), 1);
 
     let rows = wait_for_usage(&usage, 3).await;
     let searches = rows
@@ -616,7 +549,7 @@ async fn v02513_search_failure_falls_back_without_moving_owner_or_retaining_fall
     let ids = super::v022_ids(&gateway);
     configure_search_owner(&gateway, &dir, &ids[1]);
     let thread = "fixture-v02513-search-fallback";
-    let (usage, digest, _, _) = seed_owner(&dir, &gateway, thread, &ids[1]).await;
+    let (usage, digest) = seed_owner(&dir, &gateway, thread, &ids[1]).await;
     let response = tokio::time::timeout(
         Duration::from_secs(5),
         search_request(
@@ -654,8 +587,6 @@ async fn v02513_search_failure_falls_back_without_moving_owner_or_retaining_fall
         &digest,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    assert_eq!(gateway.0.admission.reserved(&ids[0]), 0);
-    assert_eq!(gateway.0.admission.reserved(&ids[1]), 1);
     gateway.stop().await.unwrap();
 }
 
@@ -705,11 +636,9 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
     ])
     .await;
     let ids = super::v022_ids(&gateway);
-    let ordinary = ids[0].clone();
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
-    let (usage, thread_hash, baseline, baseline_entry) =
-        seed_owner(&dir, &gateway, METADATA_THREAD, &owner).await;
+    let (usage, thread_hash) = seed_owner(&dir, &gateway, METADATA_THREAD, &owner).await;
 
     let response = search_request(
         &gateway,
@@ -721,14 +650,6 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_bytes(response).await, SEARCH_RESPONSE);
 
-    let (after, entry) = wait_for_idle_reservation(&dir, &gateway, &thread_hash, &owner).await;
-    assert_eq!(entry["busy"], false);
-    assert!(
-        entry["idle_since"].as_i64().unwrap() >= baseline_entry["idle_since"].as_i64().unwrap()
-    );
-    assert_eq!(reservation_entry(&after, &thread_hash, &ordinary), None);
-    assert_eq!(gateway.0.admission.reserved(&owner), 1);
-    assert_eq!(gateway.0.admission.reserved(&ordinary), 0);
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(owner.clone())
@@ -737,7 +658,6 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
         &thread_hash,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    assert_eq!(baseline.as_array().unwrap().len(), 1);
 
     assert_eq!(ordinary_hits.load(Ordering::SeqCst), 0);
     assert_eq!(owner_hits.load(Ordering::SeqCst), 2);
@@ -913,11 +833,9 @@ async fn v02513_invalid_search_metadata_and_body_id_never_borrow_owner() {
     ])
     .await;
     let ids = super::v022_ids(&gateway);
-    let ordinary = ids[0].clone();
     let owner = ids[1].clone();
     configure_search_owner(&gateway, &dir, &owner);
-    let (_usage, thread_hash, baseline, _baseline_entry) =
-        seed_owner(&dir, &gateway, METADATA_THREAD, &owner).await;
+    let (_usage, thread_hash) = seed_owner(&dir, &gateway, METADATA_THREAD, &owner).await;
 
     assert_ordinary_search(
         &gateway,
@@ -976,8 +894,6 @@ async fn v02513_invalid_search_metadata_and_body_id_never_borrow_owner() {
         &thread_hash,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    assert_eq!(baseline.as_array().unwrap().len(), 1);
-    assert_eq!(gateway.0.admission.reserved(&ordinary), 0);
     gateway.stop().await.unwrap();
 }
 
@@ -1094,7 +1010,7 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
     super::v022_update(&gateway, &dir, Edit::Settings { settings });
     configure_search_owner(&gateway, &dir, &ids[1]);
     let thread = "fixture-v02513-search-fallback";
-    let (usage, digest, _, _) = seed_owner(&dir, &gateway, thread, &ids[1]).await;
+    let (usage, digest) = seed_owner(&dir, &gateway, thread, &ids[1]).await;
     for _ in 0..2 {
         let response = tokio::time::timeout(
             Duration::from_secs(5),
@@ -1139,8 +1055,6 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
         &digest,
         Some(&crate::storage::digest(super::V022_WINDOW.as_bytes()))
     ));
-    assert_eq!(gateway.0.admission.reserved(&ids[0]), 0);
-    assert_eq!(gateway.0.admission.reserved(&ids[1]), 1);
     gateway.stop().await.unwrap();
 }
 

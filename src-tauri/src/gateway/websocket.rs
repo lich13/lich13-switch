@@ -1082,11 +1082,7 @@ async fn session_once(
         super::routing::capacity_owner(g.client_id(), manual, ownership.as_deref());
     let mut budget = Budget::new(cfg.queue_seconds);
     budget.traffic = Some(traffic.clone());
-    budget.track(
-        &g.0.admission,
-        ownership.as_deref(),
-        cfg.thread_idle_release_seconds,
-    );
+    budget.follow(ownership.as_deref());
     if pinned.is_some() || unknown_affinity {
         budget.pin_provider();
     }
@@ -1327,16 +1323,7 @@ async fn session_once(
             .filter_map(|id| g.route(id))
             .filter(|r| ids.contains(&r.provider.id) || !r.accepts_protocol(uri.path()))
             .collect();
-        failover.candidates(
-            g,
-            stage,
-            &observed,
-            &candidates,
-            &requirement,
-            uri.path(),
-            &budget,
-            manual,
-        );
+        failover.candidates(g, stage, &observed, &candidates, &requirement, uri.path());
         if matches_model
             && !candidates
                 .iter()
@@ -1444,7 +1431,6 @@ async fn session_once(
         attempt_protocol.diagnostics(g, &admission.route.provider.id, current_model.as_deref());
         attempt_protocol.attach_ownership(ownership.clone(), &admission.route.provider.id);
         attempt_protocol.attach_routing_log(failover.routing());
-        attempt_protocol.attach_thread(budget.thread.clone());
         attempt_protocol.request_headers(&headers);
         attempt_protocol.business_request(g, &headers);
         attempt_protocol.request_received(turn_received_at);
@@ -1539,7 +1525,6 @@ async fn session_once(
                                 uri.path(),
                                 ownership.as_deref(),
                                 g.client_id() == super::ClientId::Codex && !auxiliary,
-                                &budget,
                                 !manual
                                     && pinned.is_none()
                                     && !unknown_affinity
@@ -1585,7 +1570,6 @@ async fn session_once(
                                 uri.path(),
                                 ownership.as_deref(),
                                 g.client_id() == super::ClientId::Codex && !auxiliary,
-                                &budget,
                                 !manual
                                     && pinned.is_none()
                                     && !unknown_affinity
@@ -1663,7 +1647,6 @@ async fn session_once(
                                 uri.path(),
                                 ownership.as_deref(),
                                 g.client_id() == super::ClientId::Codex && !auxiliary,
-                                &budget,
                                 !manual
                                     && pinned.is_none()
                                     && !unknown_affinity
@@ -1749,7 +1732,6 @@ async fn session_once(
     // A connection established only for a model/cursor detour does not gain
     // authority to reopen arbitrary subsequent turns on a different provider.
     let connection_request_only = ownership.as_ref().is_some_and(|lease| lease.request_only());
-    let mut thread_request = budget.thread.take();
     let mut turn = Some(admission);
     let mut replay_frame = first.clone();
     let mut retry_pending = false;
@@ -1962,7 +1944,6 @@ async fn session_once(
                 Err(TURN_CANCELLED) => {
                     failover.finish(super::failover::Exit::Cancelled);
                     retry_pending = false;
-                    thread_request = None;
                     protocol = None;
                     usage_trace = None;
                     ownership = None;
@@ -2009,7 +1990,6 @@ async fn session_once(
             )?;
             let mut budget = Budget::new(cfg.queue_seconds);
             budget.traffic = Some(traffic.clone());
-            budget.thread = thread_request.clone();
             budget.handoff_owner = ownership
                 .as_ref()
                 .filter(|lease| lease.handoff)
@@ -2044,8 +2024,6 @@ async fn session_once(
                 &retry_routes,
                 &requirement,
                 uri.path(),
-                &budget,
-                manual,
             );
             let acquired = take_slot(
                 g,
@@ -2063,7 +2041,6 @@ async fn session_once(
                 Err(TURN_CANCELLED) => {
                     failover.finish(super::failover::Exit::Cancelled);
                     retry_pending = false;
-                    thread_request = None;
                     protocol = None;
                     usage_trace = None;
                     ownership = None;
@@ -2138,7 +2115,6 @@ async fn session_once(
             next.diagnostics(g, &route.provider.id, current_model.as_deref());
             next.attach_ownership(ownership.clone(), &route.provider.id);
             next.attach_routing_log(failover.routing());
-            next.attach_thread(thread_request.clone());
             next.request_headers(&headers);
             next.business_request(g, &headers);
             next.request_received(turn_received_at);
@@ -2553,12 +2529,7 @@ async fn session_once(
                 tail_deadline = None;
                 let mut budget = Budget::new(cfg.queue_seconds);
                 budget.traffic = Some(traffic.clone());
-                budget.track(
-                    &g.0.admission,
-                    ownership.as_deref(),
-                    cfg.thread_idle_release_seconds,
-                );
-                thread_request = budget.thread.clone();
+                budget.follow(ownership.as_deref());
                 if let Some(lease) = &ownership {
                     let (intake, owner) = lease.admission_policy();
                     budget.set_intake(intake, owner);
@@ -2621,8 +2592,6 @@ async fn session_once(
                     std::slice::from_ref(&route),
                     &requirement,
                     uri.path(),
-                    &budget,
-                    manual,
                 );
                 if quota_denied {
                     failover.failure(super::failover::Failure::AccountRejected);
@@ -2725,7 +2694,6 @@ async fn session_once(
                 next_protocol.diagnostics(g, &route.provider.id, current_model.as_deref());
                 next_protocol.attach_ownership(ownership.clone(), &route.provider.id);
                 next_protocol.attach_routing_log(failover.routing());
-                next_protocol.attach_thread(thread_request.clone());
                 next_protocol.request_headers(&headers);
                 next_protocol.business_request(g, &headers);
                 next_protocol.request_received(turn_received_at);
@@ -2838,7 +2806,6 @@ async fn session_once(
                                             g.routing_ids(None).iter().filter_map(|id| g.route(id)).filter(|r| !turn_failed.contains(&r.provider.id) && !hard_denied.contains(&(r.provider.id.clone(), r.provider.version.clone()))).collect(),
                                             &Requirement::model(current_model.as_deref()), uri.path(), ownership.as_deref(),
                                             g.client_id() == super::ClientId::Codex,
-                                            &{ let mut diagnostic_budget = Budget::new(cfg.queue_seconds); diagnostic_budget.thread = thread_request.clone(); diagnostic_budget },
                                             !manual && !unknown_affinity && pinned.is_none()
                                                 && value(&replay_frame).and_then(|v| super::replay::RequestHints::from_value(v, false).ok()).is_some_and(|h| h.previous_response_id.is_none())
                                                 && (failure.capacity || ordinary_attempts <= cfg.max_retries),
@@ -3046,7 +3013,6 @@ async fn session_once(
                                             g.routing_ids(None).iter().filter_map(|id| g.route(id)).filter(|r| !turn_failed.contains(&r.provider.id) && !hard_denied.contains(&(r.provider.id.clone(), r.provider.version.clone()))).collect(),
                                             &Requirement::model(current_model.as_deref()), uri.path(), ownership.as_deref(),
                                             g.client_id() == super::ClientId::Codex,
-                                            &{ let mut diagnostic_budget = Budget::new(cfg.queue_seconds); diagnostic_budget.thread = thread_request.clone(); diagnostic_budget },
                                             !manual && !unknown_affinity && pinned.is_none()
                                                 && value(&replay_frame).and_then(|v| super::replay::RequestHints::from_value(v, false).ok()).is_some_and(|h| h.previous_response_id.is_none())
                                                 && (failure.capacity || ordinary_attempts <= cfg.max_retries),
@@ -3125,13 +3091,10 @@ async fn session_once(
                 if let Some(u) = &mut protocol {
                     u.delivery().handed(frame_bytes, u.terminal_observed());
                     u.output_handed(business);
-                    if u.delivered_success() {
-                        if let Some(admission) = &mut settled_turn {
-                            admission.slot.complete();
-                            g.persist_success(&route.provider).await;
-                        }
+                    if u.delivered_success() && settled_turn.is_some() {
+                        g.persist_success(&route.provider).await;
                     }
-                    if turn.is_none() { u.attach_thread(None); thread_request = None; }
+
                 }
                 if settled_turn.is_some() { traffic.finish(); }
             },

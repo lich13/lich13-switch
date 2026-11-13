@@ -1,5 +1,5 @@
-// 覆盖线程并发名额预留、释放及持久化恢复。
-//! v0.21.2 capacity-retention and delivery-gate fixtures.
+// 覆盖并发上限调整与接管交付门槛。
+//! Concurrency-limit and delivery-gate fixtures.
 //!
 //! This module is registered below the v0.20 fixture module so the loopback
 //! gateway helpers remain available. Every persisted value is synthetic.
@@ -10,9 +10,8 @@ use crate::gateway::{
     protocol::Protocol,
     replay::RequestHints,
     routing::Requirement,
-    thread_capacity::Retention,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn fixture_provider(id: &str, handoff: bool, take: bool) -> Provider {
     Provider {
@@ -45,34 +44,22 @@ fn compacted_hints(boundary: &str) -> RequestHints {
     }
 }
 
-fn snapshot_entry(bytes: &[u8], provider: &str) -> Value {
-    serde_json::from_slice::<Value>(bytes)
-        .unwrap()
-        .as_array()
-        .and_then(|items| items.iter().find(|item| item["provider"] == provider))
-        .cloned()
-        .expect("retention snapshot entry")
-}
-
 #[test]
 fn settings_defaults_and_load_are_idempotent() {
     let defaults = Settings::default();
     assert_eq!(defaults.first_byte_seconds, 300);
     assert_eq!(defaults.idle_seconds, 300);
-    assert_eq!(defaults.thread_idle_release_seconds, 300);
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gateway.json");
     let mut value = serde_json::to_value(Store::default()).unwrap();
     value["settings"]["firstByteSeconds"] = 60.into();
     value["settings"]["idleSeconds"] = 120.into();
-    value["settings"]["threadIdleReleaseSeconds"] = 17.into();
     std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
     let (migrated, old_revision) = Store::load(&path).unwrap();
     assert_eq!(migrated.settings.first_byte_seconds, 60);
     assert_eq!(migrated.settings.idle_seconds, 120);
-    assert_eq!(migrated.settings.thread_idle_release_seconds, 17);
     let new_revision = migrated.persist(&path, &old_revision).unwrap();
 
     let (loaded, revision) = Store::load(&path).unwrap();
@@ -81,239 +68,6 @@ fn settings_defaults_and_load_are_idempotent() {
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(loaded.persist(&path, &revision).unwrap(), new_revision);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
-}
-
-#[test]
-fn retention_pending_entries_survive_prune_until_finish() {
-    let thread = crate::storage::digest(b"fixture-retention-pending");
-    let provider = "fixture-owner";
-
-    let mut retention = Retention::default();
-    retention.seconds = 3600;
-    let seed = retention.begin(&thread, None);
-    assert!(retention.admit(seed, provider, true));
-    retention.release(seed, provider, true);
-    retention.finish(seed);
-
-    let request = retention.begin(&thread, Some(provider));
-    retention.seconds = 0;
-    assert!(
-        !retention.prune(),
-        "pending entry must be protected from expiry"
-    );
-    assert_eq!(retention.reserved(provider), 1);
-
-    retention.finish(request);
-    assert_eq!(retention.reserved(provider), 0);
-}
-
-#[test]
-fn retention_counts_parallel_requests_and_starts_idle_after_the_last_finish() {
-    let thread = crate::storage::digest(b"fixture-retention-parallel");
-    let provider = "fixture-owner";
-
-    let mut retention = Retention::default();
-    retention.seconds = 3600;
-    let seed = retention.begin(&thread, None);
-    assert!(retention.admit(seed, provider, true));
-    retention.release(seed, provider, true);
-    retention.finish(seed);
-
-    let first = retention.begin(&thread, Some(provider));
-    assert!(retention.admit(first, provider, true));
-    let second = retention.begin(&thread, Some(provider));
-    assert!(retention.admit(second, provider, true));
-    assert_eq!(
-        retention.reserved(provider),
-        0,
-        "active requests are not idle reservations"
-    );
-
-    retention.release(first, provider, true);
-    retention.finish(first);
-    assert_eq!(
-        retention.reserved(provider),
-        0,
-        "the second request is still active"
-    );
-
-    retention.release(second, provider, true);
-    assert!(snapshot_entry(&retention.snapshot(), provider)["busy"]
-        .as_bool()
-        .unwrap());
-    retention.finish(second);
-    assert!(!snapshot_entry(&retention.snapshot(), provider)["busy"]
-        .as_bool()
-        .unwrap());
-
-    let third = retention.begin(&thread, Some(provider));
-    assert!(retention.admit(third, provider, true));
-    retention.release(third, provider, true);
-    retention.finish(third);
-    retention.seconds = 1;
-    assert!(!retention.prune(), "a new request resets the idle window");
-    assert_eq!(retention.reserved(provider), 1);
-}
-
-#[test]
-fn retention_hold_is_idempotent_and_keeps_old_provider_pending() {
-    let mut retention = Retention::default();
-    retention.seconds = 30;
-    let thread = crate::storage::digest(b"fixture-retention-hold");
-    let provider = "fixture-old";
-    let initial = retention.begin(&thread, None);
-    assert!(retention.admit(initial, provider, true));
-    retention.release(initial, provider, true);
-    retention.finish(initial);
-
-    let waiting = retention.begin(&thread, Some(provider));
-    retention.hold(waiting, provider);
-    retention.hold(waiting, provider);
-    retention.seconds = 0;
-    assert!(
-        !retention.prune(),
-        "held old-provider entry must remain pending"
-    );
-    assert_eq!(retention.reserved(provider), 1);
-    retention.finish(waiting);
-    assert_eq!(retention.reserved(provider), 0);
-}
-
-#[test]
-fn retention_successful_handoff_keeps_both_sides_under_short_retention() {
-    let mut retention = Retention::default();
-    retention.seconds = 30;
-    let thread = crate::storage::digest(b"fixture-retention-handoff");
-    let owner = "fixture-old";
-    let receiver = "fixture-new";
-
-    let initial = retention.begin(&thread, None);
-    assert!(retention.admit(initial, owner, true));
-    retention.release(initial, owner, true);
-    retention.finish(initial);
-
-    let handoff = retention.begin(&thread, Some(owner));
-    assert!(retention.admit(handoff, receiver, true));
-    retention.release(handoff, receiver, true);
-    retention.finish(handoff);
-    assert_eq!(retention.reserved(owner), 1);
-    assert_eq!(retention.reserved(receiver), 1);
-    assert!(!retention.prune());
-}
-
-#[tokio::test]
-async fn scheduler_different_threads_cannot_share_one_reserved_receiver() {
-    let (dir, gateway) = super::fixture(vec![
-        "https://fixture-owner.example.invalid/v1".into(),
-        "https://fixture-receiver.example.invalid/v1".into(),
-    ])
-    .await;
-    let receiver_id = gateway.view().providers[1].id.clone();
-    super::update(
-        &gateway,
-        &dir,
-        Edit::ConcurrencyProvider {
-            id: receiver_id.clone(),
-            max_concurrency: 1,
-        },
-    );
-    super::start(&gateway, &dir).await;
-    gateway.0.admission.configure_retention(30);
-    let route = gateway.route(&receiver_id).unwrap();
-    let provider = route.provider.clone();
-
-    let first_lease = gateway
-        .0
-        .compaction
-        .prepare_policy(
-            crate::storage::digest(b"fixture-thread-one"),
-            Some(&ordinary_hints()),
-            false,
-            std::slice::from_ref(&provider),
-        )
-        .unwrap();
-    let mut first_budget = Budget::new(2);
-    first_budget.track(&gateway.0.admission, Some(&first_lease), 30);
-    let mut first = gateway
-        .0
-        .admission
-        .acquire_for_immediate(
-            std::slice::from_ref(&route),
-            false,
-            10,
-            &mut first_budget,
-            &Requirement::Resource,
-            true,
-        )
-        .await
-        .unwrap();
-    first.commit_rpm().await.unwrap();
-    first.slot.complete();
-    drop(first);
-    drop(first_budget);
-    drop(first_lease);
-    assert_eq!(gateway.0.admission.reserved(&receiver_id), 1);
-
-    let second_lease = gateway
-        .0
-        .compaction
-        .prepare_policy(
-            crate::storage::digest(b"fixture-thread-two"),
-            Some(&ordinary_hints()),
-            false,
-            std::slice::from_ref(&provider),
-        )
-        .unwrap();
-    let mut second_budget = Budget::new(0);
-    second_budget.track(&gateway.0.admission, Some(&second_lease), 30);
-    let result = gateway
-        .0
-        .admission
-        .acquire_for_immediate(
-            std::slice::from_ref(&route),
-            false,
-            10,
-            &mut second_budget,
-            &Requirement::Resource,
-            true,
-        )
-        .await;
-    assert!(matches!(result, Err(Rejected::Timeout)));
-    drop(second_budget);
-    drop(second_lease);
-
-    gateway.0.admission.configure_retention(0);
-    let third_lease = gateway
-        .0
-        .compaction
-        .prepare_policy(
-            crate::storage::digest(b"fixture-thread-three"),
-            Some(&ordinary_hints()),
-            false,
-            std::slice::from_ref(&provider),
-        )
-        .unwrap();
-    let mut third_budget = Budget::new(2);
-    third_budget.track(&gateway.0.admission, Some(&third_lease), 0);
-    let mut third = gateway
-        .0
-        .admission
-        .acquire_for_immediate(
-            std::slice::from_ref(&route),
-            false,
-            10,
-            &mut third_budget,
-            &Requirement::Resource,
-            true,
-        )
-        .await
-        .unwrap();
-    third.commit_rpm().await.unwrap();
-    third.slot.complete();
-    drop(third);
-    drop(third_budget);
-    drop(third_lease);
-    gateway.stop().await.unwrap();
 }
 
 #[tokio::test]

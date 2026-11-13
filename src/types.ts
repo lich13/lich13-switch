@@ -92,7 +92,6 @@ export type GatewaySettings = {
   hardFailureCooldownSeconds?: number;
   capacityRetrySeconds: number;
   websocketRetrySeconds: number;
-  threadIdleReleaseSeconds?: number;
   endpointProbeSeconds?: number;
   firstByteSeconds: number;
   idleSeconds: number;
@@ -150,7 +149,6 @@ export type Provider = {
   maxConcurrency: number;
   maxRpm: number;
   activeRequests: number;
-  reservedThreads?: number;
   rpmUsed: number;
   rpmRetryIn: number;
   rpmLimited: boolean;

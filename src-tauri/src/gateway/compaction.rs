@@ -843,7 +843,6 @@ impl Registry {
             {
                 let full = provider.max_concurrency != 0
                     && active.get(&provider.id).copied().unwrap_or(0)
-                        + capacity.reserved(&provider.id)
                         >= provider.max_concurrency as usize;
                 let phase = if full {
                     "capacity_full"
@@ -982,9 +981,6 @@ impl Lease {
     }
     pub fn follows_owner(&self) -> bool {
         !self.request_only || self.owner_search
-    }
-    pub fn session_digest(&self) -> &str {
-        &self.session
     }
     pub fn establishing(&self) -> bool {
         !self.request_only
