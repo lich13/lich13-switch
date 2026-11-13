@@ -1652,19 +1652,32 @@ async fn connect(
         }
     }
 }
-#[allow(clippy::too_many_arguments)]
-async fn session_once(
-    g: &Gateway,
+/// Where the session loop goes after one of its stages.
+enum Flow {
+    /// Carry on with the rest of this pass.
+    Proceed,
+    /// Start the next pass.
+    Again,
+    /// The session ended without an error.
+    Closed,
+}
+macro_rules! flow {
+    ($stage:expr) => {
+        match $stage? {
+            Flow::Proceed => {}
+            Flow::Again => continue,
+            Flow::Closed => return Ok(()),
+        }
+    };
+}
+/// Waits for the `response.create` that opens the session. `None` means the
+/// client closed first.
+async fn first_create(
     client: &mut Peer,
     cfg: &Settings,
-    manual: bool,
-    mut ids: Vec<String>,
-    routes: HashMap<String, Route>,
-    headers: HeaderMap,
-    uri: Uri,
     next_turn: &mut Option<Frame>,
     request_budget: &super::wait_budget::WaitBudget,
-) -> Result<(), Failure> {
+) -> Result<Option<Frame>, Failure> {
     let first_started = tokio::time::Instant::now();
     let mut first_deadline = first_started + Duration::from_secs(cfg.first_byte_seconds);
     let first = if let Some(frame) = next_turn.take() {
@@ -1686,7 +1699,7 @@ async fn session_once(
                 }
             };
             if frame.opcode() == OpCode::Close {
-                return Ok(());
+                return Ok(None);
             }
             if frame.opcode() == OpCode::Ping {
                 client.send(Frame::pong(frame.payload().to_vec())).await?;
@@ -1702,54 +1715,133 @@ async fn session_once(
             break frame;
         }
     };
-    let mut traffic = g.0.registry.freeze.request();
-    traffic.waiting();
-    request_budget.attach_traffic(&traffic);
-    let mut turn_rules = g
-        .request_state()
-        .store
-        .settings
-        .custom_failure_rules
-        .clone();
-    let mut turn_received_at = crate::usage::model::now();
-    let mut pinned = manual.then(|| ids.first().cloned()).flatten();
-    let mut unknown_affinity = false;
-    if let Some(previous) = value(&first).and_then(|v| {
-        v.get("previous_response_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-    }) {
-        let s = g.request_state();
-        if let Some((owner, _, _)) = s
-            .affinity
-            .get(&previous)
-            .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
-        {
-            pinned = Some(owner.clone());
-            ids = vec![owner.clone()];
-        } else {
-            ids.truncate(1);
-            unknown_affinity = true;
+    Ok(Some(first))
+}
+/// The turns of one client connection and the upstream it currently holds.
+struct Session<'a> {
+    g: &'a Gateway,
+    cfg: &'a Settings,
+    manual: bool,
+    headers: HeaderMap,
+    uri: Uri,
+    request_budget: &'a super::wait_budget::WaitBudget,
+    /// Receives the frame that must reopen the session on another provider.
+    next_turn: &'a mut Option<Frame>,
+    traffic: super::freeze::Ticket,
+    turn_rules: Vec<super::failure_rules::Rule>,
+    turn_received_at: i64,
+    pinned: Option<String>,
+    unknown_affinity: bool,
+    current_model: Option<String>,
+    conversation: Option<String>,
+    ownership: Option<std::sync::Arc<super::compaction::Lease>>,
+    established_capacity_owner: Option<String>,
+    attempts: usize,
+    ordinary_attempts: usize,
+    capacity_protected: bool,
+    retry_capacity: bool,
+    hard_denied: std::collections::HashSet<(String, String)>,
+    last_error: Option<super::health_settlement::Reported>,
+    usage_trace: Option<crate::usage::Trace>,
+    failover: super::failover::Tracker,
+    upstream: Upstream,
+    route: Route,
+    connection_request_only: bool,
+    /// The slot of the turn in flight; `None` between turns.
+    turn: Option<Admission>,
+    replay_frame: Frame,
+    retry_pending: bool,
+    retry_immediately: bool,
+    retry_fallback: bool,
+    owner_capacity_wait: Option<CapacitySource>,
+    fallback_capacity: bool,
+    turn_failed: std::collections::HashSet<String>,
+    rejected_frame: Option<Frame>,
+    tail_deadline: Option<tokio::time::Instant>,
+    previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)>,
+    protocol: Option<super::protocol::Protocol>,
+    /// The next `response.create`, received while a turn was still in flight.
+    pending: Option<Frame>,
+    pending_traffic: Option<super::freeze::Ticket>,
+    freeze_changes: watch::Receiver<()>,
+    pending_received_at: i64,
+    pending_started: tokio::time::Instant,
+    confirmed_model: Option<String>,
+    received: bool,
+    initial_frames: Vec<Frame>,
+    initial_bytes: usize,
+    terminal_error: bool,
+    receive_started: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+}
+impl<'a> Session<'a> {
+    /// Plans the first turn, connects its provider and sends the frame. `None`
+    /// means the client went away while connecting.
+    #[allow(clippy::too_many_arguments)]
+    async fn open(
+        g: &'a Gateway,
+        client: &mut Peer,
+        cfg: &'a Settings,
+        manual: bool,
+        mut ids: Vec<String>,
+        routes: HashMap<String, Route>,
+        headers: HeaderMap,
+        uri: Uri,
+        next_turn: &'a mut Option<Frame>,
+        request_budget: &'a super::wait_budget::WaitBudget,
+        first: Frame,
+    ) -> Result<Option<Session<'a>>, Failure> {
+        let traffic = g.0.registry.freeze.request();
+        traffic.waiting();
+        request_budget.attach_traffic(&traffic);
+        let turn_rules = g
+            .request_state()
+            .store
+            .settings
+            .custom_failure_rules
+            .clone();
+        let turn_received_at = crate::usage::model::now();
+        let mut pinned = manual.then(|| ids.first().cloned()).flatten();
+        let mut unknown_affinity = false;
+        if let Some(previous) = value(&first).and_then(|v| {
+            v.get("previous_response_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        }) {
+            let s = g.request_state();
+            if let Some((owner, _, _)) = s
+                .affinity
+                .get(&previous)
+                .filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3600))
+            {
+                pinned = Some(owner.clone());
+                ids = vec![owner.clone()];
+            } else {
+                ids.truncate(1);
+                unknown_affinity = true;
+            }
         }
-    }
-    let mut current_model = turn_model(g, &first, None, None)?;
-    request_budget.describe(pinned.as_deref(), current_model.as_deref(), "admission");
-    let requirement = Requirement::model(current_model.as_deref());
-    let first_hints =
-        value(&first).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
-    let conversation = super::compaction::session(&headers);
-    let auxiliary = first_hints.as_ref().is_some_and(|h| h.auxiliary);
-    if auxiliary && g.client_id() == super::ClientId::Codex && !manual {
-        if let Some(owner) = conversation
-            .as_deref()
-            .and_then(|s| g.0.compaction.owner(s))
-            .filter(|id| ids.contains(id))
-        {
-            ids = vec![owner];
+        let current_model = turn_model(g, &first, None, None)?;
+        request_budget.describe(pinned.as_deref(), current_model.as_deref(), "admission");
+        let requirement = Requirement::model(current_model.as_deref());
+        let first_hints =
+            value(&first).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+        let conversation = super::compaction::session(&headers);
+        let auxiliary = first_hints.as_ref().is_some_and(|h| h.auxiliary);
+        if auxiliary && g.client_id() == super::ClientId::Codex && !manual {
+            if let Some(owner) = conversation
+                .as_deref()
+                .and_then(|s| g.0.compaction.owner(s))
+                .filter(|id| ids.contains(id))
+            {
+                ids = vec![owner];
+            }
         }
-    }
-    let mut ownership =
-        if g.client_id() == super::ClientId::Codex && !manual && !unknown_affinity && !auxiliary {
+        let ownership = if g.client_id() == super::ClientId::Codex
+            && !manual
+            && !unknown_affinity
+            && !auxiliary
+        {
             let queued = super::compaction::queued(g).map_err(|_| (1011, code::STORE))?;
             if let Some(session) = conversation.clone().filter(|_| {
                 queued
@@ -1776,528 +1868,592 @@ async fn session_once(
         } else {
             None
         };
-    let mut established_capacity_owner =
-        super::routing::capacity_owner(g.client_id(), manual, ownership.as_deref());
-    let mut budget = Budget::new(cfg.queue_seconds);
-    budget.traffic = Some(traffic.clone());
-    budget.follow(ownership.as_deref());
-    if pinned.is_some() || unknown_affinity {
-        budget.pin_provider();
-    }
-    let mut attempts = 0usize;
-    let mut ordinary_attempts = 0usize;
-    let mut capacity_protected = false;
-    let mut retry_capacity = false;
-    let mut hard_denied = std::collections::HashSet::new();
-    let mut last_error: Option<super::health_settlement::Reported> = None;
-    let mut usage_trace = g.usage_operation(
-        current_model.as_deref(),
-        if first_hints.as_ref().is_some_and(|h| h.compaction_trigger) {
-            crate::usage::model::Operation::Compaction
-        } else {
-            crate::usage::model::Operation::Model
-        },
-    );
-    let mut failover = super::failover::Tracker::new(usage_trace.clone());
-    failover.attach_wait_budget(request_budget);
-    if !manual && g.client_id() == super::ClientId::Codex {
-        failover.diagnostics(g);
-        if let Some(log) = failover.routing() {
-            log.pending(
-                &headers,
-                first_hints.as_ref(),
-                ownership.as_deref(),
-                pinned.is_some() || unknown_affinity,
-            );
+        let established_capacity_owner =
+            super::routing::capacity_owner(g.client_id(), manual, ownership.as_deref());
+        let mut budget = Budget::new(cfg.queue_seconds);
+        budget.traffic = Some(traffic.clone());
+        budget.follow(ownership.as_deref());
+        if pinned.is_some() || unknown_affinity {
+            budget.pin_provider();
         }
-    }
-    let Some((mut upstream, admission, initial_protocol)) = connect(Connecting {
-        g,
-        client,
-        cfg,
-        manual,
-        ids,
-        routes,
-        headers: &headers,
-        uri: &uri,
-        request_budget,
-        first: &first,
-        turn_rules: &turn_rules,
-        turn_received_at,
-        pinned: &mut pinned,
-        unknown_affinity,
-        current_model: &current_model,
-        requirement: &requirement,
-        first_hints: &first_hints,
-        conversation: &conversation,
-        auxiliary,
-        ownership: &ownership,
-        established_capacity_owner: &established_capacity_owner,
-        budget: &mut budget,
-        attempts: &mut attempts,
-        ordinary_attempts: &mut ordinary_attempts,
-        capacity_protected: &mut capacity_protected,
-        hard_denied: &mut hard_denied,
-        last_error: &mut last_error,
-        usage_trace: &usage_trace,
-        failover: &mut failover,
-    })
-    .await?
-    else {
-        return Ok(());
-    };
-    let mut route = admission.route.clone();
-    // A connection established only for a model/cursor detour does not gain
-    // authority to reopen arbitrary subsequent turns on a different provider.
-    let connection_request_only = ownership.as_ref().is_some_and(|lease| lease.request_only());
-    let mut turn = Some(admission);
-    let mut replay_frame = first.clone();
-    let mut retry_pending = false;
-    let mut retry_immediately = false;
-    let mut retry_fallback = false;
-    let mut owner_capacity_wait: Option<CapacitySource> = None;
-    let mut fallback_capacity = false;
-    let mut turn_failed = std::collections::HashSet::new();
-    let mut rejected_frame: Option<Frame> = None;
-    let mut tail_deadline = None;
-    let mut previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)> = None;
-    let mut protocol = Some(initial_protocol);
-    let mut pending: Option<Frame> = None;
-    let mut pending_traffic: Option<super::freeze::Ticket> = None;
-    let mut freeze_changes = g.0.registry.freeze.subscribe();
-    let mut pending_received_at = turn_received_at;
-    let mut pending_started = tokio::time::Instant::now();
-    let mut confirmed_model: Option<String> = None;
-    let mut received = false;
-    let mut initial_frames: Vec<Frame> = Vec::new();
-    let mut initial_bytes = 0usize;
-    let mut terminal_error = false;
-    let mut receive_started = tokio::time::Instant::now();
-    if !admit_ownership(
-        g,
-        ownership.as_deref(),
-        &route,
-        &requirement,
-        pinned.is_some(),
-    )? {
-        return Err((1013, code::CONVERSATION_OWNERSHIP));
-    }
-    if let Some(u) = &protocol {
-        u.begin_compaction_execution();
-    }
-    if let Upstream::Native(peer) = &mut upstream {
-        if let Err(e) = peer.send(first).await {
-            retry_pending = disconnect_turn(
-                g,
-                &route,
-                cfg,
-                current_model.as_deref(),
-                &mut turn,
-                &mut protocol,
-                peer.activity
-                    .read_at()
-                    .is_some_and(|at| at >= receive_started),
-                attempts,
-                ordinary_attempts,
-                !unknown_affinity,
-                None,
-                crate::events::Phase::WsSend,
-                code::NETWORK,
-            );
-            if !retry_pending {
-                return Err(e);
-            }
-            upstream = Upstream::Disconnected;
-        }
-    }
-    // Upload progress has its own deadline. Start response waiting only after
-    // the first frame has been handed to the upstream socket.
-    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
-    'turns: loop {
-        // Do not let a queued create/retry or continuously ready upstream starve
-        // an already-observed downstream close. The tail never starts a turn.
-        if *client.closed.borrow() {
-            if let Some(mut admission) = turn.take() {
-                admission.permits.neutral(cfg);
-            }
-            cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
-            return Ok(());
-        }
-        if retry_pending {
-            traffic.waiting();
-            let requirement = Requirement::model(current_model.as_deref());
-            let hints = value(&replay_frame)
-                .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
-            let movable = retry_fallback
-                && owner_capacity_wait.is_none()
-                && !manual
-                && !unknown_affinity
-                && hints
-                    .as_ref()
-                    .is_some_and(|h| h.previous_response_id.is_none());
-            let candidates_for = |failed: &std::collections::HashSet<String>| {
-                let candidates: Vec<_> = g
-                    .routing_ids(None)
-                    .iter()
-                    .filter_map(|id| g.route(id))
-                    .filter(|r| {
-                        !failed.contains(&r.provider.id)
-                            && !hard_denied
-                                .contains(&(r.provider.id.clone(), r.provider.version.clone()))
-                            && r.accepts_protocol(uri.path())
-                            && requirement.allows(r.provider.allowed_models.as_deref())
-                    })
-                    .collect();
-                if let Some(lease) = &ownership {
-                    lease.candidates_after_failure(candidates, &requirement)
-                } else if g.client_id() == super::ClientId::Codex {
-                    super::compaction::unidentified_candidates(candidates)
-                } else {
-                    candidates
-                }
-            };
-            let mut retry_routes = if movable {
-                candidates_for(&turn_failed)
-            } else if owner_capacity_wait.is_some() {
-                g.route(&route.provider.id)
-                    .filter(|r| {
-                        r.provider.queued
-                            && !r.provider.search_only
-                            && requirement.allows(r.provider.allowed_models.as_deref())
-                    })
-                    .into_iter()
-                    .collect()
+        let mut attempts = 0usize;
+        let mut ordinary_attempts = 0usize;
+        let mut capacity_protected = false;
+        let retry_capacity = false;
+        let mut hard_denied = std::collections::HashSet::new();
+        let mut last_error: Option<super::health_settlement::Reported> = None;
+        let usage_trace = g.usage_operation(
+            current_model.as_deref(),
+            if first_hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+                crate::usage::model::Operation::Compaction
             } else {
-                vec![route.clone()]
-            };
-            let alternative = movable && !retry_routes.is_empty();
-            if movable && retry_routes.is_empty() && (retry_capacity || fallback_capacity) {
-                turn_failed.clear();
-                retry_routes = candidates_for(&turn_failed);
+                crate::usage::model::Operation::Model
+            },
+        );
+        let mut failover = super::failover::Tracker::new(usage_trace.clone());
+        failover.attach_wait_budget(request_budget);
+        if !manual && g.client_id() == super::ClientId::Codex {
+            failover.diagnostics(g);
+            if let Some(log) = failover.routing() {
+                log.pending(
+                    &headers,
+                    first_hints.as_ref(),
+                    ownership.as_deref(),
+                    pinned.is_some() || unknown_affinity,
+                );
             }
-            if retry_fallback
-                && (retry_routes.is_empty()
-                    || (!movable
-                        && hard_denied.contains(&(
-                            route.provider.id.clone(),
-                            route.provider.version.clone(),
-                        )))
-                    || ordinary_attempts > cfg.max_retries)
-            {
-                failover.finish(if ordinary_attempts > cfg.max_retries {
+        }
+        let Some((mut upstream, admission, initial_protocol)) = connect(Connecting {
+            g,
+            client,
+            cfg,
+            manual,
+            ids,
+            routes,
+            headers: &headers,
+            uri: &uri,
+            request_budget,
+            first: &first,
+            turn_rules: &turn_rules,
+            turn_received_at,
+            pinned: &mut pinned,
+            unknown_affinity,
+            current_model: &current_model,
+            requirement: &requirement,
+            first_hints: &first_hints,
+            conversation: &conversation,
+            auxiliary,
+            ownership: &ownership,
+            established_capacity_owner: &established_capacity_owner,
+            budget: &mut budget,
+            attempts: &mut attempts,
+            ordinary_attempts: &mut ordinary_attempts,
+            capacity_protected: &mut capacity_protected,
+            hard_denied: &mut hard_denied,
+            last_error: &mut last_error,
+            usage_trace: &usage_trace,
+            failover: &mut failover,
+        })
+        .await?
+        else {
+            return Ok(None);
+        };
+        let route = admission.route.clone();
+        // A connection established only for a model/cursor detour does not gain
+        // authority to reopen arbitrary subsequent turns on a different provider.
+        let connection_request_only = ownership.as_ref().is_some_and(|lease| lease.request_only());
+        let mut turn = Some(admission);
+        let replay_frame = first.clone();
+        let mut retry_pending = false;
+        let retry_immediately = false;
+        let retry_fallback = false;
+        let owner_capacity_wait: Option<CapacitySource> = None;
+        let fallback_capacity = false;
+        let turn_failed = std::collections::HashSet::new();
+        let rejected_frame: Option<Frame> = None;
+        let tail_deadline = None;
+        let previous_usage: Option<(super::protocol::Protocol, tokio::time::Instant)> = None;
+        let mut protocol = Some(initial_protocol);
+        let pending: Option<Frame> = None;
+        let pending_traffic: Option<super::freeze::Ticket> = None;
+        let freeze_changes = g.0.registry.freeze.subscribe();
+        let pending_received_at = turn_received_at;
+        let pending_started = tokio::time::Instant::now();
+        let confirmed_model: Option<String> = None;
+        let received = false;
+        let initial_frames: Vec<Frame> = Vec::new();
+        let initial_bytes = 0usize;
+        let terminal_error = false;
+        let receive_started = tokio::time::Instant::now();
+        if !admit_ownership(
+            g,
+            ownership.as_deref(),
+            &route,
+            &requirement,
+            pinned.is_some(),
+        )? {
+            return Err((1013, code::CONVERSATION_OWNERSHIP));
+        }
+        if let Some(u) = &protocol {
+            u.begin_compaction_execution();
+        }
+        if let Upstream::Native(peer) = &mut upstream {
+            if let Err(e) = peer.send(first).await {
+                retry_pending = disconnect_turn(
+                    g,
+                    &route,
+                    cfg,
+                    current_model.as_deref(),
+                    &mut turn,
+                    &mut protocol,
+                    peer.activity
+                        .read_at()
+                        .is_some_and(|at| at >= receive_started),
+                    attempts,
+                    ordinary_attempts,
+                    !unknown_affinity,
+                    None,
+                    crate::events::Phase::WsSend,
+                    code::NETWORK,
+                );
+                if !retry_pending {
+                    return Err(e);
+                }
+                upstream = Upstream::Disconnected;
+            }
+        }
+        // Upload progress has its own deadline. Start response waiting only after
+        // the first frame has been handed to the upstream socket.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
+        Ok(Some(Session {
+            g,
+            cfg,
+            manual,
+            headers,
+            uri,
+            request_budget,
+            next_turn,
+            traffic,
+            turn_rules,
+            turn_received_at,
+            pinned,
+            unknown_affinity,
+            current_model,
+            conversation,
+            ownership,
+            established_capacity_owner,
+            attempts,
+            ordinary_attempts,
+            capacity_protected,
+            retry_capacity,
+            hard_denied,
+            last_error,
+            usage_trace,
+            failover,
+            upstream,
+            route,
+            connection_request_only,
+            turn,
+            replay_frame,
+            retry_pending,
+            retry_immediately,
+            retry_fallback,
+            owner_capacity_wait,
+            fallback_capacity,
+            turn_failed,
+            rejected_frame,
+            tail_deadline,
+            previous_usage,
+            protocol,
+            pending,
+            pending_traffic,
+            freeze_changes,
+            pending_received_at,
+            pending_started,
+            confirmed_model,
+            received,
+            initial_frames,
+            initial_bytes,
+            terminal_error,
+            receive_started,
+            deadline,
+        }))
+    }
+    /// Replays the unanswered turn: waits out the retry delay, takes a slot on
+    /// the same or the next provider, reconnects and resends the original frame.
+    async fn reconnect(&mut self, client: &mut Peer) -> Result<Flow, Failure> {
+        self.traffic.waiting();
+        let requirement = Requirement::model(self.current_model.as_deref());
+        let hints = value(&self.replay_frame)
+            .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+        let movable = self.retry_fallback
+            && self.owner_capacity_wait.is_none()
+            && !self.manual
+            && !self.unknown_affinity
+            && hints
+                .as_ref()
+                .is_some_and(|h| h.previous_response_id.is_none());
+        let candidates_for = |failed: &std::collections::HashSet<String>| {
+            let candidates: Vec<_> = self
+                .g
+                .routing_ids(None)
+                .iter()
+                .filter_map(|id| self.g.route(id))
+                .filter(|r| {
+                    !failed.contains(&r.provider.id)
+                        && !self
+                            .hard_denied
+                            .contains(&(r.provider.id.clone(), r.provider.version.clone()))
+                        && r.accepts_protocol(self.uri.path())
+                        && requirement.allows(r.provider.allowed_models.as_deref())
+                })
+                .collect();
+            if let Some(lease) = &self.ownership {
+                lease.candidates_after_failure(candidates, &requirement)
+            } else if self.g.client_id() == super::ClientId::Codex {
+                super::compaction::unidentified_candidates(candidates)
+            } else {
+                candidates
+            }
+        };
+        let mut retry_routes = if movable {
+            candidates_for(&self.turn_failed)
+        } else if self.owner_capacity_wait.is_some() {
+            self.g
+                .route(&self.route.provider.id)
+                .filter(|r| {
+                    r.provider.queued
+                        && !r.provider.search_only
+                        && requirement.allows(r.provider.allowed_models.as_deref())
+                })
+                .into_iter()
+                .collect()
+        } else {
+            vec![self.route.clone()]
+        };
+        let alternative = movable && !retry_routes.is_empty();
+        if movable && retry_routes.is_empty() && (self.retry_capacity || self.fallback_capacity) {
+            self.turn_failed.clear();
+            retry_routes = candidates_for(&self.turn_failed);
+        }
+        if self.retry_fallback
+            && (retry_routes.is_empty()
+                || (!movable
+                    && self.hard_denied.contains(&(
+                        self.route.provider.id.clone(),
+                        self.route.provider.version.clone(),
+                    )))
+                || self.ordinary_attempts > self.cfg.max_retries)
+        {
+            self.failover
+                .finish(if self.ordinary_attempts > self.cfg.max_retries {
                     super::failover::Exit::AttemptsExhausted
                 } else {
                     super::failover::Exit::NoEligibleProvider
                 });
-                if let Some(frame) = rejected_frame.take() {
-                    client.send(frame).await?;
-                }
-                return Err((1013, "all eligible providers failed"));
+            if let Some(frame) = self.rejected_frame.take() {
+                client.send(frame).await?;
             }
-            let delay = if retry_immediately || retry_capacity {
-                0
-            } else {
-                cfg.websocket_retry_seconds
-            }
-            .max(
-                route
-                    .health_for(&Requirement::model(current_model.as_deref()))
-                    .retry_in,
+            return Err((1013, "all eligible providers failed"));
+        }
+        let delay = if self.retry_immediately || self.retry_capacity {
+            0
+        } else {
+            self.cfg.websocket_retry_seconds
+        }
+        .max(
+            self.route
+                .health_for(&Requirement::model(self.current_model.as_deref()))
+                .retry_in,
+        );
+        self.retry_immediately = false;
+        if !alternative {
+            self.failover.wait(
+                if self.retry_capacity {
+                    super::failover::WaitKind::CapacityRetry
+                } else {
+                    super::failover::WaitKind::TransientRetry
+                },
+                delay,
             );
-            retry_immediately = false;
-            if !alternative {
-                failover.wait(
-                    if retry_capacity {
-                        super::failover::WaitKind::CapacityRetry
-                    } else {
-                        super::failover::WaitKind::TransientRetry
-                    },
-                    delay,
-                );
-            }
-            request_budget.describe(
-                Some(&route.provider.id),
-                current_model.as_deref(),
-                "ws_wait",
-            );
-            let waited = if alternative {
-                Ok(Ok(false))
-            } else {
-                while_connecting(client, async {
-                    if let Some(source) = &owner_capacity_wait {
-                        g.wait_capacity_checked(
+        }
+        self.request_budget.describe(
+            Some(&self.route.provider.id),
+            self.current_model.as_deref(),
+            "ws_wait",
+        );
+        let waited = if alternative {
+            Ok(Ok(false))
+        } else {
+            while_connecting(client, async {
+                if let Some(source) = &self.owner_capacity_wait {
+                    self.g
+                        .wait_capacity_checked(
                             std::slice::from_ref(source),
                             Duration::from_secs(delay),
-                            cfg.max_waiting,
+                            self.cfg.max_waiting,
                             true,
-                            Some(&route),
-                            last_error.as_deref(),
+                            Some(&self.route),
+                            self.last_error.as_deref(),
                         )
                         .await
-                    } else if retry_capacity || fallback_capacity {
-                        let source = g.0.admission.capacity_source(&route.provider.id);
-                        g.wait_capacity_checked(
+                } else if self.retry_capacity || self.fallback_capacity {
+                    let source = self.g.0.admission.capacity_source(&self.route.provider.id);
+                    self.g
+                        .wait_capacity_checked(
                             &[source],
                             Duration::from_secs(delay),
-                            cfg.max_waiting,
+                            self.cfg.max_waiting,
                             false,
-                            Some(&route),
-                            last_error.as_deref(),
+                            Some(&self.route),
+                            self.last_error.as_deref(),
                         )
                         .await
-                    } else {
-                        g.0.admission
-                            .wait_websocket(
-                                &route.provider.id,
-                                Duration::from_secs(delay),
-                                cfg.max_waiting,
-                            )
-                            .await
-                            .map(|()| false)
-                    }
-                })
-                .await
-            };
-            let exhausted = match waited {
-                Err(TURN_CANCELLED) => {
-                    failover.finish(super::failover::Exit::Cancelled);
-                    retry_pending = false;
-                    protocol = None;
-                    usage_trace = None;
-                    ownership = None;
-                    failover.detach();
-                    turn_cancelled(client, &traffic, request_budget).await?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-                Ok(result) => result.map_err(rejected)?,
-            };
-            if exhausted {
-                hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
-                owner_capacity_wait = None;
-                retry_capacity = false;
-                retry_fallback = true;
-                retry_immediately = true;
-                failover.failure(super::failover::Failure::AccountRejected);
-                continue;
-            }
-            if owner_capacity_wait.is_some() {
-                retry_routes = g
-                    .route(&route.provider.id)
-                    .filter(|r| {
-                        r.provider.queued
-                            && !r.provider.search_only
-                            && requirement.allows(r.provider.allowed_models.as_deref())
-                    })
-                    .into_iter()
-                    .collect();
-                if retry_routes.is_empty() {
-                    if let Some(frame) = rejected_frame.take() {
-                        client.send(frame).await?;
-                    }
-                    return Err((1013, "thread owner is no longer available"));
-                }
-            }
-            current_model = turn_model(
-                g,
-                &replay_frame,
-                confirmed_model.as_deref(),
-                Some(&route.provider.id),
-            )?;
-            let mut budget = Budget::new(cfg.queue_seconds);
-            budget.traffic = Some(traffic.clone());
-            budget.handoff_owner = ownership
-                .as_ref()
-                .filter(|lease| lease.handoff)
-                .and_then(|lease| lease.owner.clone());
-            if movable {
-                budget.handoff_owner = None;
-                if let Some(lease) = &ownership {
-                    let (intake, owner) = lease.admission_policy();
-                    budget.set_intake(intake, owner);
-                }
-            } else {
-                budget.pin_provider();
-            }
-            if capacity_protected {
-                budget.protect_capacity();
-            }
-            let observed: Vec<_> = g
-                .routing_ids(pinned.as_deref())
-                .iter()
-                .filter_map(|id| g.route(id))
-                .collect();
-            failover.candidates(
-                g,
-                if movable {
-                    super::failover::Stage::FailureFallback
-                } else if unknown_affinity {
-                    super::failover::Stage::UnknownOwner
                 } else {
-                    super::failover::Stage::CursorPinned
-                },
-                &observed,
-                &retry_routes,
-                &requirement,
-                uri.path(),
-            );
-            let acquired = take_slot(
-                g,
-                client,
-                &retry_routes,
-                manual,
-                cfg,
-                &mut budget,
-                &Requirement::model(current_model.as_deref()),
-                false,
-                &mut failover,
-            )
-            .await;
-            let mut admission = match acquired {
-                Err(TURN_CANCELLED) => {
-                    failover.finish(super::failover::Exit::Cancelled);
-                    retry_pending = false;
-                    protocol = None;
-                    usage_trace = None;
-                    ownership = None;
-                    failover.detach();
-                    turn_cancelled(client, &traffic, request_budget).await?;
-                    continue;
+                    self.g
+                        .0
+                        .admission
+                        .wait_websocket(
+                            &self.route.provider.id,
+                            Duration::from_secs(delay),
+                            self.cfg.max_waiting,
+                        )
+                        .await
+                        .map(|()| false)
                 }
-                result => result?,
-            };
-            if !admit_ownership(
-                g,
-                ownership.as_deref(),
-                &admission.route,
-                &requirement,
-                !movable,
-            )? {
-                admission.permits.neutral(cfg);
-                continue;
-            }
-            let previous = route.provider.id.clone();
-            route = g
-                .endpoint_route(
-                    admission.route.clone(),
-                    conversation.as_deref(),
-                    None,
-                    false,
-                )
-                .await
-                .map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
-            admission.route = route.clone();
-            if previous != route.provider.id {
-                g.record(
-                    Some(&route.provider.id),
-                    current_model.as_deref(),
-                    crate::events::Reason::Failover,
-                    crate::events::Action::Routed,
-                    None,
-                    None,
-                );
-            }
-            admission.commit_rpm();
-            attempts = attempts.saturating_add(1);
-            ordinary_attempts = ordinary_attempts.saturating_add(1);
-            let mut next = attempt_protocol(
-                g,
-                request_budget,
-                &turn_rules,
-                &route.provider.id,
-                current_model.as_deref(),
-                &ownership,
-                &failover,
-                &headers,
-                turn_received_at,
-                value(&replay_frame).and_then(|v| crate::usage::model::speed(&v["speed"])),
-                usage_trace.as_ref(),
-            );
-            let hints = value(&replay_frame)
-                .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
-            next.context(
-                conversation.clone(),
-                (!manual).then(|| {
-                    super::compaction::decision(
-                        conversation.as_deref(),
-                        hints.as_ref(),
-                        pinned.is_some() || unknown_affinity,
-                        ownership.as_deref(),
-                        &route.provider.id,
-                    )
-                }),
-            );
-            if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
-                next.set_operation(crate::usage::model::Operation::Compaction);
-            }
-            if !manual {
-                next.routing_evidence(hints.as_ref());
-            }
-            next.watch_lifecycle(
-                g.request_state().shutdown.as_ref().map(|s| s.subscribe()),
-                Some(client.closed.clone()),
-            );
-            protocol = Some(next);
-            turn = Some(admission);
-            let opened = while_connecting(client, async {
-                upstream_native(&route, &uri, &headers, cfg, &turn_rules)
-                    .await
-                    .map(Upstream::Native)
             })
-            .await;
-            match opened {
-                Err(TURN_CANCELLED) => {
-                    failover.finish(super::failover::Exit::Cancelled);
-                    turn = None;
-                    if let Some(u) = &mut protocol {
-                        u.finish(None, code::CANCELLED);
-                    }
-                    protocol = None;
-                    usage_trace = None;
-                    ownership = None;
-                    failover.detach();
-                    retry_pending = false;
-                    turn_cancelled(client, &traffic, request_budget).await?;
-                    continue;
+            .await
+        };
+        let exhausted = match waited {
+            Err(TURN_CANCELLED) => {
+                self.failover.finish(super::failover::Exit::Cancelled);
+                self.retry_pending = false;
+                self.release();
+                turn_cancelled(client, &self.traffic, self.request_budget).await?;
+                return Ok(Flow::Again);
+            }
+            Err(error) => return Err(error),
+            Ok(result) => result.map_err(rejected)?,
+        };
+        if exhausted {
+            self.hard_denied.insert((
+                self.route.provider.id.clone(),
+                self.route.provider.version.clone(),
+            ));
+            self.owner_capacity_wait = None;
+            self.retry_capacity = false;
+            self.retry_fallback = true;
+            self.retry_immediately = true;
+            self.failover
+                .failure(super::failover::Failure::AccountRejected);
+            return Ok(Flow::Again);
+        }
+        if self.owner_capacity_wait.is_some() {
+            retry_routes = self
+                .g
+                .route(&self.route.provider.id)
+                .filter(|r| {
+                    r.provider.queued
+                        && !r.provider.search_only
+                        && requirement.allows(r.provider.allowed_models.as_deref())
+                })
+                .into_iter()
+                .collect();
+            if retry_routes.is_empty() {
+                if let Some(frame) = self.rejected_frame.take() {
+                    client.send(frame).await?;
                 }
-                Err(error) => return Err(error),
-                Ok(Err(failure)) => {
-                    failover.failure(failure.classification());
-                    let mut admission = turn.take().unwrap();
-                    let wait_same = failure.capacity
-                        && established_capacity_owner.as_deref() == Some(&route.provider.id);
-                    owner_capacity_wait = wait_same.then(|| CapacitySource {
-                        provider_id: route.provider.id.clone(),
-                        reset_generation: admission.reset_generation,
-                    });
-                    let can_fail_over = !wait_same
-                        && retry_fallback
-                        && !manual
-                        && !unknown_affinity
-                        && hints
-                            .as_ref()
-                            .is_some_and(|h| h.previous_response_id.is_none());
-                    let mut failure = failure;
-                    if wait_same {
-                        failure.details.wait_seconds =
-                            Some(forward::capacity_delay(cfg, failure.retry).as_secs());
-                    }
-                    if let Some(u) = protocol.as_mut() {
-                        u.finish(
-                            failure.status,
-                            if failure.transport_failure() {
-                                code::NETWORK
-                            } else {
-                                code::HTTP
-                            },
-                        );
-                    }
-                    last_error = Some(failover.report_failure(protocol.as_ref(), || {
+                return Err((1013, "thread owner is no longer available"));
+            }
+        }
+        self.current_model = turn_model(
+            self.g,
+            &self.replay_frame,
+            self.confirmed_model.as_deref(),
+            Some(&self.route.provider.id),
+        )?;
+        let mut budget = Budget::new(self.cfg.queue_seconds);
+        budget.traffic = Some(self.traffic.clone());
+        budget.handoff_owner = self
+            .ownership
+            .as_ref()
+            .filter(|lease| lease.handoff)
+            .and_then(|lease| lease.owner.clone());
+        if movable {
+            budget.handoff_owner = None;
+            if let Some(lease) = &self.ownership {
+                let (intake, owner) = lease.admission_policy();
+                budget.set_intake(intake, owner);
+            }
+        } else {
+            budget.pin_provider();
+        }
+        if self.capacity_protected {
+            budget.protect_capacity();
+        }
+        let observed: Vec<_> = self
+            .g
+            .routing_ids(self.pinned.as_deref())
+            .iter()
+            .filter_map(|id| self.g.route(id))
+            .collect();
+        self.failover.candidates(
+            self.g,
+            if movable {
+                super::failover::Stage::FailureFallback
+            } else if self.unknown_affinity {
+                super::failover::Stage::UnknownOwner
+            } else {
+                super::failover::Stage::CursorPinned
+            },
+            &observed,
+            &retry_routes,
+            &requirement,
+            self.uri.path(),
+        );
+        let acquired = take_slot(
+            self.g,
+            client,
+            &retry_routes,
+            self.manual,
+            self.cfg,
+            &mut budget,
+            &Requirement::model(self.current_model.as_deref()),
+            false,
+            &mut self.failover,
+        )
+        .await;
+        let mut admission = match acquired {
+            Err(TURN_CANCELLED) => {
+                self.failover.finish(super::failover::Exit::Cancelled);
+                self.retry_pending = false;
+                self.release();
+                turn_cancelled(client, &self.traffic, self.request_budget).await?;
+                return Ok(Flow::Again);
+            }
+            result => result?,
+        };
+        if !admit_ownership(
+            self.g,
+            self.ownership.as_deref(),
+            &admission.route,
+            &requirement,
+            !movable,
+        )? {
+            admission.permits.neutral(self.cfg);
+            return Ok(Flow::Again);
+        }
+        let previous = self.route.provider.id.clone();
+        self.route = self
+            .g
+            .endpoint_route(
+                admission.route.clone(),
+                self.conversation.as_deref(),
+                None,
+                false,
+            )
+            .await
+            .map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
+        admission.route = self.route.clone();
+        if previous != self.route.provider.id {
+            self.g.record(
+                Some(&self.route.provider.id),
+                self.current_model.as_deref(),
+                crate::events::Reason::Failover,
+                crate::events::Action::Routed,
+                None,
+                None,
+            );
+        }
+        admission.commit_rpm();
+        self.attempts = self.attempts.saturating_add(1);
+        self.ordinary_attempts = self.ordinary_attempts.saturating_add(1);
+        let mut next = attempt_protocol(
+            self.g,
+            self.request_budget,
+            &self.turn_rules,
+            &self.route.provider.id,
+            self.current_model.as_deref(),
+            &self.ownership,
+            &self.failover,
+            &self.headers,
+            self.turn_received_at,
+            value(&self.replay_frame).and_then(|v| crate::usage::model::speed(&v["speed"])),
+            self.usage_trace.as_ref(),
+        );
+        let hints = value(&self.replay_frame)
+            .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+        next.context(
+            self.conversation.clone(),
+            (!self.manual).then(|| {
+                super::compaction::decision(
+                    self.conversation.as_deref(),
+                    hints.as_ref(),
+                    self.pinned.is_some() || self.unknown_affinity,
+                    self.ownership.as_deref(),
+                    &self.route.provider.id,
+                )
+            }),
+        );
+        if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+            next.set_operation(crate::usage::model::Operation::Compaction);
+        }
+        if !self.manual {
+            next.routing_evidence(hints.as_ref());
+        }
+        next.watch_lifecycle(
+            self.g
+                .request_state()
+                .shutdown
+                .as_ref()
+                .map(|s| s.subscribe()),
+            Some(client.closed.clone()),
+        );
+        self.protocol = Some(next);
+        self.turn = Some(admission);
+        let opened = while_connecting(client, async {
+            upstream_native(
+                &self.route,
+                &self.uri,
+                &self.headers,
+                self.cfg,
+                &self.turn_rules,
+            )
+            .await
+            .map(Upstream::Native)
+        })
+        .await;
+        match opened {
+            Err(TURN_CANCELLED) => {
+                self.failover.finish(super::failover::Exit::Cancelled);
+                self.turn = None;
+                if let Some(u) = &mut self.protocol {
+                    u.finish(None, code::CANCELLED);
+                }
+                self.release();
+                self.retry_pending = false;
+                turn_cancelled(client, &self.traffic, self.request_budget).await?;
+                return Ok(Flow::Again);
+            }
+            Err(error) => return Err(error),
+            Ok(Err(failure)) => {
+                self.failover.failure(failure.classification());
+                let mut admission = self.turn.take().unwrap();
+                let wait_same = failure.capacity
+                    && self.established_capacity_owner.as_deref() == Some(&self.route.provider.id);
+                self.owner_capacity_wait = wait_same.then(|| CapacitySource {
+                    provider_id: self.route.provider.id.clone(),
+                    reset_generation: admission.reset_generation,
+                });
+                let can_fail_over = !wait_same
+                    && self.retry_fallback
+                    && !self.manual
+                    && !self.unknown_affinity
+                    && hints
+                        .as_ref()
+                        .is_some_and(|h| h.previous_response_id.is_none());
+                let mut failure = failure;
+                if wait_same {
+                    failure.details.wait_seconds =
+                        Some(forward::capacity_delay(self.cfg, failure.retry).as_secs());
+                }
+                if let Some(u) = self.protocol.as_mut() {
+                    u.finish(
+                        failure.status,
+                        if failure.transport_failure() {
+                            code::NETWORK
+                        } else {
+                            code::HTTP
+                        },
+                    );
+                }
+                self.last_error =
+                    Some(self.failover.report_failure(self.protocol.as_ref(), || {
                         record_failure(
                             &mut admission.permits,
-                            g,
-                            &route,
-                            current_model.as_deref(),
+                            self.g,
+                            &self.route,
+                            self.current_model.as_deref(),
                             &failure,
                             if wait_same {
                                 crate::events::Action::RetryingSame
@@ -2307,918 +2463,1366 @@ async fn session_once(
                                 && !failure.unsupported
                                 && !failure.hard_rejection()
                                 && failure.retryable()
-                                && ordinary_attempts <= cfg.max_retries
+                                && self.ordinary_attempts <= self.cfg.max_retries
                             {
                                 crate::events::Action::Reconnecting
                             } else {
                                 crate::events::Action::Returned
                             },
-                            attempts,
+                            self.attempts,
                         )
                     }));
-                    drop(protocol.take());
-                    if failure.capacity {
-                        ordinary_attempts = ordinary_attempts.saturating_sub(1);
-                        capacity_protected = true;
-                    }
-                    fallback_capacity |= failure.capacity;
-                    retry_capacity = fallback_capacity;
-                    if can_fail_over
-                        && (failure.capacity
-                            || failure.hard_rejection()
-                            || failure.model_unavailable
-                            || failure.retryable())
-                    {
-                        turn_failed.insert(route.provider.id.clone());
-                        if failure.hard_rejection() {
-                            hard_denied.insert((
-                                route.provider.id.clone(),
-                                route.provider.version.clone(),
-                            ));
-                        }
-                        if failure.capacity {
-                            admission.permits.capacity_limited(cfg, failure.retry);
-                        } else if failure.model_unavailable {
-                            admission.permits.neutral(cfg);
-                        } else {
-                            admission.permits.failure(cfg, failure.retry);
-                        }
-                        continue;
-                    }
-                    if failure.model_unavailable
-                        || failure.unsupported
+                drop(self.protocol.take());
+                if failure.capacity {
+                    self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
+                    self.capacity_protected = true;
+                }
+                self.fallback_capacity |= failure.capacity;
+                self.retry_capacity = self.fallback_capacity;
+                if can_fail_over
+                    && (failure.capacity
                         || failure.hard_rejection()
-                        || (!failure.capacity && !failure.retryable())
-                    {
-                        if failure.hard_rejection() {
-                            admission.permits.failure(cfg, failure.retry);
-                        } else {
-                            admission.permits.neutral(cfg);
-                        }
-                        if let Some(payload) = failure.model_payload {
-                            client.send(Frame::text(payload)).await?;
-                        }
-                        return Err((1008, "upstream rejected reconnected turn"));
+                        || failure.model_unavailable
+                        || failure.retryable())
+                {
+                    self.turn_failed.insert(self.route.provider.id.clone());
+                    if failure.hard_rejection() {
+                        self.hard_denied.insert((
+                            self.route.provider.id.clone(),
+                            self.route.provider.version.clone(),
+                        ));
                     }
                     if failure.capacity {
-                        admission.permits.capacity_limited(cfg, failure.retry);
-                    } else if failure.status == Some(429) {
-                        admission.permits.rate_limited(cfg, failure.retry);
+                        admission.permits.capacity_limited(self.cfg, failure.retry);
+                    } else if failure.model_unavailable {
+                        admission.permits.neutral(self.cfg);
                     } else {
-                        admission.permits.failure(cfg, failure.retry);
+                        admission.permits.failure(self.cfg, failure.retry);
                     }
-                    if ordinary_attempts > cfg.max_retries {
-                        return Err((1013, "websocket reconnect retries exhausted"));
-                    }
-                    continue;
+                    return Ok(Flow::Again);
                 }
-                Ok(Ok(opened)) => {
-                    if let Some(u) = &mut protocol {
-                        u.websocket_status(101);
-                        if let Upstream::Native(peer) = &opened {
-                            u.response_headers(&peer.response_identifiers);
-                        }
-                    }
-                    upstream = opened;
-                }
-            }
-            retry_pending = false;
-            retry_capacity = false;
-            owner_capacity_wait = None;
-            receive_started = tokio::time::Instant::now();
-            if !admit_ownership(g, ownership.as_deref(), &route, &requirement, !movable)? {
-                return Err((1013, code::CONVERSATION_OWNERSHIP));
-            }
-            if let Some(u) = &protocol {
-                u.begin_compaction_execution();
-            }
-            if let Err(error) = send_to_upstream(&mut upstream, replay_frame.clone()).await {
-                retry_pending = disconnect_turn(
-                    g,
-                    &route,
-                    cfg,
-                    current_model.as_deref(),
-                    &mut turn,
-                    &mut protocol,
-                    response_data_started(&upstream, false, receive_started),
-                    attempts,
-                    ordinary_attempts,
-                    !unknown_affinity,
-                    None,
-                    crate::events::Phase::WsSend,
-                    code::NETWORK,
-                );
-                upstream = Upstream::Disconnected;
-                if !retry_pending {
-                    return Err(error);
-                }
-                continue;
-            }
-            received = false;
-            initial_frames.clear();
-            initial_bytes = 0;
-            deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
-        }
-        if turn.is_none() {
-            if let Some(frame) = pending.take() {
-                traffic.finish();
-                traffic = pending_traffic.take().expect("pending turn has a ticket");
-                request_budget.begin_at(pending_started + traffic.paused_for());
-                request_budget.attach_traffic(&traffic);
-                turn_rules = g
-                    .request_state()
-                    .store
-                    .settings
-                    .custom_failure_rules
-                    .clone();
-                turn_received_at = pending_received_at;
-                if let Some(previous) = protocol.take().filter(|p| p.succeeded()) {
-                    previous_usage = Some((previous, tokio::time::Instant::now() + USAGE_TAIL));
-                }
-                let model = turn_model(
-                    g,
-                    &frame,
-                    confirmed_model.as_deref(),
-                    Some(&route.provider.id),
-                )?;
-                let requirement = Requirement::model(model.as_deref());
-                request_budget.describe(Some(&route.provider.id), model.as_deref(), "admission");
-                let hints = value(&frame)
-                    .and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
-                let enabled = {
-                    let state = g.request_state();
-                    state.store.mode == "auto"
-                };
-                if g.client_id() == super::ClientId::Codex
-                    && !manual
-                    && enabled
-                    && !hints.as_ref().is_some_and(|h| h.auxiliary)
+                if failure.model_unavailable
+                    || failure.unsupported
+                    || failure.hard_rejection()
+                    || (!failure.capacity && !failure.retryable())
                 {
-                    let queued = super::compaction::queued(g).map_err(|_| (1011, code::STORE))?;
-                    let latest: Vec<_> = g
-                        .routing_ids(None)
-                        .into_iter()
-                        .filter_map(|id| g.route(&id))
-                        .filter(|route| {
-                            requirement.allows(route.provider.allowed_models.as_deref())
-                        })
-                        .collect();
-                    let safe_window = hints
-                        .as_ref()
-                        .is_some_and(|h| h.previous_response_id.is_none() && !h.compaction_trigger);
-                    let owner_model_mismatch = conversation.as_deref().is_some_and(|session| {
-                        g.0.compaction.model_detour(session, &queued, &requirement)
-                    });
-                    let boundary = safe_window
-                        && !owner_model_mismatch
-                        && conversation.as_ref().is_some_and(|session| {
-                            g.0.compaction.boundary_matches(
-                                session,
-                                hints.as_ref().and_then(|h| h.compacted_window.as_deref()),
-                            )
-                        });
-                    let current_owner = conversation
-                        .as_deref()
-                        .and_then(|session| g.0.compaction.owner(session));
-                    if boundary
-                        && latest
-                            .iter()
-                            .take_while(|r| {
-                                current_owner.as_deref() != Some(r.provider.id.as_str())
-                            })
-                            .any(|r| r.provider.handoff_after_compaction)
-                    {
-                        *next_turn = Some(frame);
-                        return Err(HANDOFF);
-                    }
-                    ownership = if let Some(session) =
-                        conversation.clone().filter(|_| !latest.is_empty())
-                    {
-                        Some(
-                            g.0.compaction
-                                .prepare_request(
-                                    session,
-                                    hints.as_ref(),
-                                    safe_window,
-                                    &queued,
-                                    &requirement,
-                                    hints.as_ref().and_then(|h| {
-                                        h.previous_response_id
-                                            .as_ref()
-                                            .map(|_| route.provider.id.as_str())
-                                    }),
-                                )
-                                .ok_or((1013, code::CONVERSATION_OWNERSHIP))?,
-                        )
+                    if failure.hard_rejection() {
+                        admission.permits.failure(self.cfg, failure.retry);
                     } else {
-                        None
-                    };
-                    // An initial generate:false warmup never owns a thread. The
-                    // first real generation must still pass the shared policy.
-                    if ownership.as_ref().is_some_and(|lease| {
-                        lease.establishing()
-                            && lease
-                                .candidates_for(latest.clone(), &requirement)
-                                .first()
-                                .is_some_and(|r| r.provider.id != route.provider.id)
-                    }) {
-                        *next_turn = Some(frame);
-                        return Err(HANDOFF);
+                        admission.permits.neutral(self.cfg);
                     }
-                    // A connection opened for a model detour is not permission
-                    // to keep unrelated turns on that provider. Respect a real
-                    // response cursor. A new, parsed round without a cursor can
-                    // reopen upstream at the ledger's current owner before it
-                    // has sent any bytes; an uninspectable turn stays rejected.
-                    if !hints
-                        .as_ref()
-                        .is_some_and(|h| h.previous_response_id.is_some())
-                        && ownership.as_ref().is_some_and(|lease| {
-                            !lease
-                                .candidates_for(latest.clone(), &requirement)
-                                .iter()
-                                .any(|candidate| candidate.provider.id == route.provider.id)
-                        })
-                    {
-                        if !connection_request_only
-                            && hints.is_some()
-                            && current_owner
-                                .as_deref()
-                                .is_some_and(|owner| owner != route.provider.id)
-                            && ownership
-                                .as_ref()
-                                .is_some_and(|lease| !lease.request_only())
-                        {
-                            *next_turn = Some(frame);
-                            return Err(HANDOFF);
-                        }
-                        return Err((1013, code::NO_ELIGIBLE_PROVIDER));
+                    if let Some(payload) = failure.model_payload {
+                        client.send(Frame::text(payload)).await?;
                     }
-                } else {
-                    ownership = None;
+                    return Err((1008, "upstream rejected reconnected turn"));
                 }
-                established_capacity_owner =
-                    super::routing::capacity_owner(g.client_id(), manual, ownership.as_deref());
-                // A new turn on a persistent socket observes the same cooldown
-                // as a separately connected request from the established thread.
-                let mut quota_denied = false;
-                let mut quota_cause = None;
-                loop {
-                    let source = g.0.admission.capacity_source(&route.provider.id);
-                    let health = route.health_for(&requirement);
-                    if established_capacity_owner.as_deref() != Some(&route.provider.id)
-                        || !super::routing::capacity_cooling(&health)
-                    {
+                if failure.capacity {
+                    admission.permits.capacity_limited(self.cfg, failure.retry);
+                } else if failure.status == Some(429) {
+                    admission.permits.rate_limited(self.cfg, failure.retry);
+                } else {
+                    admission.permits.failure(self.cfg, failure.retry);
+                }
+                if self.ordinary_attempts > self.cfg.max_retries {
+                    return Err((1013, "websocket reconnect retries exhausted"));
+                }
+                return Ok(Flow::Again);
+            }
+            Ok(Ok(opened)) => {
+                if let Some(u) = &mut self.protocol {
+                    u.websocket_status(101);
+                    if let Upstream::Native(peer) = &opened {
+                        u.response_headers(&peer.response_identifiers);
+                    }
+                }
+                self.upstream = opened;
+            }
+        }
+        self.retry_pending = false;
+        self.retry_capacity = false;
+        self.owner_capacity_wait = None;
+        self.receive_started = tokio::time::Instant::now();
+        if !admit_ownership(
+            self.g,
+            self.ownership.as_deref(),
+            &self.route,
+            &requirement,
+            !movable,
+        )? {
+            return Err((1013, code::CONVERSATION_OWNERSHIP));
+        }
+        if let Some(u) = &self.protocol {
+            u.begin_compaction_execution();
+        }
+        if let Err(error) = send_to_upstream(&mut self.upstream, self.replay_frame.clone()).await {
+            self.retry_pending = disconnect_turn(
+                self.g,
+                &self.route,
+                self.cfg,
+                self.current_model.as_deref(),
+                &mut self.turn,
+                &mut self.protocol,
+                response_data_started(&self.upstream, false, self.receive_started),
+                self.attempts,
+                self.ordinary_attempts,
+                !self.unknown_affinity,
+                None,
+                crate::events::Phase::WsSend,
+                code::NETWORK,
+            );
+            self.upstream = Upstream::Disconnected;
+            if !self.retry_pending {
+                return Err(error);
+            }
+            return Ok(Flow::Again);
+        }
+        self.received = false;
+        self.initial_frames.clear();
+        self.initial_bytes = 0;
+        self.deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.cfg.first_byte_seconds);
+        Ok(Flow::Proceed)
+    }
+    /// Starts the queued turn on this connection, or returns the handoff
+    /// signal when the turn belongs on another provider.
+    async fn start(&mut self, client: &mut Peer, frame: Frame) -> Result<Flow, Failure> {
+        self.traffic.finish();
+        self.traffic = self
+            .pending_traffic
+            .take()
+            .expect("pending turn has a ticket");
+        self.request_budget
+            .begin_at(self.pending_started + self.traffic.paused_for());
+        self.request_budget.attach_traffic(&self.traffic);
+        self.turn_rules = self
+            .g
+            .request_state()
+            .store
+            .settings
+            .custom_failure_rules
+            .clone();
+        self.turn_received_at = self.pending_received_at;
+        if let Some(previous) = self.protocol.take().filter(|p| p.succeeded()) {
+            self.previous_usage = Some((previous, tokio::time::Instant::now() + USAGE_TAIL));
+        }
+        let model = turn_model(
+            self.g,
+            &frame,
+            self.confirmed_model.as_deref(),
+            Some(&self.route.provider.id),
+        )?;
+        let requirement = Requirement::model(model.as_deref());
+        self.request_budget
+            .describe(Some(&self.route.provider.id), model.as_deref(), "admission");
+        let hints =
+            value(&frame).and_then(|v| super::replay::RequestHints::from_value(v, false).ok());
+        let enabled = {
+            let state = self.g.request_state();
+            state.store.mode == "auto"
+        };
+        if self.g.client_id() == super::ClientId::Codex
+            && !self.manual
+            && enabled
+            && !hints.as_ref().is_some_and(|h| h.auxiliary)
+        {
+            let queued = super::compaction::queued(self.g).map_err(|_| (1011, code::STORE))?;
+            let latest: Vec<_> = self
+                .g
+                .routing_ids(None)
+                .into_iter()
+                .filter_map(|id| self.g.route(&id))
+                .filter(|r| requirement.allows(r.provider.allowed_models.as_deref()))
+                .collect();
+            let safe_window = hints
+                .as_ref()
+                .is_some_and(|h| h.previous_response_id.is_none() && !h.compaction_trigger);
+            let owner_model_mismatch = self.conversation.as_deref().is_some_and(|session| {
+                self.g
+                    .0
+                    .compaction
+                    .model_detour(session, &queued, &requirement)
+            });
+            let boundary = safe_window
+                && !owner_model_mismatch
+                && self.conversation.as_ref().is_some_and(|session| {
+                    self.g.0.compaction.boundary_matches(
+                        session,
+                        hints.as_ref().and_then(|h| h.compacted_window.as_deref()),
+                    )
+                });
+            let current_owner = self
+                .conversation
+                .as_deref()
+                .and_then(|session| self.g.0.compaction.owner(session));
+            if boundary
+                && latest
+                    .iter()
+                    .take_while(|r| current_owner.as_deref() != Some(r.provider.id.as_str()))
+                    .any(|r| r.provider.handoff_after_compaction)
+            {
+                *self.next_turn = Some(frame);
+                return Err(HANDOFF);
+            }
+            self.ownership =
+                if let Some(session) = self.conversation.clone().filter(|_| !latest.is_empty()) {
+                    Some(
+                        self.g
+                            .0
+                            .compaction
+                            .prepare_request(
+                                session,
+                                hints.as_ref(),
+                                safe_window,
+                                &queued,
+                                &requirement,
+                                hints.as_ref().and_then(|h| {
+                                    h.previous_response_id
+                                        .as_ref()
+                                        .map(|_| self.route.provider.id.as_str())
+                                }),
+                            )
+                            .ok_or((1013, code::CONVERSATION_OWNERSHIP))?,
+                    )
+                } else {
+                    None
+                };
+            // An initial generate:false warmup never owns a thread. The
+            // first real generation must still pass the shared policy.
+            if self.ownership.as_ref().is_some_and(|lease| {
+                lease.establishing()
+                    && lease
+                        .candidates_for(latest.clone(), &requirement)
+                        .first()
+                        .is_some_and(|r| r.provider.id != self.route.provider.id)
+            }) {
+                *self.next_turn = Some(frame);
+                return Err(HANDOFF);
+            }
+            // A connection opened for a model detour is not permission
+            // to keep unrelated turns on that provider. Respect a real
+            // response cursor. A new, parsed round without a cursor can
+            // reopen upstream at the ledger's current owner before it
+            // has sent any bytes; an uninspectable turn stays rejected.
+            if !hints
+                .as_ref()
+                .is_some_and(|h| h.previous_response_id.is_some())
+                && self.ownership.as_ref().is_some_and(|lease| {
+                    !lease
+                        .candidates_for(latest.clone(), &requirement)
+                        .iter()
+                        .any(|candidate| candidate.provider.id == self.route.provider.id)
+                })
+            {
+                if !self.connection_request_only
+                    && hints.is_some()
+                    && current_owner
+                        .as_deref()
+                        .is_some_and(|owner| owner != self.route.provider.id)
+                    && self
+                        .ownership
+                        .as_ref()
+                        .is_some_and(|lease| !lease.request_only())
+                {
+                    *self.next_turn = Some(frame);
+                    return Err(HANDOFF);
+                }
+                return Err((1013, code::NO_ELIGIBLE_PROVIDER));
+            }
+        } else {
+            self.ownership = None;
+        }
+        self.established_capacity_owner = super::routing::capacity_owner(
+            self.g.client_id(),
+            self.manual,
+            self.ownership.as_deref(),
+        );
+        // A new turn on a persistent socket observes the same cooldown
+        // as a separately connected request from the established thread.
+        let mut quota_denied = false;
+        let mut quota_cause = None;
+        loop {
+            let source = self.g.0.admission.capacity_source(&self.route.provider.id);
+            let health = self.route.health_for(&requirement);
+            if self.established_capacity_owner.as_deref() != Some(&self.route.provider.id)
+                || !super::routing::capacity_cooling(&health)
+            {
+                break;
+            }
+            let cause = self
+                .g
+                .capacity_cause(&self.route.provider.id, model.as_deref(), &health);
+            let waited = while_connecting(
+                client,
+                self.g.wait_capacity_checked(
+                    &[source],
+                    Duration::from_secs(health.retry_in.max(1)),
+                    self.cfg.max_waiting,
+                    true,
+                    Some(&self.route),
+                    cause.as_ref(),
+                ),
+            )
+            .await;
+            match waited {
+                Err(TURN_CANCELLED) => {
+                    turn_cancelled(client, &self.traffic, self.request_budget).await?;
+                    return Ok(Flow::Again);
+                }
+                Err(error) => return Err(error),
+                Ok(result) => {
+                    if result.map_err(rejected)? {
+                        quota_denied = true;
+                        quota_cause = cause;
                         break;
                     }
-                    let cause = g.capacity_cause(&route.provider.id, model.as_deref(), &health);
-                    let waited = while_connecting(
-                        client,
-                        g.wait_capacity_checked(
-                            &[source],
-                            Duration::from_secs(health.retry_in.max(1)),
-                            cfg.max_waiting,
-                            true,
-                            Some(&route),
-                            cause.as_ref(),
-                        ),
-                    )
-                    .await;
-                    match waited {
-                        Err(TURN_CANCELLED) => {
-                            turn_cancelled(client, &traffic, request_budget).await?;
-                            continue 'turns;
+                }
+            }
+            let refreshed = self
+                .g
+                .route(&self.route.provider.id)
+                .filter(|r| {
+                    r.provider.queued
+                        && !r.provider.search_only
+                        && requirement.allows(r.provider.allowed_models.as_deref())
+                })
+                .ok_or((1013, "thread owner is no longer available"))?;
+            if refreshed.provider.version != self.route.provider.version {
+                self.upstream = Upstream::Disconnected;
+            }
+            self.route = refreshed;
+        }
+        self.tail_deadline = None;
+        let mut budget = Budget::new(self.cfg.queue_seconds);
+        budget.traffic = Some(self.traffic.clone());
+        budget.follow(self.ownership.as_deref());
+        if let Some(lease) = &self.ownership {
+            let (intake, owner) = lease.admission_policy();
+            budget.set_intake(intake, owner);
+        }
+        let mut admission_routes = vec![self.route.clone()];
+        if let Some(lease) = self.ownership.as_ref().filter(|_| {
+            !self.manual
+                && !self.connection_request_only
+                && hints
+                    .as_ref()
+                    .is_some_and(|h| h.previous_response_id.is_none())
+        }) {
+            let candidates = self
+                .g
+                .routing_ids(None)
+                .iter()
+                .filter_map(|id| self.g.route(id))
+                .filter(|r| {
+                    r.accepts_protocol(self.uri.path())
+                        && requirement.allows(r.provider.allowed_models.as_deref())
+                })
+                .collect();
+            admission_routes =
+                lease.candidates_for_admission(candidates, &requirement, &mut budget);
+            budget.reconnect_from = Some(self.route.provider.id.clone());
+        }
+        self.usage_trace = self.g.usage_operation(
+            model.as_deref(),
+            if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+                crate::usage::model::Operation::Compaction
+            } else {
+                crate::usage::model::Operation::Model
+            },
+        );
+        self.failover = super::failover::Tracker::new(self.usage_trace.clone());
+        self.failover.attach_wait_budget(self.request_budget);
+        if !self.manual && self.g.client_id() == super::ClientId::Codex {
+            self.failover.diagnostics(self.g);
+            if let Some(log) = self.failover.routing() {
+                log.pending(
+                    &self.headers,
+                    hints.as_ref(),
+                    self.ownership.as_deref(),
+                    hints
+                        .as_ref()
+                        .is_some_and(|h| h.previous_response_id.is_some()),
+                );
+            }
+        }
+        self.failover.candidates(
+            self.g,
+            if hints
+                .as_ref()
+                .is_some_and(|h| h.previous_response_id.is_some())
+            {
+                super::failover::Stage::CursorPinned
+            } else {
+                super::failover::Stage::Initial
+            },
+            std::slice::from_ref(&self.route),
+            std::slice::from_ref(&self.route),
+            &requirement,
+            self.uri.path(),
+        );
+        if quota_denied {
+            self.failover
+                .failure(super::failover::Failure::AccountRejected);
+            self.current_model = model;
+            self.attempts = 0;
+            self.ordinary_attempts = 0;
+            self.capacity_protected = false;
+            self.retry_pending = true;
+            self.retry_capacity = false;
+            self.retry_fallback = true;
+            self.retry_immediately = true;
+            self.owner_capacity_wait = None;
+            self.fallback_capacity = false;
+            self.turn_failed.clear();
+            self.hard_denied.clear();
+            self.hard_denied.insert((
+                self.route.provider.id.clone(),
+                self.route.provider.version.clone(),
+            ));
+            self.rejected_frame = None;
+            self.terminal_error = false;
+            self.replay_frame = frame.clone();
+            self.last_error = quota_cause.map(Into::into);
+            self.protocol = None;
+            self.upstream = Upstream::Disconnected;
+            return Ok(Flow::Again);
+        }
+        let acquired = take_slot(
+            self.g,
+            client,
+            &admission_routes,
+            self.manual,
+            self.cfg,
+            &mut budget,
+            &requirement,
+            false,
+            &mut self.failover,
+        )
+        .await;
+        match acquired {
+            Err(HANDOFF) => {
+                *self.next_turn = Some(frame);
+                return Err(HANDOFF);
+            }
+            Ok(mut admission) => {
+                if !admit_ownership(
+                    self.g,
+                    self.ownership.as_deref(),
+                    &admission.route,
+                    &requirement,
+                    hints
+                        .as_ref()
+                        .is_some_and(|h| h.previous_response_id.is_some()),
+                )? {
+                    admission.permits.neutral(self.cfg);
+                    *self.next_turn = Some(frame);
+                    return Err(HANDOFF);
+                }
+                admission.commit_rpm();
+                self.turn = Some(admission)
+            }
+            Err(TURN_CANCELLED) => {
+                turn_cancelled(client, &self.traffic, self.request_budget).await?;
+                return Ok(Flow::Again);
+            }
+            Err(error) => return Err(error),
+        }
+        self.current_model = model;
+        self.attempts = 1;
+        self.ordinary_attempts = 1;
+        self.capacity_protected = false;
+        self.retry_capacity = false;
+        self.retry_fallback = false;
+        self.owner_capacity_wait = None;
+        self.fallback_capacity = false;
+        self.turn_failed.clear();
+        self.hard_denied.clear();
+        self.rejected_frame = None;
+        self.terminal_error = false;
+        self.replay_frame = frame.clone();
+        let mut next_protocol = attempt_protocol(
+            self.g,
+            self.request_budget,
+            &self.turn_rules,
+            &self.route.provider.id,
+            self.current_model.as_deref(),
+            &self.ownership,
+            &self.failover,
+            &self.headers,
+            self.turn_received_at,
+            hints.as_ref().and_then(|h| h.speed.clone()),
+            self.usage_trace.as_ref(),
+        );
+        next_protocol.context(
+            self.conversation.clone(),
+            (!self.manual).then(|| {
+                super::compaction::decision(
+                    self.conversation.as_deref(),
+                    hints.as_ref(),
+                    hints
+                        .as_ref()
+                        .is_some_and(|h| h.previous_response_id.is_some()),
+                    self.ownership.as_deref(),
+                    &self.route.provider.id,
+                )
+            }),
+        );
+        if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
+            next_protocol.set_operation(crate::usage::model::Operation::Compaction);
+        }
+        if !self.manual {
+            next_protocol.routing_evidence(hints.as_ref());
+        }
+        next_protocol.watch_lifecycle(
+            self.g
+                .request_state()
+                .shutdown
+                .as_ref()
+                .map(|s| s.subscribe()),
+            Some(client.closed.clone()),
+        );
+        next_protocol.websocket_status(101);
+        self.protocol = Some(next_protocol);
+        self.received = false;
+        self.initial_frames.clear();
+        self.initial_bytes = 0;
+        self.receive_started = tokio::time::Instant::now();
+        {
+            if matches!(self.upstream, Upstream::Disconnected) {
+                match while_connecting(
+                    client,
+                    upstream_native(
+                        &self.route,
+                        &self.uri,
+                        &self.headers,
+                        self.cfg,
+                        &self.turn_rules,
+                    ),
+                )
+                .await?
+                {
+                    Ok(peer) => self.upstream = Upstream::Native(peer),
+                    Err(failure) => {
+                        self.failover.failure(failure.classification());
+                        let wait_same = failure.capacity
+                            && self.established_capacity_owner.as_deref()
+                                == Some(&self.route.provider.id);
+                        self.owner_capacity_wait = if wait_same {
+                            self.turn.as_ref().map(|admission| CapacitySource {
+                                provider_id: self.route.provider.id.clone(),
+                                reset_generation: admission.reset_generation,
+                            })
+                        } else {
+                            None
+                        };
+                        let mut failure = failure;
+                        if wait_same {
+                            failure.details.wait_seconds =
+                                Some(forward::capacity_delay(self.cfg, failure.retry).as_secs());
                         }
-                        Err(error) => return Err(error),
-                        Ok(result) => {
-                            if result.map_err(rejected)? {
-                                quota_denied = true;
-                                quota_cause = cause;
-                                break;
+                        let can_fail_over = !self.manual
+                            && !wait_same
+                            && !self.unknown_affinity
+                            && hints
+                                .as_ref()
+                                .is_some_and(|h| h.previous_response_id.is_none())
+                            && (failure.capacity
+                                || failure.hard_rejection()
+                                || failure.model_unavailable
+                                || failure.retryable());
+                        if can_fail_over {
+                            self.turn_failed.insert(self.route.provider.id.clone());
+                            if failure.hard_rejection() {
+                                self.hard_denied.insert((
+                                    self.route.provider.id.clone(),
+                                    self.route.provider.version.clone(),
+                                ));
                             }
                         }
-                    }
-                    let refreshed = g
-                        .route(&route.provider.id)
-                        .filter(|r| {
-                            r.provider.queued
-                                && !r.provider.search_only
-                                && requirement.allows(r.provider.allowed_models.as_deref())
-                        })
-                        .ok_or((1013, "thread owner is no longer available"))?;
-                    if refreshed.provider.version != route.provider.version {
-                        upstream = Upstream::Disconnected;
-                    }
-                    route = refreshed;
-                }
-                tail_deadline = None;
-                let mut budget = Budget::new(cfg.queue_seconds);
-                budget.traffic = Some(traffic.clone());
-                budget.follow(ownership.as_deref());
-                if let Some(lease) = &ownership {
-                    let (intake, owner) = lease.admission_policy();
-                    budget.set_intake(intake, owner);
-                }
-                let mut admission_routes = vec![route.clone()];
-                if let Some(lease) = ownership.as_ref().filter(|_| {
-                    !manual
-                        && !connection_request_only
-                        && hints
-                            .as_ref()
-                            .is_some_and(|h| h.previous_response_id.is_none())
-                }) {
-                    let candidates = g
-                        .routing_ids(None)
-                        .iter()
-                        .filter_map(|id| g.route(id))
-                        .filter(|r| {
-                            r.accepts_protocol(uri.path())
-                                && requirement.allows(r.provider.allowed_models.as_deref())
-                        })
-                        .collect();
-                    admission_routes =
-                        lease.candidates_for_admission(candidates, &requirement, &mut budget);
-                    budget.reconnect_from = Some(route.provider.id.clone());
-                }
-                usage_trace = g.usage_operation(
-                    model.as_deref(),
-                    if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
-                        crate::usage::model::Operation::Compaction
-                    } else {
-                        crate::usage::model::Operation::Model
-                    },
-                );
-                failover = super::failover::Tracker::new(usage_trace.clone());
-                failover.attach_wait_budget(request_budget);
-                if !manual && g.client_id() == super::ClientId::Codex {
-                    failover.diagnostics(g);
-                    if let Some(log) = failover.routing() {
-                        log.pending(
-                            &headers,
-                            hints.as_ref(),
-                            ownership.as_deref(),
-                            hints
-                                .as_ref()
-                                .is_some_and(|h| h.previous_response_id.is_some()),
-                        );
-                    }
-                }
-                failover.candidates(
-                    g,
-                    if hints
-                        .as_ref()
-                        .is_some_and(|h| h.previous_response_id.is_some())
-                    {
-                        super::failover::Stage::CursorPinned
-                    } else {
-                        super::failover::Stage::Initial
-                    },
-                    std::slice::from_ref(&route),
-                    std::slice::from_ref(&route),
-                    &requirement,
-                    uri.path(),
-                );
-                if quota_denied {
-                    failover.failure(super::failover::Failure::AccountRejected);
-                    current_model = model;
-                    attempts = 0;
-                    ordinary_attempts = 0;
-                    capacity_protected = false;
-                    retry_pending = true;
-                    retry_capacity = false;
-                    retry_fallback = true;
-                    retry_immediately = true;
-                    owner_capacity_wait = None;
-                    fallback_capacity = false;
-                    turn_failed.clear();
-                    hard_denied.clear();
-                    hard_denied.insert((route.provider.id.clone(), route.provider.version.clone()));
-                    rejected_frame = None;
-                    terminal_error = false;
-                    replay_frame = frame.clone();
-                    last_error = quota_cause.map(Into::into);
-                    protocol = None;
-                    upstream = Upstream::Disconnected;
-                    continue 'turns;
-                }
-                let acquired = take_slot(
-                    g,
-                    client,
-                    &admission_routes,
-                    manual,
-                    cfg,
-                    &mut budget,
-                    &requirement,
-                    false,
-                    &mut failover,
-                )
-                .await;
-                match acquired {
-                    Err(HANDOFF) => {
-                        *next_turn = Some(frame);
-                        return Err(HANDOFF);
-                    }
-                    Ok(mut admission) => {
-                        if !admit_ownership(
-                            g,
-                            ownership.as_deref(),
-                            &admission.route,
-                            &requirement,
-                            hints
-                                .as_ref()
-                                .is_some_and(|h| h.previous_response_id.is_some()),
-                        )? {
-                            admission.permits.neutral(cfg);
-                            *next_turn = Some(frame);
-                            return Err(HANDOFF);
-                        }
-                        admission.commit_rpm();
-                        turn = Some(admission)
-                    }
-                    Err(TURN_CANCELLED) => {
-                        turn_cancelled(client, &traffic, request_budget).await?;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
-                current_model = model;
-                attempts = 1;
-                ordinary_attempts = 1;
-                capacity_protected = false;
-                retry_capacity = false;
-                retry_fallback = false;
-                owner_capacity_wait = None;
-                fallback_capacity = false;
-                turn_failed.clear();
-                hard_denied.clear();
-                rejected_frame = None;
-                terminal_error = false;
-                replay_frame = frame.clone();
-                let mut next_protocol = attempt_protocol(
-                    g,
-                    request_budget,
-                    &turn_rules,
-                    &route.provider.id,
-                    current_model.as_deref(),
-                    &ownership,
-                    &failover,
-                    &headers,
-                    turn_received_at,
-                    hints.as_ref().and_then(|h| h.speed.clone()),
-                    usage_trace.as_ref(),
-                );
-                next_protocol.context(
-                    conversation.clone(),
-                    (!manual).then(|| {
-                        super::compaction::decision(
-                            conversation.as_deref(),
-                            hints.as_ref(),
-                            hints
-                                .as_ref()
-                                .is_some_and(|h| h.previous_response_id.is_some()),
-                            ownership.as_deref(),
-                            &route.provider.id,
-                        )
-                    }),
-                );
-                if hints.as_ref().is_some_and(|h| h.compaction_trigger) {
-                    next_protocol.set_operation(crate::usage::model::Operation::Compaction);
-                }
-                if !manual {
-                    next_protocol.routing_evidence(hints.as_ref());
-                }
-                next_protocol.watch_lifecycle(
-                    g.request_state().shutdown.as_ref().map(|s| s.subscribe()),
-                    Some(client.closed.clone()),
-                );
-                next_protocol.websocket_status(101);
-                protocol = Some(next_protocol);
-                received = false;
-                initial_frames.clear();
-                initial_bytes = 0;
-                receive_started = tokio::time::Instant::now();
-                {
-                    if matches!(upstream, Upstream::Disconnected) {
-                        match while_connecting(
-                            client,
-                            upstream_native(&route, &uri, &headers, cfg, &turn_rules),
-                        )
-                        .await?
-                        {
-                            Ok(peer) => upstream = Upstream::Native(peer),
-                            Err(failure) => {
-                                failover.failure(failure.classification());
-                                let wait_same = failure.capacity
-                                    && established_capacity_owner.as_deref()
-                                        == Some(&route.provider.id);
-                                owner_capacity_wait = if wait_same {
-                                    turn.as_ref().map(|admission| CapacitySource {
-                                        provider_id: route.provider.id.clone(),
-                                        reset_generation: admission.reset_generation,
-                                    })
-                                } else {
-                                    None
-                                };
-                                let mut failure = failure;
-                                if wait_same {
-                                    failure.details.wait_seconds =
-                                        Some(forward::capacity_delay(cfg, failure.retry).as_secs());
-                                }
-                                let can_fail_over = !manual
-                                    && !wait_same
-                                    && !unknown_affinity
-                                    && hints
-                                        .as_ref()
-                                        .is_some_and(|h| h.previous_response_id.is_none())
-                                    && (failure.capacity
-                                        || failure.hard_rejection()
-                                        || failure.model_unavailable
-                                        || failure.retryable());
-                                if can_fail_over {
-                                    turn_failed.insert(route.provider.id.clone());
-                                    if failure.hard_rejection() {
-                                        hard_denied.insert((
-                                            route.provider.id.clone(),
-                                            route.provider.version.clone(),
-                                        ));
-                                    }
-                                }
-                                if let Some(mut admission) = turn.take() {
-                                    if let Some(u) = protocol.as_mut() {
-                                        u.finish(
-                                            failure.status,
-                                            if failure.transport_failure() {
-                                                code::NETWORK
-                                            } else {
-                                                code::HTTP
-                                            },
-                                        );
-                                    }
-                                    last_error = Some(failover.report_failure(protocol.as_ref(), || record_failure(
+                        if let Some(mut admission) = self.turn.take() {
+                            if let Some(u) = self.protocol.as_mut() {
+                                u.finish(
+                                    failure.status,
+                                    if failure.transport_failure() {
+                                        code::NETWORK
+                                    } else {
+                                        code::HTTP
+                                    },
+                                );
+                            }
+                            self.last_error =
+                                Some(self.failover.report_failure(self.protocol.as_ref(), || {
+                                    record_failure(
                                         &mut admission.permits,
-                                        g,
-                                        &route,
-                                        current_model.as_deref(),
+                                        self.g,
+                                        &self.route,
+                                        self.current_model.as_deref(),
                                         &failure,
                                         if wait_same {
                                             crate::events::Action::RetryingSame
                                         } else if can_fail_over {
-                                            super::attempt::fallback_action(
-                                            g, &route.provider.id,
-                                            g.routing_ids(None).iter().filter_map(|id| g.route(id)).filter(|r| !turn_failed.contains(&r.provider.id) && !hard_denied.contains(&(r.provider.id.clone(), r.provider.version.clone()))).collect(),
-                                            &Requirement::model(current_model.as_deref()), uri.path(), ownership.as_deref(),
-                                            g.client_id() == super::ClientId::Codex,
-                                            !manual && !unknown_affinity && pinned.is_none()
-                                                && value(&replay_frame).and_then(|v| super::replay::RequestHints::from_value(v, false).ok()).is_some_and(|h| h.previous_response_id.is_none())
-                                                && (failure.capacity || ordinary_attempts <= cfg.max_retries),
-                                        )
+                                            self.fallback_action(&failure)
                                         } else if failure.capacity {
                                             crate::events::Action::Waiting
                                         } else if !failure.model_unavailable
                                             && !failure.unsupported
                                             && !failure.hard_rejection()
                                             && failure.retryable()
-                                            && ordinary_attempts <= cfg.max_retries
+                                            && self.ordinary_attempts <= self.cfg.max_retries
                                         {
                                             crate::events::Action::Reconnecting
                                         } else {
                                             crate::events::Action::Returned
                                         },
-                                        attempts,
-                                    )));
-                                    drop(protocol.take());
-                                    if !can_fail_over
-                                        && (failure.model_unavailable
-                                            || failure.unsupported
-                                            || failure.hard_rejection())
-                                    {
-                                        if failure.hard_rejection() {
-                                            admission.permits.failure(cfg, failure.retry);
-                                        } else {
-                                            admission.permits.neutral(cfg);
-                                        }
-                                        return Err((1008, "upstream rejected websocket"));
-                                    }
-                                    if failure.hard_rejection() {
-                                        admission.permits.failure(cfg, failure.retry);
-                                    } else if failure.model_unavailable {
-                                        admission.permits.neutral(cfg);
-                                    } else if failure.capacity {
-                                        admission.permits.capacity_limited(cfg, failure.retry);
-                                    } else if failure.status == Some(429) {
-                                        admission.permits.rate_limited(cfg, failure.retry);
-                                    } else if failure.retryable() {
-                                        admission.permits.failure(cfg, failure.retry);
-                                    } else {
-                                        admission.permits.neutral(cfg);
-                                        return Err((1008, "upstream rejected websocket"));
-                                    }
+                                        self.attempts,
+                                    )
+                                }));
+                            drop(self.protocol.take());
+                            if !can_fail_over
+                                && (failure.model_unavailable
+                                    || failure.unsupported
+                                    || failure.hard_rejection())
+                            {
+                                if failure.hard_rejection() {
+                                    admission.permits.failure(self.cfg, failure.retry);
+                                } else {
+                                    admission.permits.neutral(self.cfg);
                                 }
-                                if failure.capacity {
-                                    ordinary_attempts = ordinary_attempts.saturating_sub(1);
-                                    capacity_protected = true;
-                                }
-                                fallback_capacity |= failure.capacity;
-                                retry_capacity = fallback_capacity;
-                                retry_fallback = can_fail_over || wait_same;
-                                retry_pending = ordinary_attempts <= cfg.max_retries;
-                                if !retry_pending {
-                                    return Err((1013, "websocket reconnect retries exhausted"));
-                                }
-                                continue;
+                                return Err((1008, "upstream rejected websocket"));
+                            }
+                            if failure.hard_rejection() {
+                                admission.permits.failure(self.cfg, failure.retry);
+                            } else if failure.model_unavailable {
+                                admission.permits.neutral(self.cfg);
+                            } else if failure.capacity {
+                                admission.permits.capacity_limited(self.cfg, failure.retry);
+                            } else if failure.status == Some(429) {
+                                admission.permits.rate_limited(self.cfg, failure.retry);
+                            } else if failure.retryable() {
+                                admission.permits.failure(self.cfg, failure.retry);
+                            } else {
+                                admission.permits.neutral(self.cfg);
+                                return Err((1008, "upstream rejected websocket"));
                             }
                         }
-                    }
-                    if let (Some(u), Upstream::Native(peer)) = (&mut protocol, &upstream) {
-                        u.response_headers(&peer.response_identifiers);
-                    }
-                    if !admit_ownership(
-                        g,
-                        ownership.as_deref(),
-                        &route,
-                        &requirement,
-                        hints
-                            .as_ref()
-                            .is_some_and(|h| h.previous_response_id.is_some()),
-                    )? {
-                        return Err((1013, code::CONVERSATION_OWNERSHIP));
-                    }
-                    if let Some(u) = &protocol {
-                        u.begin_compaction_execution();
-                    }
-                    if let Err(e) = send_to_upstream(&mut upstream, frame).await {
-                        retry_pending = disconnect_turn(
-                            g,
-                            &route,
-                            cfg,
-                            current_model.as_deref(),
-                            &mut turn,
-                            &mut protocol,
-                            response_data_started(&upstream, false, receive_started),
-                            attempts,
-                            ordinary_attempts,
-                            !unknown_affinity,
-                            None,
-                            crate::events::Phase::WsSend,
-                            code::NETWORK,
-                        );
-                        upstream = Upstream::Disconnected;
-                        if !retry_pending {
-                            return Err(e);
+                        if failure.capacity {
+                            self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
+                            self.capacity_protected = true;
                         }
-                        continue;
+                        self.fallback_capacity |= failure.capacity;
+                        self.retry_capacity = self.fallback_capacity;
+                        self.retry_fallback = can_fail_over || wait_same;
+                        self.retry_pending = self.ordinary_attempts <= self.cfg.max_retries;
+                        if !self.retry_pending {
+                            return Err((1013, "websocket reconnect retries exhausted"));
+                        }
+                        return Ok(Flow::Again);
                     }
                 }
-                deadline =
-                    tokio::time::Instant::now() + Duration::from_secs(cfg.first_byte_seconds);
+            }
+            if let (Some(u), Upstream::Native(peer)) = (&mut self.protocol, &self.upstream) {
+                u.response_headers(&peer.response_identifiers);
+            }
+            if !admit_ownership(
+                self.g,
+                self.ownership.as_deref(),
+                &self.route,
+                &requirement,
+                hints
+                    .as_ref()
+                    .is_some_and(|h| h.previous_response_id.is_some()),
+            )? {
+                return Err((1013, code::CONVERSATION_OWNERSHIP));
+            }
+            if let Some(u) = &self.protocol {
+                u.begin_compaction_execution();
+            }
+            if let Err(e) = send_to_upstream(&mut self.upstream, frame).await {
+                self.retry_pending = disconnect_turn(
+                    self.g,
+                    &self.route,
+                    self.cfg,
+                    self.current_model.as_deref(),
+                    &mut self.turn,
+                    &mut self.protocol,
+                    response_data_started(&self.upstream, false, self.receive_started),
+                    self.attempts,
+                    self.ordinary_attempts,
+                    !self.unknown_affinity,
+                    None,
+                    crate::events::Phase::WsSend,
+                    code::NETWORK,
+                );
+                self.upstream = Upstream::Disconnected;
+                if !self.retry_pending {
+                    return Err(e);
+                }
+                return Ok(Flow::Again);
+            }
+        }
+        self.deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.cfg.first_byte_seconds);
+        Ok(Flow::Proceed)
+    }
+    /// Handles one upstream frame or disconnect: settles the turn, retries a
+    /// rejection that arrived before any output and forwards everything else.
+    async fn upstream_event(
+        &mut self,
+        client: &mut Peer,
+        event: Option<Result<Frame, Failure>>,
+    ) -> Result<Flow, Failure> {
+        let disconnected = match &event {
+            None => true,
+            Some(Err(_)) => true,
+            Some(Ok(frame)) => frame.opcode() == OpCode::Close,
+        };
+        if disconnected {
+            let close = event
+                .as_ref()
+                .and_then(|v| v.as_ref().ok())
+                .filter(|f| f.opcode() == OpCode::Close);
+            // Only a successfully settled/cancelled turn may treat this
+            // as an idle disconnect. An error already sent downstream
+            // must retain the upstream close without a second failure.
+            if self.turn.is_none()
+                && !self.terminal_error
+                && self.route.client_id == super::ClientId::Codex
+            {
+                self.upstream = Upstream::Disconnected;
+                self.release();
+                self.tail_deadline = None;
+                return Ok(Flow::Again);
+            }
+            let native = matches!(self.upstream, Upstream::Native(_));
+            let response_started =
+                response_data_started(&self.upstream, self.received, self.receive_started);
+            let unfinished_native_turn = native
+                && self.turn.is_some()
+                && !response_started
+                && self.route.client_id == super::ClientId::Codex;
+            self.retry_pending = disconnect_turn(
+                self.g,
+                &self.route,
+                self.cfg,
+                self.current_model.as_deref(),
+                &mut self.turn,
+                &mut self.protocol,
+                response_started,
+                self.attempts,
+                self.ordinary_attempts,
+                native && !self.unknown_affinity,
+                close,
+                crate::events::Phase::WsReceive,
+                code::STREAM_INTERRUPTED,
+            );
+            self.upstream = Upstream::Disconnected;
+            if self.retry_pending {
+                return Ok(Flow::Again);
+            }
+            if unfinished_native_turn {
+                return Err((1013, "websocket reconnect retries exhausted"));
+            }
+            if let Some(Ok(frame)) = event {
+                client.send(frame).await?;
+                return Ok(Flow::Closed);
+            }
+            return Err((1013, "upstream disconnected before completion"));
+        }
+        let frame = event.unwrap()?;
+        let error_headers = match &self.upstream {
+            Upstream::Native(peer) => peer.response_identifiers.clone(),
+            _ => HeaderMap::new(),
+        };
+        if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
+            if let Some(u) = &mut self.protocol {
+                u.websocket_progress(frame.payload().len());
+            }
+        }
+        let mut settled_turn = None;
+        if let Some(v) = value(&frame) {
+            let mut observed = super::protocol::Observation::default();
+            observed.value(&v);
+            let usage_only = matches!(
+                v.get("type").and_then(|v| v.as_str()),
+                Some("usage" | "usage.updated" | "response.usage" | "response.usage.updated")
+            );
+            let belongs_to_previous = self
+                .protocol
+                .as_ref()
+                .and_then(|u| u.observation.response_id.as_ref())
+                .map_or(usage_only, |id| Some(id) != observed.response_id.as_ref());
+            if let Some((previous, _)) = self.previous_usage.as_mut().filter(|(previous, _)| {
+                belongs_to_previous
+                    && observed.response_id.is_some()
+                    && previous.observation.response_id == observed.response_id
+            }) {
+                previous.value_raw(&v, frame.payload());
+                let sending = tokio::time::Instant::now();
+                if let Err(error) = client.send(frame).await {
+                    cancelled_usage_tail(
+                        &mut self.upstream,
+                        &mut self.protocol,
+                        &client.activity,
+                        true,
+                    )
+                    .await;
+                    return Err(error);
+                }
+                self.deadline += sending.elapsed();
+                return Ok(Flow::Again);
+            }
+        }
+        if self.turn.is_some()
+            && !self.received
+            && self.ownership.as_ref().is_some_and(|lease| {
+                lease.handoff && lease.owner.as_deref() != Some(&self.route.provider.id)
+            })
+            && value(&frame).is_some_and(|v| super::compaction::incompatible(&v))
+        {
+            if let Some(old) = self
+                .ownership
+                .as_ref()
+                .and_then(|lease| lease.owner.as_ref())
+                .and_then(|id| self.g.route(id))
+                .filter(|old| {
+                    old.provider.queued
+                        && !old.provider.search_only
+                        && Requirement::model(self.current_model.as_deref())
+                            .allows(old.provider.allowed_models.as_deref())
+                })
+            {
+                let old = self
+                    .g
+                    .endpoint_route(old, self.conversation.as_deref(), None, false)
+                    .await
+                    .map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
+                if self.ordinary_attempts <= self.cfg.max_retries {
+                    if let Some(u) = self.protocol.as_mut() {
+                        if let Some(v) = value(&frame) {
+                            u.value_raw(&v, frame.payload());
+                        }
+                        u.finish(Some(101), code::CLIENT_ERROR);
+                    }
+                    if let Some(mut admission) = self.turn.take() {
+                        let details = value(&frame)
+                            .map(|v| {
+                                super::failure_policy::details_with_rules(&v, &self.turn_rules)
+                            })
+                            .unwrap_or_default();
+                        let emit = || {
+                            admission.permits.report(
+                                self.g,
+                                &self.route,
+                                self.current_model.as_deref(),
+                                crate::events::Reason::ProtocolError,
+                                crate::events::Action::TryingNext,
+                                Some(101),
+                                self.attempts,
+                                crate::events::Details {
+                                    counted_failure: Some(false),
+                                    ..details
+                                },
+                            )
+                        };
+                        if let Some(u) = &self.protocol {
+                            u.report_failure(emit);
+                        } else {
+                            emit();
+                        }
+                        admission.permits.neutral(self.cfg);
+                    }
+                    drop(self.protocol.take());
+                    self.route = old;
+                    self.upstream = Upstream::Disconnected;
+                    self.retry_pending = true;
+                    self.retry_immediately = true;
+                    self.retry_capacity = false;
+                    return Ok(Flow::Again);
+                }
+            }
+        }
+        // A structured rejection before the first output is replay-safe.
+        // Re-evaluate the same failure queue used by HTTP, retaining the
+        // compaction claim and the exact original response.create frame.
+        if self.turn.is_some() && !self.received {
+            if let Some(mut failure) = first_event_failure(&frame, &self.turn_rules, &error_headers)
+                .filter(|f| {
+                    f.capacity
+                        || f.hard_rejection()
+                        || f.model_unavailable
+                        || f.details.error_basis == Some(crate::events::ErrorBasis::ServiceError)
+                })
+            {
+                self.failover.failure(failure.classification());
+                let wait_same = failure.capacity
+                    && self.established_capacity_owner.as_deref() == Some(&self.route.provider.id);
+                self.owner_capacity_wait = if wait_same {
+                    self.turn.as_ref().map(|admission| CapacitySource {
+                        provider_id: self.route.provider.id.clone(),
+                        reset_generation: admission.reset_generation,
+                    })
+                } else {
+                    None
+                };
+                if wait_same {
+                    failure.details.wait_seconds =
+                        Some(forward::capacity_delay(self.cfg, failure.retry).as_secs());
+                }
+                self.turn_failed.insert(self.route.provider.id.clone());
+                if failure.hard_rejection() {
+                    self.hard_denied.insert((
+                        self.route.provider.id.clone(),
+                        self.route.provider.version.clone(),
+                    ));
+                }
+                if let Some(u) = self.protocol.as_mut() {
+                    if let Some(v) = value(&frame) {
+                        u.value_raw(&v, frame.payload());
+                    }
+                    u.finish(Some(101), code::UPSTREAM_ERROR);
+                }
+                if let Some(mut admission) = self.turn.take() {
+                    self.last_error =
+                        Some(self.failover.report_failure(self.protocol.as_ref(), || {
+                            record_failure(
+                                &mut admission.permits,
+                                self.g,
+                                &self.route,
+                                self.current_model.as_deref(),
+                                &failure,
+                                if wait_same {
+                                    crate::events::Action::RetryingSame
+                                } else {
+                                    self.fallback_action(&failure)
+                                },
+                                self.attempts,
+                            )
+                        }));
+                    if failure.capacity {
+                        admission.permits.capacity_limited(self.cfg, failure.retry);
+                    } else if failure.model_unavailable {
+                        admission.permits.neutral(self.cfg);
+                    } else {
+                        admission.permits.failure(self.cfg, failure.retry);
+                    }
+                }
+                drop(self.protocol.take());
+                if failure.capacity {
+                    self.ordinary_attempts = self.ordinary_attempts.saturating_sub(1);
+                    self.capacity_protected = true;
+                }
+                self.initial_frames.clear();
+                self.initial_bytes = 0;
+                self.rejected_frame = Some(frame);
+                self.fallback_capacity |= failure.capacity;
+                self.retry_capacity = self.fallback_capacity;
+                self.retry_fallback = true;
+                self.retry_pending = true;
+                self.upstream = Upstream::Disconnected;
+                return Ok(Flow::Again);
+            }
+        }
+        if !frame.opcode().is_control() {
+            self.deadline =
+                tokio::time::Instant::now() + Duration::from_secs(self.cfg.idle_seconds);
+        }
+        if let Some(v) = value(&frame) {
+            if let Some(u) = &mut self.protocol {
+                u.value_raw(&v, frame.payload());
+            }
+            if self.request_budget.cancel_requested() {
+                return Err(TURN_CANCELLED);
+            }
+            if let Some(id) = v
+                .pointer("/response/id")
+                .or_else(|| v.get("response_id"))
+                .and_then(|v| v.as_str())
+            {
+                self.g.0.endpoints.remember(&self.route.provider, id);
+                self.g
+                    .remember_model(id, &self.route.provider.id, self.current_model.as_deref());
+            }
+            let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if matches!(
+                kind,
+                "response.created" | "response.completed" | "response.done"
+            ) {
+                self.confirmed_model = self.current_model.clone();
+            }
+            if self.protocol.as_ref().map_or_else(
+                || {
+                    matches!(
+                        kind,
+                        "response.completed"
+                            | "response.done"
+                            | "response.failed"
+                            | "response.incomplete"
+                            | "response.cancelled"
+                            | "response.canceled"
+                            | "error"
+                    )
+                },
+                |u| u.terminal().is_some(),
+            ) {
+                self.traffic.finishing();
+                self.request_budget.complete(self.request_budget.deadline());
+                if let Some(mut admission) = self.turn.take() {
+                    if let Some(u) = self.protocol.as_mut() {
+                        u.finish(Some(101), code::UPSTREAM_ERROR);
+                        self.terminal_error = !matches!(
+                            u.terminal(),
+                            Some(
+                                super::protocol::Terminal::Success
+                                    | super::protocol::Terminal::Limited
+                                    | super::protocol::Terminal::Cancelled
+                            )
+                        );
+                        let first_failure = (self.route.client_id == super::ClientId::Codex)
+                            .then(|| first_event_failure(&frame, &self.turn_rules, &error_headers))
+                            .flatten();
+                        if let Some(failure) = first_failure.filter(|failure| failure.capacity) {
+                            u.report_failure(|| {
+                                record_failure(
+                                    &mut admission.permits,
+                                    self.g,
+                                    &self.route,
+                                    self.current_model.as_deref(),
+                                    &failure,
+                                    crate::events::Action::Returned,
+                                    self.attempts,
+                                )
+                            });
+                            admission.permits.capacity_limited(self.cfg, None);
+                        } else {
+                            super::health_settlement::observe_protocol(
+                                u,
+                                &mut admission.permits,
+                                self.cfg,
+                                self.g,
+                                &self.route,
+                                self.current_model.as_deref(),
+                                Some(101),
+                                self.attempts,
+                            );
+                        }
+                    }
+                    settled_turn = Some(admission);
+                }
+                if self.tail_deadline.is_none() {
+                    self.tail_deadline = Some(tokio::time::Instant::now() + USAGE_TAIL);
+                }
+            }
+        }
+        let business = !frame.opcode().is_control()
+            && self.protocol.as_ref().is_none_or(|u| u.business_observed());
+        if !self.received && !business && !frame.opcode().is_control() {
+            self.initial_bytes = self.initial_bytes.saturating_add(frame.payload().len());
+            if self.initial_bytes > 2 * 1024 * 1024 || self.initial_frames.len() >= 4096 {
+                return Err((1011, code::UPSTREAM_BODY));
+            }
+            self.initial_frames.push(frame);
+            return Ok(Flow::Again);
+        }
+        if business {
+            self.received = true;
+            self.failover.finish(super::failover::Exit::Forwarded);
+        }
+        let frame_bytes = frame.payload().len() + if business { self.initial_bytes } else { 0 };
+        let mut outgoing = if business {
+            self.initial_bytes = 0;
+            std::mem::take(&mut self.initial_frames)
+        } else {
+            Vec::new()
+        };
+        outgoing.push(frame);
+        let sending = tokio::time::Instant::now();
+        for frame in outgoing {
+            if let Err(error) = client.send(frame).await {
+                self.abandon(&client.activity, true).await;
+                return Err(error);
+            }
+        }
+        // Do not charge time blocked by the downstream reader to the
+        // upstream silence timer. Peer::send has its own progress limit.
+        self.deadline += sending.elapsed();
+        if let Some(u) = &mut self.protocol {
+            u.delivery().handed(frame_bytes, u.terminal_observed());
+            u.output_handed(business);
+            if u.delivered_success() && settled_turn.is_some() {
+                self.g.persist_success(&self.route.provider).await;
+            }
+        }
+        if settled_turn.is_some() {
+            self.traffic.finish();
+        }
+        Ok(Flow::Proceed)
+    }
+    /// Handles one client frame: queues the next `response.create`, answers
+    /// control frames and passes the rest upstream.
+    async fn client_frame(
+        &mut self,
+        client: &mut Peer,
+        frame: Option<Frame>,
+    ) -> Result<Flow, Failure> {
+        let Some(frame) = frame else {
+            self.abandon(&client.activity, false).await;
+            return Ok(Flow::Closed);
+        };
+        let closing = frame.opcode() == OpCode::Close;
+        if frame.opcode() == OpCode::Ping && !matches!(self.upstream, Upstream::Native(_)) {
+            client.send(Frame::pong(frame.payload().to_vec())).await?;
+        } else if frame.opcode() == OpCode::Pong && !matches!(self.upstream, Upstream::Native(_)) {
+            return Ok(Flow::Again);
+        } else if closing {
+            self.abandon(&client.activity, false).await;
+            return Ok(Flow::Closed);
+        } else if creates(&frame) {
+            if self.pending.is_some() {
+                return Err((1013, "too many pending turns"));
+            }
+            self.pending_received_at = crate::usage::model::now();
+            self.pending_started = tokio::time::Instant::now();
+            self.pending = Some(frame);
+            let ticket = self.g.0.registry.freeze.request();
+            ticket.waiting();
+            self.pending_traffic = Some(ticket);
+        } else if let Err(e) = send_to_upstream(&mut self.upstream, frame).await {
+            // A client control/message send failure cannot safely replay a generation.
+            disconnect_turn(
+                self.g,
+                &self.route,
+                self.cfg,
+                self.current_model.as_deref(),
+                &mut self.turn,
+                &mut self.protocol,
+                self.received,
+                self.attempts,
+                self.ordinary_attempts,
+                false,
+                None,
+                crate::events::Phase::WsSend,
+                code::NETWORK,
+            );
+            return Err(e);
+        }
+        Ok(Flow::Proceed)
+    }
+    /// The upstream stayed silent past the deadline: extend it while bytes are
+    /// still arriving, otherwise retry the turn or fail it.
+    async fn silent(&mut self) -> Result<Flow, Failure> {
+        let mut partial_progress = None;
+        if let Upstream::Native(peer) = &self.upstream {
+            if let Some(at) = peer
+                .activity
+                .read_at()
+                .filter(|at| *at >= self.receive_started)
+            {
+                partial_progress = Some(at);
+                let next = at + Duration::from_secs(self.cfg.idle_seconds);
+                if next > tokio::time::Instant::now() {
+                    self.deadline = next;
+                    return Ok(Flow::Again);
+                }
+            }
+        }
+        let body_started = self.received || partial_progress.is_some();
+        if !body_started {
+            self.failover.failure(super::failover::Failure::Transport);
+            self.failover.finish(super::failover::Exit::ReplayUnsafe);
+            if let Some(u) = &self.protocol {
+                u.associate_failure(self.failover.failure_generation());
+            }
+        }
+        if let Some(u) = &mut self.protocol {
+            let phase = if body_started {
+                "ws_idle"
+            } else {
+                "ws_first_byte"
+            };
+            let seconds = if body_started {
+                self.cfg.idle_seconds
+            } else {
+                self.cfg.first_byte_seconds
+            };
+            if let Some(at) = partial_progress {
+                u.timeout_after(phase, seconds, at.elapsed());
+            } else {
+                u.timeout(phase, seconds);
+            }
+        }
+
+        let native = matches!(self.upstream, Upstream::Native(_));
+        self.retry_pending = disconnect_turn(
+            self.g,
+            &self.route,
+            self.cfg,
+            self.current_model.as_deref(),
+            &mut self.turn,
+            &mut self.protocol,
+            body_started,
+            self.attempts,
+            self.ordinary_attempts,
+            native && !self.unknown_affinity,
+            None,
+            crate::events::Phase::WsReceive,
+            if body_started {
+                code::STREAM_TIMEOUT
+            } else {
+                code::FIRST_BYTE_TIMEOUT
+            },
+        );
+        self.upstream = Upstream::Disconnected;
+        if self.retry_pending {
+            return Ok(Flow::Again);
+        }
+        Err((
+            1013,
+            if body_started {
+                "upstream timeout"
+            } else {
+                code::FIRST_BYTE_TIMEOUT
+            },
+        ))
+    }
+    /// The client is gone: releases the turn without a verdict on the provider
+    /// and lets the upstream finish reporting usage.
+    async fn abandon(&mut self, activity: &super::wire_progress::Activity, writing: bool) {
+        if let Some(mut admission) = self.turn.take() {
+            admission.permits.neutral(self.cfg);
+        }
+        cancelled_usage_tail(&mut self.upstream, &mut self.protocol, activity, writing).await;
+    }
+    /// Drops the accounting of a turn that can no longer report anything.
+    fn release(&mut self) {
+        self.protocol = None;
+        self.usage_trace = None;
+        self.ownership = None;
+        self.failover.detach();
+    }
+    /// The action reported for a failure that may move the turn to another
+    /// provider.
+    fn fallback_action(&self, failure: &AttemptFailure) -> crate::events::Action {
+        super::attempt::fallback_action(
+            self.g,
+            &self.route.provider.id,
+            self.g
+                .routing_ids(None)
+                .iter()
+                .filter_map(|id| self.g.route(id))
+                .filter(|r| {
+                    !self.turn_failed.contains(&r.provider.id)
+                        && !self
+                            .hard_denied
+                            .contains(&(r.provider.id.clone(), r.provider.version.clone()))
+                })
+                .collect(),
+            &Requirement::model(self.current_model.as_deref()),
+            self.uri.path(),
+            self.ownership.as_deref(),
+            self.g.client_id() == super::ClientId::Codex,
+            !self.manual
+                && !self.unknown_affinity
+                && self.pinned.is_none()
+                && value(&self.replay_frame)
+                    .and_then(|v| super::replay::RequestHints::from_value(v, false).ok())
+                    .is_some_and(|h| h.previous_response_id.is_none())
+                && (failure.capacity || self.ordinary_attempts <= self.cfg.max_retries),
+        )
+    }
+}
+#[allow(clippy::too_many_arguments)]
+async fn session_once(
+    g: &Gateway,
+    client: &mut Peer,
+    cfg: &Settings,
+    manual: bool,
+    ids: Vec<String>,
+    routes: HashMap<String, Route>,
+    headers: HeaderMap,
+    uri: Uri,
+    next_turn: &mut Option<Frame>,
+    request_budget: &super::wait_budget::WaitBudget,
+) -> Result<(), Failure> {
+    let Some(first) = first_create(client, cfg, next_turn, request_budget).await? else {
+        return Ok(());
+    };
+    let Some(mut session) = Session::open(
+        g,
+        client,
+        cfg,
+        manual,
+        ids,
+        routes,
+        headers,
+        uri,
+        next_turn,
+        request_budget,
+        first,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    loop {
+        // Do not let a queued create/retry or continuously ready upstream starve
+        // an already-observed downstream close. The tail never starts a turn.
+        if *client.closed.borrow() {
+            session.abandon(&client.activity, false).await;
+            return Ok(());
+        }
+        if session.retry_pending {
+            flow!(session.reconnect(client).await);
+        }
+        if session.turn.is_none() {
+            if let Some(frame) = session.pending.take() {
+                flow!(session.start(client, frame).await);
             }
         }
         tokio::select! {
             biased;
-            _ = freeze_changes.changed() => {},
-            _ = tokio::time::sleep_until(pending_started + Duration::from_secs(cfg.retry_budget_seconds) + pending_traffic.as_ref().map_or(Duration::ZERO, |t| t.paused_for())), if pending.is_some() && !pending_traffic.as_ref().is_some_and(|t| t.paused()) => {
+            _ = session.freeze_changes.changed() => {},
+            _ = tokio::time::sleep_until(
+                session.pending_started
+                    + Duration::from_secs(cfg.retry_budget_seconds)
+                    + session.pending_traffic.as_ref().map_or(Duration::ZERO, |t| t.paused_for()),
+            ), if session.pending.is_some()
+                && !session.pending_traffic.as_ref().is_some_and(|t| t.paused()) =>
+            {
                 return Err((1013, code::FIRST_BYTE_TIMEOUT));
             },
             _ = client.closed.changed() => {
-                if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
-                cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
+                session.abandon(&client.activity, false).await;
                 return Ok(());
             },
-            _ = async { if let Some((_, at)) = &previous_usage { tokio::time::sleep_until(*at).await } else { std::future::pending::<()>().await } } => { previous_usage = None; },
-            _ = async { if let Some(at) = tail_deadline { tokio::time::sleep_until(at).await } else { std::future::pending::<()>().await } }, if turn.is_none() => {
-                protocol = None;
-                usage_trace = None; ownership = None; failover.detach();
-                tail_deadline = None;
+            _ = async {
+                if let Some((_, at)) = &session.previous_usage {
+                    tokio::time::sleep_until(*at).await
+                } else {
+                    std::future::pending::<()>().await
+                }
+            } => {
+                session.previous_usage = None;
             },
-            event = next_upstream(&mut upstream), if turn.is_some() || protocol.is_some() || matches!(upstream, Upstream::Native(_)) => {
-                let disconnected = match &event { None => true, Some(Err(_)) => true, Some(Ok(frame)) => frame.opcode() == OpCode::Close };
-                if disconnected {
-                    let close = event.as_ref().and_then(|v| v.as_ref().ok()).filter(|f| f.opcode() == OpCode::Close);
-                    // Only a successfully settled/cancelled turn may treat this
-                    // as an idle disconnect. An error already sent downstream
-                    // must retain the upstream close without a second failure.
-                    if turn.is_none() && !terminal_error && route.client_id == super::ClientId::Codex {
-                        upstream = Upstream::Disconnected;
-                        protocol = None;
-                        usage_trace = None; ownership = None; failover.detach();
-                        tail_deadline = None;
-                        continue;
-                    }
-                    let native = matches!(upstream, Upstream::Native(_));
-                    let response_started = response_data_started(&upstream, received, receive_started);
-                    let unfinished_native_turn = native && turn.is_some() && !response_started && route.client_id == super::ClientId::Codex;
-                    retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, response_started, attempts, ordinary_attempts, native && !unknown_affinity, close, crate::events::Phase::WsReceive, code::STREAM_INTERRUPTED);
-                    upstream = Upstream::Disconnected;
-                    if retry_pending { continue; }
-                    if unfinished_native_turn { return Err((1013, "websocket reconnect retries exhausted")); }
-                    if let Some(Ok(frame)) = event { client.send(frame).await?; return Ok(()); }
-                    return Err((1013, "upstream disconnected before completion"));
+            _ = async {
+                if let Some(at) = session.tail_deadline {
+                    tokio::time::sleep_until(at).await
+                } else {
+                    std::future::pending::<()>().await
                 }
-                let frame = event.unwrap()?;
-                let error_headers = match &upstream { Upstream::Native(peer) => peer.response_identifiers.clone(), _ => HeaderMap::new() };
-                if matches!(frame.opcode(), OpCode::Text | OpCode::Binary) {
-                    if let Some(u) = &mut protocol { u.websocket_progress(frame.payload().len()); }
-                }
-                let mut settled_turn = None;
-                if let Some(v) = value(&frame) {
-                    let mut observed = super::protocol::Observation::default();
-                    observed.value(&v);
-                    let usage_only = matches!(v.get("type").and_then(|v| v.as_str()), Some("usage" | "usage.updated" | "response.usage" | "response.usage.updated"));
-                    let belongs_to_previous = protocol.as_ref().and_then(|u| u.observation.response_id.as_ref()).map_or(usage_only, |id| Some(id) != observed.response_id.as_ref());
-                    if let Some((previous, _)) = previous_usage.as_mut().filter(|(previous, _)| belongs_to_previous && observed.response_id.is_some() && previous.observation.response_id == observed.response_id) {
-                        previous.value_raw(&v, frame.payload());
-                        let sending = tokio::time::Instant::now();
-                        if let Err(error) = client.send(frame).await {
-                            cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, true).await;
-                            return Err(error);
-                        }
-                        deadline += sending.elapsed();
-                        continue;
-                    }
-                }
-                if turn.is_some() && !received && ownership.as_ref().is_some_and(|lease| lease.handoff && lease.owner.as_deref() != Some(&route.provider.id)) && value(&frame).is_some_and(|v| super::compaction::incompatible(&v)) {
-                    if let Some(old) = ownership.as_ref().and_then(|lease| lease.owner.as_ref()).and_then(|id| g.route(id)).filter(|old| old.provider.queued && !old.provider.search_only && Requirement::model(current_model.as_deref()).allows(old.provider.allowed_models.as_deref())) {
-                        let old = g.endpoint_route(old, conversation.as_deref(), None, false).await.map_err(|_| (1013, code::ENDPOINT_AFFINITY))?;
-                        if ordinary_attempts <= cfg.max_retries {
-                            if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value_raw(&v, frame.payload()); } u.finish(Some(101), code::CLIENT_ERROR); }
-                            if let Some(mut admission) = turn.take() {
-                                let details = value(&frame).map(|v| super::failure_policy::details_with_rules(&v, &turn_rules)).unwrap_or_default();
-                                let emit = || admission.permits.report(g, &route, current_model.as_deref(), crate::events::Reason::ProtocolError, crate::events::Action::TryingNext, Some(101), attempts, crate::events::Details { counted_failure: Some(false), ..details });
-                                if let Some(u) = &protocol { u.report_failure(emit); } else { emit(); }
-                                admission.permits.neutral(cfg);
-                            }
-                            drop(protocol.take());
-                            route = old;
-                            upstream = Upstream::Disconnected;
-                            retry_pending = true;
-                            retry_immediately = true;
-                            retry_capacity = false;
-                            continue;
-                        }
-                    }
-                }
-                // A structured rejection before the first output is replay-safe.
-                // Re-evaluate the same failure queue used by HTTP, retaining the
-                // compaction claim and the exact original response.create frame.
-                if turn.is_some() && !received {
-                    if let Some(mut failure) = first_event_failure(&frame, &turn_rules, &error_headers).filter(|f| f.capacity || f.hard_rejection() || f.model_unavailable || f.details.error_basis == Some(crate::events::ErrorBasis::ServiceError)) {
-                        failover.failure(failure.classification());
-                        let wait_same = failure.capacity && established_capacity_owner.as_deref() == Some(&route.provider.id);
-                        owner_capacity_wait = if wait_same { turn.as_ref().map(|admission| CapacitySource { provider_id: route.provider.id.clone(), reset_generation: admission.reset_generation }) } else { None };
-                        if wait_same { failure.details.wait_seconds = Some(forward::capacity_delay(cfg, failure.retry).as_secs()); }
-                        turn_failed.insert(route.provider.id.clone());
-                        if failure.hard_rejection() { hard_denied.insert((route.provider.id.clone(), route.provider.version.clone())); }
-                        if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value_raw(&v, frame.payload()); } u.finish(Some(101), code::UPSTREAM_ERROR); }
-                        if let Some(mut admission) = turn.take() {
-                            last_error = Some(failover.report_failure(protocol.as_ref(), || record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, if wait_same { crate::events::Action::RetryingSame } else { super::attempt::fallback_action(
-                                            g, &route.provider.id,
-                                            g.routing_ids(None).iter().filter_map(|id| g.route(id)).filter(|r| !turn_failed.contains(&r.provider.id) && !hard_denied.contains(&(r.provider.id.clone(), r.provider.version.clone()))).collect(),
-                                            &Requirement::model(current_model.as_deref()), uri.path(), ownership.as_deref(),
-                                            g.client_id() == super::ClientId::Codex,
-                                            !manual && !unknown_affinity && pinned.is_none()
-                                                && value(&replay_frame).and_then(|v| super::replay::RequestHints::from_value(v, false).ok()).is_some_and(|h| h.previous_response_id.is_none())
-                                                && (failure.capacity || ordinary_attempts <= cfg.max_retries),
-                                        ) }, attempts)));
-                            if failure.capacity { admission.permits.capacity_limited(cfg, failure.retry); }
-                            else if failure.model_unavailable { admission.permits.neutral(cfg); }
-                            else { admission.permits.failure(cfg, failure.retry); }
-                        }
-                        drop(protocol.take());
-                        if failure.capacity { ordinary_attempts = ordinary_attempts.saturating_sub(1); capacity_protected = true; }
-                        initial_frames.clear();
-                        initial_bytes = 0;
-                        rejected_frame = Some(frame);
-                        fallback_capacity |= failure.capacity;
-                        retry_capacity = fallback_capacity;
-                        retry_fallback = true;
-                        retry_pending = true;
-                        upstream = Upstream::Disconnected;
-                        continue;
-                    }
-                }
-                if !frame.opcode().is_control() {
-                    deadline = tokio::time::Instant::now() + Duration::from_secs(cfg.idle_seconds);
-                }
-                if let Some(v) = value(&frame) {
-                    if let Some(u)=&mut protocol { u.value_raw(&v, frame.payload()); }
-                    if request_budget.cancel_requested() { return Err(TURN_CANCELLED); }
-                    if let Some(id) = v.pointer("/response/id").or_else(|| v.get("response_id")).and_then(|v| v.as_str()) { g.0.endpoints.remember(&route.provider, id); g.remember_model(id, &route.provider.id, current_model.as_deref()); }
-                    let kind = v.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if matches!(kind, "response.created" | "response.completed" | "response.done") { confirmed_model = current_model.clone(); }
-                    if protocol.as_ref().map_or_else(|| matches!(kind, "response.completed" | "response.done" | "response.failed" | "response.incomplete" | "response.cancelled" | "response.canceled" | "error"), |u| u.terminal().is_some()) {
-                        traffic.finishing();
-                        request_budget.complete(request_budget.deadline());
-                        if let Some(mut admission) = turn.take() {
-                            if let Some(u)=protocol.as_mut() {
-                                u.finish(Some(101), code::UPSTREAM_ERROR);
-                                terminal_error = !matches!(u.terminal(), Some(super::protocol::Terminal::Success | super::protocol::Terminal::Limited | super::protocol::Terminal::Cancelled));
-                                let first_failure = (route.client_id == super::ClientId::Codex)
-                                    .then(|| first_event_failure(&frame, &turn_rules, &error_headers))
-                                    .flatten();
-                                if let Some(failure) = first_failure.filter(|failure| failure.capacity) {
-                                    u.report_failure(|| record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, crate::events::Action::Returned, attempts));
-                                    admission.permits.capacity_limited(cfg, None);
-                                } else {
-                                    super::health_settlement::observe_protocol(u, &mut admission.permits, cfg, g, &route, current_model.as_deref(), Some(101), attempts);
-                                }
-
-                            }
-                            settled_turn = Some(admission);
-                        }
-                        if tail_deadline.is_none() { tail_deadline = Some(tokio::time::Instant::now() + USAGE_TAIL); }
-                    }
-                }
-                let business = !frame.opcode().is_control() && protocol.as_ref().is_none_or(|u| u.business_observed());
-                if !received && !business && !frame.opcode().is_control() {
-                    initial_bytes = initial_bytes.saturating_add(frame.payload().len());
-                    if initial_bytes > 2 * 1024 * 1024 || initial_frames.len() >= 4096 { return Err((1011, code::UPSTREAM_BODY)); }
-                    initial_frames.push(frame);
-                    continue;
-                }
-                if business { received = true; failover.finish(super::failover::Exit::Forwarded); }
-                let frame_bytes = frame.payload().len() + if business {initial_bytes} else {0};
-                let mut outgoing = if business {initial_bytes=0; std::mem::take(&mut initial_frames)} else {Vec::new()};
-                outgoing.push(frame);
-                let sending = tokio::time::Instant::now();
-                for frame in outgoing {
-                    if let Err(error) = client.send(frame).await {
-                        if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
-                        cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, true).await;
-                        return Err(error);
-                    }
-                }
-                // Do not charge time blocked by the downstream reader to the
-                // upstream silence timer. Peer::send has its own progress limit.
-                deadline += sending.elapsed();
-                if let Some(u) = &mut protocol {
-                    u.delivery().handed(frame_bytes, u.terminal_observed());
-                    u.output_handed(business);
-                    if u.delivered_success() && settled_turn.is_some() {
-                        g.persist_success(&route.provider).await;
-                    }
-
-                }
-                if settled_turn.is_some() { traffic.finish(); }
+            }, if session.turn.is_none() => {
+                session.release();
+                session.tail_deadline = None;
             },
-            frame = client.incoming.recv() => {
-                let Some(frame) = frame else {
-                    if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
-                    cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
-                    return Ok(());
-                };
-                let closing = frame.opcode() == OpCode::Close;
-                if frame.opcode() == OpCode::Ping && !matches!(upstream, Upstream::Native(_)) {
-                    client.send(Frame::pong(frame.payload().to_vec())).await?;
-                } else if frame.opcode() == OpCode::Pong && !matches!(upstream, Upstream::Native(_)) {
-                    continue;
-                } else if closing {
-                    if let Some(mut admission) = turn.take() { admission.permits.neutral(cfg); }
-                    cancelled_usage_tail(&mut upstream, &mut protocol, &client.activity, false).await;
-                    return Ok(());
-                } else if creates(&frame) {
-                    if pending.is_some() { return Err((1013, "too many pending turns")); }
-                    pending_received_at = crate::usage::model::now();
-                    pending_started = tokio::time::Instant::now();
-                    pending = Some(frame);
-                    let ticket = g.0.registry.freeze.request();
-                    ticket.waiting();
-                    pending_traffic = Some(ticket);
-                } else if let Err(e) = send_to_upstream(&mut upstream, frame).await {
-                    // A client control/message send failure cannot safely replay a generation.
-                    disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, received, attempts, ordinary_attempts, false, None, crate::events::Phase::WsSend, code::NETWORK);
-                    return Err(e);
-                }
+            event = next_upstream(&mut session.upstream), if session.turn.is_some()
+                || session.protocol.is_some()
+                || matches!(session.upstream, Upstream::Native(_)) =>
+            {
+                flow!(session.upstream_event(client, event).await)
             },
-            _ = tokio::time::sleep_until(deadline), if turn.is_some() && !request_budget.executing_compaction() => {
-                let mut partial_progress = None;
-                if let Upstream::Native(peer) = &upstream {
-                    if let Some(at) = peer.activity.read_at().filter(|at| *at >= receive_started) {
-                        partial_progress = Some(at);
-                        let next = at + Duration::from_secs(cfg.idle_seconds);
-                        if next > tokio::time::Instant::now() { deadline = next; continue; }
-                    }
-                }
-                let body_started = received || partial_progress.is_some();
-                if !body_started {
-                    failover.failure(super::failover::Failure::Transport);
-                    failover.finish(super::failover::Exit::ReplayUnsafe);
-                    if let Some(u) = &protocol { u.associate_failure(failover.failure_generation()); }
-                }
-                if let Some(u) = &mut protocol {
-                    let phase = if body_started { "ws_idle" } else { "ws_first_byte" };
-                    let seconds = if body_started { cfg.idle_seconds } else { cfg.first_byte_seconds };
-                    if let Some(at) = partial_progress {
-                        u.timeout_after(phase, seconds, at.elapsed());
-                    } else {
-                        u.timeout(phase, seconds);
-                    }
-                }
-
-                let native = matches!(upstream, Upstream::Native(_));
-                retry_pending = disconnect_turn(g, &route, cfg, current_model.as_deref(), &mut turn, &mut protocol, body_started, attempts, ordinary_attempts, native && !unknown_affinity, None, crate::events::Phase::WsReceive, if body_started { code::STREAM_TIMEOUT } else { code::FIRST_BYTE_TIMEOUT });
-                upstream = Upstream::Disconnected;
-                if retry_pending { continue; }
-                return Err((1013, if body_started { "upstream timeout" } else { code::FIRST_BYTE_TIMEOUT }));
+            frame = client.incoming.recv() => flow!(session.client_frame(client, frame).await),
+            _ = tokio::time::sleep_until(session.deadline), if session.turn.is_some()
+                && !request_budget.executing_compaction() =>
+            {
+                flow!(session.silent().await)
             },
         }
     }
