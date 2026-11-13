@@ -779,7 +779,7 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
     let stale_backup = gateway.route(&backup_id).expect("backup route snapshot");
     let requirement = super::routing::Requirement::model(Some(MODEL));
     assert_eq!(
-        super::routing::fallback_action(
+        super::attempt::fallback_action(
             &gateway,
             &primary_id,
             vec![stale_backup.clone()],
@@ -810,7 +810,7 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
         "takeover policy edits do not replace the route generation"
     );
     assert_eq!(
-        super::routing::fallback_action(
+        super::attempt::fallback_action(
             &gateway,
             &primary_id,
             vec![stale_backup.clone()],
@@ -842,7 +842,7 @@ async fn stale_backup_route_after_credential_change_is_not_reported_as_next() {
         "credential edits invalidate retained route snapshots"
     );
     assert_eq!(
-        super::routing::fallback_action(
+        super::attempt::fallback_action(
             &gateway,
             &primary_id,
             vec![stale_backup],

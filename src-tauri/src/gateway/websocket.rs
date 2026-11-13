@@ -1523,20 +1523,22 @@ async fn session_once(
                             &admission.route,
                             current_model.as_deref(),
                             &failure,
-                            super::routing::fallback_action(
+                            super::attempt::retained_fallback(
                                 g,
                                 &admission.route.provider.id,
-                                ids.iter()
-                                    .filter_map(|id| routes.get(id).cloned())
-                                    .collect(),
+                                &ids,
+                                &routes,
                                 &requirement,
                                 uri.path(),
                                 ownership.as_deref(),
                                 g.client_id() == super::ClientId::Codex && !auxiliary,
-                                !manual
-                                    && pinned.is_none()
-                                    && !unknown_affinity
-                                    && ordinary_attempts <= cfg.max_retries,
+                                super::attempt::may_fail_over(
+                                    manual,
+                                    pinned.as_deref(),
+                                    unknown_affinity,
+                                    ordinary_attempts,
+                                    cfg.max_retries,
+                                ),
                             ),
                             attempts,
                         )
@@ -1568,20 +1570,22 @@ async fn session_once(
                             &admission.route,
                             current_model.as_deref(),
                             &failure,
-                            super::routing::fallback_action(
+                            super::attempt::retained_fallback(
                                 g,
                                 &admission.route.provider.id,
-                                ids.iter()
-                                    .filter_map(|id| routes.get(id).cloned())
-                                    .collect(),
+                                &ids,
+                                &routes,
                                 &requirement,
                                 uri.path(),
                                 ownership.as_deref(),
                                 g.client_id() == super::ClientId::Codex && !auxiliary,
-                                !manual
-                                    && pinned.is_none()
-                                    && !unknown_affinity
-                                    && ordinary_attempts <= cfg.max_retries,
+                                super::attempt::may_fail_over(
+                                    manual,
+                                    pinned.as_deref(),
+                                    unknown_affinity,
+                                    ordinary_attempts,
+                                    cfg.max_retries,
+                                ),
                             ),
                             attempts,
                         )
@@ -1645,20 +1649,22 @@ async fn session_once(
                         if retry_delay.is_some() || wait_same {
                             crate::events::Action::RetryingSame
                         } else if retryable
-                            && super::routing::fallback_action(
+                            && super::attempt::retained_fallback(
                                 g,
                                 &admission.route.provider.id,
-                                ids.iter()
-                                    .filter_map(|id| routes.get(id).cloned())
-                                    .collect(),
+                                &ids,
+                                &routes,
                                 &requirement,
                                 uri.path(),
                                 ownership.as_deref(),
                                 g.client_id() == super::ClientId::Codex && !auxiliary,
-                                !manual
-                                    && pinned.is_none()
-                                    && !unknown_affinity
-                                    && ordinary_attempts <= cfg.max_retries,
+                                super::attempt::may_fail_over(
+                                    manual,
+                                    pinned.as_deref(),
+                                    unknown_affinity,
+                                    ordinary_attempts,
+                                    cfg.max_retries,
+                                ),
                             ) == crate::events::Action::TryingNext
                         {
                             crate::events::Action::TryingNext
@@ -2753,7 +2759,7 @@ async fn session_once(
                                         if wait_same {
                                             crate::events::Action::RetryingSame
                                         } else if can_fail_over {
-                                            super::routing::fallback_action(
+                                            super::attempt::fallback_action(
                                             g, &route.provider.id,
                                             g.routing_ids(None).iter().filter_map(|id| g.route(id)).filter(|r| !turn_failed.contains(&r.provider.id) && !hard_denied.contains(&(r.provider.id.clone(), r.provider.version.clone()))).collect(),
                                             &Requirement::model(current_model.as_deref()), uri.path(), ownership.as_deref(),
@@ -2960,7 +2966,7 @@ async fn session_once(
                         if failure.hard_rejection() { hard_denied.insert((route.provider.id.clone(), route.provider.version.clone())); }
                         if let Some(u) = protocol.as_mut() { if let Some(v) = value(&frame) { u.value_raw(&v, frame.payload()); } u.finish(Some(101), code::UPSTREAM_ERROR); }
                         if let Some(mut admission) = turn.take() {
-                            last_error = Some(failover.report_failure(protocol.as_ref(), || record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, if wait_same { crate::events::Action::RetryingSame } else { super::routing::fallback_action(
+                            last_error = Some(failover.report_failure(protocol.as_ref(), || record_failure(&mut admission.permits, g, &route, current_model.as_deref(), &failure, if wait_same { crate::events::Action::RetryingSame } else { super::attempt::fallback_action(
                                             g, &route.provider.id,
                                             g.routing_ids(None).iter().filter_map(|id| g.route(id)).filter(|r| !turn_failed.contains(&r.provider.id) && !hard_denied.contains(&(r.provider.id.clone(), r.provider.version.clone()))).collect(),
                                             &Requirement::model(current_model.as_deref()), uri.path(), ownership.as_deref(),

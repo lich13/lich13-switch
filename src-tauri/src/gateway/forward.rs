@@ -566,21 +566,6 @@ fn delivered(
 fn stopped() -> Response<WireBody> {
     error(StatusCode::SERVICE_UNAVAILABLE, code::STOPPED, "网关已停止")
 }
-/// A provider that failed transiently is retried in place while it stays
-/// available, or while its closed circuit only honours an upstream Retry-After.
-fn same_provider_delay(
-    retry_same: bool,
-    health: &super::Health,
-    retries: &mut u8,
-    retry_after: Option<Duration>,
-) -> Option<Duration> {
-    (retry_same
-        && (health.available
-            || (health.state == circuit::CircuitState::Closed
-                && health.cooldown_reason.as_deref() == Some("retry_after"))))
-    .then(|| routing::transient_delay(retries, retry_after))
-    .flatten()
-}
 /// Waits out a transient retry delay, then reports whether the same provider
 /// is still queued and available to be tried again first.
 async fn transient_wait(
@@ -1589,20 +1574,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         &route,
                         model.as_deref(),
                         Reason::Network,
-                        routing::fallback_action(
+                        super::attempt::retained_fallback(
                             &gateway,
                             &route.provider.id,
-                            ids.iter()
-                                .filter_map(|id| routes.get(id).cloned())
-                                .collect(),
+                            &ids,
+                            &routes,
                             &requirement,
                             parts.uri.path(),
                             ownership.as_deref(),
                             gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            mode != "manual"
-                                && pinned.is_none()
-                                && !unknown_affinity
-                                && ordinary_attempts <= settings.max_retries,
+                            super::attempt::may_fail_over(
+                                mode == "manual",
+                                pinned.as_deref(),
+                                unknown_affinity,
+                                ordinary_attempts,
+                                settings.max_retries,
+                            ),
                         ),
                         None,
                         attempted,
@@ -1618,7 +1605,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     } else {
                         admission.permits.failure(&settings, None);
                     }
-                    let retry_delay = same_provider_delay(
+                    let retry_delay = super::attempt::same_provider_delay(
                         retry_same,
                         &route.health_for(&requirement),
                         &mut transient_retries,
@@ -1663,20 +1650,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     failover.failure(super::failover::Failure::Transport);
                     let retry_dsh = dedicated_search
                         || route.client_id == super::ClientId::Dsh
-                            && routing::fallback_action(
+                            && super::attempt::retained_fallback(
                                 &gateway,
                                 &route.provider.id,
-                                ids.iter()
-                                    .filter_map(|id| routes.get(id).cloned())
-                                    .collect(),
+                                &ids,
+                                &routes,
                                 &requirement,
                                 parts.uri.path(),
                                 ownership.as_deref(),
                                 false,
-                                mode != "manual"
-                                    && pinned.is_none()
-                                    && !unknown_affinity
-                                    && ordinary_attempts <= settings.max_retries,
+                                super::attempt::may_fail_over(
+                                    mode == "manual",
+                                    pinned.as_deref(),
+                                    unknown_affinity,
+                                    ordinary_attempts,
+                                    settings.max_retries,
+                                ),
                             ) == Action::TryingNext;
                     protocol.timeout(
                         "response_headers",
@@ -1914,20 +1903,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         && ids
                             .iter()
                             .any(|id| routes.get(id).is_some_and(|r| r.provider.search_only)))
-                        || routing::fallback_action(
+                        || super::attempt::retained_fallback(
                             &gateway,
                             &route.provider.id,
-                            ids.iter()
-                                .filter_map(|id| routes.get(id).cloned())
-                                .collect(),
+                            &ids,
+                            &routes,
                             &requirement,
                             parts.uri.path(),
                             ownership.as_deref(),
                             gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            mode != "manual"
-                                && pinned.is_none()
-                                && !unknown_affinity
-                                && ordinary_attempts <= settings.max_retries,
+                            super::attempt::may_fail_over(
+                                mode == "manual",
+                                pinned.as_deref(),
+                                unknown_affinity,
+                                ordinary_attempts,
+                                settings.max_retries,
+                            ),
                         ) == Action::TryingNext);
                 let reason = if compact_error {
                     Reason::ProtocolError
@@ -1977,7 +1968,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 } else {
                     admission.permits.neutral(&settings);
                 }
-                let retry_delay = same_provider_delay(
+                let retry_delay = super::attempt::same_provider_delay(
                     retry_same,
                     &route.health_for(&requirement),
                     &mut transient_retries,
@@ -2218,20 +2209,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                     ))
             {
                 failover.failure(super::failover::Failure::Transport);
-                let fallback = routing::fallback_action(
+                let fallback = super::attempt::retained_fallback(
                     &gateway,
                     &route.provider.id,
-                    ids.iter()
-                        .filter_map(|id| routes.get(id).cloned())
-                        .collect(),
+                    &ids,
+                    &routes,
                     &requirement,
                     parts.uri.path(),
                     ownership.as_deref(),
                     gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                    mode != "manual"
-                        && pinned.is_none()
-                        && !unknown_affinity
-                        && ordinary_attempts <= settings.max_retries,
+                    super::attempt::may_fail_over(
+                        mode == "manual",
+                        pinned.as_deref(),
+                        unknown_affinity,
+                        ordinary_attempts,
+                        settings.max_retries,
+                    ),
                 );
                 let mut event = admission.permits.prepare_report(
                     &gateway,
@@ -2424,20 +2417,22 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                         && ids
                             .iter()
                             .any(|id| routes.get(id).is_some_and(|r| r.provider.search_only)))
-                        || routing::fallback_action(
+                        || super::attempt::retained_fallback(
                             &gateway,
                             &route.provider.id,
-                            ids.iter()
-                                .filter_map(|id| routes.get(id).cloned())
-                                .collect(),
+                            &ids,
+                            &routes,
                             &requirement,
                             parts.uri.path(),
                             ownership.as_deref(),
                             gateway.client_id() == super::ClientId::Codex && !auxiliary,
-                            mode != "manual"
-                                && pinned.is_none()
-                                && !unknown_affinity
-                                && ordinary_attempts <= settings.max_retries,
+                            super::attempt::may_fail_over(
+                                mode == "manual",
+                                pinned.as_deref(),
+                                unknown_affinity,
+                                ordinary_attempts,
+                                settings.max_retries,
+                            ),
                         ) == Action::TryingNext);
                 let mut details = protocol.observation.error.clone();
                 details.phase = Some(crate::events::Phase::Response);
@@ -2473,7 +2468,7 @@ async fn forward(gateway: Gateway, mut request: Request<Incoming>) -> Response<W
                 } else {
                     admission.permits.neutral(&settings);
                 }
-                let retry_delay = same_provider_delay(
+                let retry_delay = super::attempt::same_provider_delay(
                     retry_same,
                     &route.health_for(&requirement),
                     &mut transient_retries,
