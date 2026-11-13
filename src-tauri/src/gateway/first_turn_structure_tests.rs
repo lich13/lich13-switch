@@ -13,15 +13,9 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    convert::Infallible,
-    future::Future,
-    io::Write,
-    path::Path,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{convert::Infallible, future::Future, io::Write, path::Path, sync::Arc, time::Duration};
 
 use crate::usage::model::RoutingInput;
 
@@ -123,7 +117,7 @@ async fn v0233_request(gateway: &Gateway, thread: &str, body: Vec<u8>) -> Respon
     let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
         .build(super::connector::Connector::new(Duration::from_secs(3), 0));
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let request = Request::builder()
@@ -231,7 +225,7 @@ async fn v0233_sse_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u8>>
                 method == hyper::Method::GET && request.uri().path().ends_with("/models");
             let request = request.into_body().collect().await.unwrap().to_bytes();
             if method == hyper::Method::POST {
-                seen.lock().unwrap().push(request.to_vec());
+                seen.lock().push(request.to_vec());
             }
             if is_models {
                 Response::builder()
@@ -274,7 +268,7 @@ async fn v0233_native_endpoint(provider: &'static str, seen: Arc<Mutex<Vec<Vec<u
                     if serde_json::from_slice::<Value>(&payload).is_err() {
                         break;
                     }
-                    seen.lock().unwrap().push(payload);
+                    seen.lock().push(payload);
                     if peer
                         .send(yawc::Frame::text(response_text.clone()))
                         .await
@@ -531,8 +525,8 @@ async fn v0233_http_sse_route_preserves_request_and_response_bytes() {
     assert_eq!(response.status(), StatusCode::OK);
     let response_bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(response_bytes, expected_response);
-    assert_eq!(ordinary_seen.lock().unwrap().len(), 0);
-    assert_eq!(new_thread_seen.lock().unwrap().as_slice(), &[request_bytes]);
+    assert_eq!(ordinary_seen.lock().len(), 0);
+    assert_eq!(new_thread_seen.lock().as_slice(), &[request_bytes]);
     gateway.stop().await.unwrap();
 }
 
@@ -559,7 +553,7 @@ async fn v0233_native_ws_routes_new_thread_and_preserves_frame_bytes() {
     );
     v0233_start(&gateway, &dir).await;
 
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!(
             "ws://127.0.0.1:{}/v1/responses",
@@ -585,9 +579,9 @@ async fn v0233_native_ws_routes_new_thread_and_preserves_frame_bytes() {
         response.as_slice(),
         v0233_native_response("new-thread").as_bytes()
     );
-    assert_eq!(ordinary_seen.lock().unwrap().len(), 0);
+    assert_eq!(ordinary_seen.lock().len(), 0);
     assert_eq!(
-        new_thread_seen.lock().unwrap().as_slice(),
+        new_thread_seen.lock().as_slice(),
         &[request.as_bytes().to_vec()]
     );
 

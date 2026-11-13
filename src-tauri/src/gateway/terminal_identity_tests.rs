@@ -605,7 +605,7 @@ async fn wait_for_provider_idle(gateway: &Gateway) {
 async fn native_websocket_bare_error_then_matching_completion_settles_once_and_reuses_connection() {
     let handshakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handshake_count = handshakes.clone();
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<Vec<u8>>::new()));
     let observed = seen.clone();
     let upstream = websocket_server(move |mut request, tasks| {
         let handshake_count = handshake_count.clone();
@@ -635,7 +635,7 @@ async fn native_websocket_bare_error_then_matching_completion_settles_once_and_r
                     if frame.opcode().is_control() {
                         continue;
                     }
-                    observed.lock().unwrap().push(frame.payload().to_vec());
+                    observed.lock().push(frame.payload().to_vec());
                     turn += 1;
                     let events: &[&str] = match turn {
                         1 => &[WS_CREATED_1, WS_ERROR_1, WS_COMPLETED_1],
@@ -708,7 +708,7 @@ async fn native_websocket_bare_error_then_matching_completion_settles_once_and_r
     assert_eq!(second.final_attempt().unwrap().outcome, "success");
     wait_for_provider_idle(&fixture.gateway).await;
     assert_eq!(handshakes.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.lock().len(), 2);
 
     client
         .send(yawc::Frame::close(1000.into(), "fixture done"))

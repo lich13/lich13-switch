@@ -5,10 +5,11 @@
 use super::*;
 use crate::events::{self, Action, Reason};
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::time::Duration;
 
@@ -232,7 +233,7 @@ async fn native_response_server() -> (u16, Arc<NativeWsSeen>) {
                         continue;
                     };
                     let turn = {
-                        let mut requests = seen.requests.lock().unwrap();
+                        let mut requests = seen.requests.lock();
                         requests.push(value);
                         requests.len()
                     };
@@ -291,7 +292,7 @@ async fn native_server_rejecting_second_handshake() -> (u16, Arc<NativeWsSeen>) 
                         continue;
                     }
                     if let Ok(value) = serde_json::from_slice::<Value>(frame.payload()) {
-                        seen.requests.lock().unwrap().push(value);
+                        seen.requests.lock().push(value);
                     }
                     let id = "fixture-v02512-ws-first";
                     let created = json!({
@@ -917,7 +918,7 @@ async fn native_ws_second_provider_success_preserves_failover_and_later_turns() 
         assert_eq!(completed["type"], "response.completed");
     }
     assert_eq!(backup_seen.handshakes.load(Ordering::SeqCst), 1);
-    assert_eq!(backup_seen.requests.lock().unwrap().len(), 2);
+    assert_eq!(backup_seen.requests.lock().len(), 2);
     client
         .send(yawc::Frame::close(1000.into(), "fixture done"))
         .await

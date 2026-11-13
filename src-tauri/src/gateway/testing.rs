@@ -242,7 +242,6 @@ impl Gateway {
             .0
             .usage
             .lock()
-            .unwrap()
             .clone()
             .ok_or_else(|| AppError::new(code::STATE, "调用统计暂不可用，等待重新读取"))?;
         usage.recent_gateway_requests(
@@ -398,7 +397,7 @@ impl Gateway {
 #[cfg(test)]
 impl Gateway {
     pub(crate) fn test_usage(&self) -> crate::usage::Service {
-        self.0.usage.lock().unwrap().clone().unwrap()
+        self.0.usage.lock().clone().unwrap()
     }
     pub(crate) fn remember_test_user_agent(&self, raw: &[u8]) {
         self.remember_business_identity(BusinessIdentity {

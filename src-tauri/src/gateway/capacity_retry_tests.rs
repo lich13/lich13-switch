@@ -347,7 +347,7 @@ async fn http_capacity_retries_beyond_five_rounds_even_with_zero_retry_budget() 
         async move {
             let bytes = request.into_body().collect().await.unwrap().to_bytes();
             let count = {
-                let mut seen = capture.lock().unwrap();
+                let mut seen = capture.lock();
                 seen.push(bytes);
                 seen.len()
             };
@@ -380,7 +380,7 @@ async fn http_capacity_retries_beyond_five_rounds_even_with_zero_retry_budget() 
         response.into_body().collect().await.unwrap().to_bytes(),
         "fixture-recovered"
     );
-    let requests = seen.lock().unwrap().clone();
+    let requests = seen.lock().clone();
     assert_eq!(requests.len(), 6);
     assert!(requests
         .iter()
@@ -578,7 +578,7 @@ async fn permanent_429_errors_return_original_body_without_entering_capacity_wai
 }
 
 async fn raw_request(g: &Gateway) -> tokio::net::TcpStream {
-    let token = g.0.inner.lock().unwrap().store.local_token.clone();
+    let token = g.0.inner.lock().store.local_token.clone();
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", g.view().settings.port))
         .await
         .unwrap();
@@ -730,7 +730,7 @@ async fn capture_request(socket: &mut yawc::HttpWebSocket, seen: &NativeSeen) {
             .await
             .expect("upstream closed before response.create");
         if !frame.opcode().is_control() {
-            seen.frames.lock().unwrap().push(frame.payload().to_vec());
+            seen.frames.lock().push(frame.payload().to_vec());
             break;
         }
     }
@@ -760,10 +760,7 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
         let hits = Arc::new(Mutex::new(Vec::new()));
         let observed = hits.clone();
         let port = server(move |request| {
-            observed
-                .lock()
-                .unwrap()
-                .push(request.uri().path().to_owned());
+            observed.lock().push(request.uri().path().to_owned());
             async {
                 Response::builder()
                     .status(502)
@@ -882,7 +879,7 @@ async fn websocket_terminal_failure_keeps_provider_for_notification_coalescing()
         })
         .await;
         assert_eq!(
-            hits.lock().unwrap().as_slice(),
+            hits.lock().as_slice(),
             &["/primary/v1/responses".to_owned()]
         );
         let view = g.view();
@@ -957,7 +954,7 @@ async fn websocket_handshake_capacity_can_recover_after_five_rejections_with_zer
     assert_eq!(next_ws(&mut client).await.unwrap().as_str(), CREATED);
     assert_eq!(next_ws(&mut client).await.unwrap().as_str(), COMPLETED);
     assert_eq!(seen.connections.load(Ordering::SeqCst), 6);
-    assert_eq!(seen.frames.lock().unwrap().as_slice(), &[CREATE.as_bytes()]);
+    assert_eq!(seen.frames.lock().as_slice(), &[CREATE.as_bytes()]);
     assert_eq!(g.view().providers[0].rpm_used, 6);
     assert_eq!(g.view().providers[0].health.failures, 0);
     client
@@ -1025,14 +1022,14 @@ async fn websocket_capacity_after_initialization_before_output_uses_backup_or_re
             expected_primary_attempts
         );
         assert_eq!(
-            seen.frames.lock().unwrap().as_slice(),
+            seen.frames.lock().as_slice(),
             expected_primary_frames.as_slice()
         );
         assert_eq!(g.view().providers[0].rpm_used, expected_primary_attempts);
         if let Some((_, backup_seen)) = backup {
             assert_eq!(backup_seen.connections.load(Ordering::SeqCst), 1);
             assert_eq!(
-                backup_seen.frames.lock().unwrap().as_slice(),
+                backup_seen.frames.lock().as_slice(),
                 &[CREATE.as_bytes().to_vec()]
             );
             assert_eq!(g.view().providers[1].rpm_used, 1);
@@ -1085,7 +1082,7 @@ async fn websocket_capacity_after_effective_output_is_delivered_without_replay()
         yawc::OpCode::Close
     );
     assert_eq!(seen.connections.load(Ordering::SeqCst), 1);
-    assert_eq!(seen.frames.lock().unwrap().len(), 1);
+    assert_eq!(seen.frames.lock().len(), 1);
     assert_eq!(g.view().providers[0].rpm_used, 1);
     drop(client);
     g.stop().await.unwrap();
@@ -1115,7 +1112,7 @@ async fn websocket_permanent_429_event_does_not_reconnect_forever() {
         yawc::OpCode::Close
     );
     assert_eq!(seen.connections.load(Ordering::SeqCst), 1);
-    assert_eq!(seen.frames.lock().unwrap().len(), 1);
+    assert_eq!(seen.frames.lock().len(), 1);
     drop(client);
     g.stop().await.unwrap();
 }

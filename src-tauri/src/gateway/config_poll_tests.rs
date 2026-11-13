@@ -33,7 +33,7 @@ fn cached_poll_tracks_replacement_guard_and_invalid_text_without_weakening_save_
     )
     .is_err());
     {
-        let mut state = g.0.inner.lock().unwrap();
+        let mut state = g.0.inner.lock();
         state.editable_mut().running = true;
     }
     assert!(g.config_stamp(&home, &mut cache).unwrap().2);
@@ -134,7 +134,6 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
         .0
         .view_config_cache
         .lock()
-        .unwrap()
         .codex_bearer
         .read(&codex_cfg, |_| panic!("expected codex_bearer cache hit"))
         .unwrap();
@@ -145,7 +144,6 @@ fn try_view_config_cache_tracks_external_codex_and_claude_edits_immediately() {
             .0
             .view_config_cache
             .lock()
-            .unwrap()
             .codex_bearer
             .read(&codex_cfg, |_| panic!("expected codex_bearer cache hit"))
             .unwrap()
@@ -211,7 +209,7 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
 
     let v0 = g.view().revision;
     {
-        let s = g.0.inner.lock().unwrap();
+        let s = g.0.inner.lock();
         assert!(s.has_cached_editable_digest());
         assert_eq!(
             s.editable_digest(g.0.client),
@@ -227,7 +225,7 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
 
     // Resume checkpoint update preserves the cached editable_digest and view.revision.
     {
-        let mut s = g.0.inner.lock().unwrap();
+        let mut s = g.0.inner.lock();
         let rev = s.revision.clone();
         s.save_resume_checkpoint(
             Some(model::Resume {
@@ -243,7 +241,7 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
 
     // Mutating any editable field via editable_mut() clears OnceLock and produces the new revision.
     {
-        let mut s = g.0.inner.lock().unwrap();
+        let mut s = g.0.inner.lock();
         s.editable_mut().running = true;
         assert!(!s.has_cached_editable_digest());
     }
@@ -251,7 +249,7 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
     assert_ne!(v_running, v0);
 
     {
-        let mut s = g.0.inner.lock().unwrap();
+        let mut s = g.0.inner.lock();
         s.editable_mut().home = Some(home);
         assert!(!s.has_cached_editable_digest());
     }
@@ -259,14 +257,14 @@ fn editable_digest_auto_invalidates_on_editable_mutations_and_preserves_cache_on
     assert_ne!(v_home, v_running);
 
     {
-        let mut s = g.0.inner.lock().unwrap();
+        let mut s = g.0.inner.lock();
         s.editable_mut().recovery_error = Some(AppError::new(code::RECOVERY, "fixture"));
         assert!(!s.has_cached_editable_digest());
     }
     let v_err = g.view().revision;
     assert_ne!(v_err, v_home);
     {
-        let s = g.0.inner.lock().unwrap();
+        let s = g.0.inner.lock();
         assert!(s.has_cached_editable_digest());
         assert_eq!(
             s.editable_digest(g.0.client),
@@ -317,7 +315,7 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
     );
     // Steady-state cache hit reuses the same Arc pointers in codex_api_toml and codex_api_auth.
     let (toml_arc_v1, auth_arc_v1) = {
-        let mut vc = codex.0.view_config_cache.lock().unwrap();
+        let mut vc = codex.0.view_config_cache.lock();
         (
             vc.codex_api_toml
                 .1
@@ -333,7 +331,7 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
         v1.config_revision
     );
     {
-        let mut vc = codex.0.view_config_cache.lock().unwrap();
+        let mut vc = codex.0.view_config_cache.lock();
         assert!(Arc::ptr_eq(
             &toml_arc_v1,
             &vc.codex_api_toml
@@ -368,7 +366,7 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
     )
     .unwrap();
     {
-        let mut s = codex.0.inner.lock().unwrap();
+        let mut s = codex.0.inner.lock();
         s.editable_mut().store.connection = codex_api::Connection::ApiKey {
             provider: "relay_b".into(),
         };
@@ -408,7 +406,6 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
         .0
         .view_config_cache
         .lock()
-        .unwrap()
         .grok
         .read(&grok_cfg, |_| panic!("expected grok cache hit"))
         .unwrap();
@@ -422,7 +419,6 @@ fn try_view_config_cache_tracks_codex_api_key_and_grok_edits_and_provider_switch
             .0
             .view_config_cache
             .lock()
-            .unwrap()
             .grok
             .read(&grok_cfg, |_| panic!("expected grok cache hit"))
             .unwrap()

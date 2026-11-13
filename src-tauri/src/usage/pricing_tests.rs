@@ -3,6 +3,7 @@ use super::{
     pricing::{Pricing, View},
 };
 use crate::storage;
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -13,7 +14,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc,
     },
     task::Poll,
     thread::{self, JoinHandle},
@@ -131,7 +132,7 @@ impl SourceFixture {
                 let (mut stream, _) = match listener.accept() {
                     Ok(connection) => connection,
                     Err(error) => {
-                        server_errors.lock().unwrap().push(error.to_string());
+                        server_errors.lock().push(error.to_string());
                         break;
                     }
                 };
@@ -141,22 +142,18 @@ impl SourceFixture {
                 let result = (|| {
                     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-                    server_requests
-                        .lock()
-                        .unwrap()
-                        .push(read_request(&mut stream)?);
+                    server_requests.lock().push(read_request(&mut stream)?);
                     if let Some(receiver) = gate.take() {
                         let _ = receiver.recv();
                     }
                     let reply = server_replies
                         .lock()
-                        .unwrap()
                         .pop_front()
                         .unwrap_or_else(|| Reply::new(500, b"unexpected fixture request".to_vec()));
                     reply.write(&mut stream)
                 })();
                 if let Err(error) = result {
-                    server_errors.lock().unwrap().push(error.to_string());
+                    server_errors.lock().push(error.to_string());
                 }
             }
         });
@@ -188,12 +185,9 @@ impl SourceFixture {
                 path: (*path).into(),
             })
             .collect();
-        assert_eq!(*self.requests.lock().unwrap(), expected);
-        assert!(
-            self.replies.lock().unwrap().is_empty(),
-            "unused fixture responses"
-        );
-        let errors = self.errors.lock().unwrap();
+        assert_eq!(*self.requests.lock(), expected);
+        assert!(self.replies.lock().is_empty(), "unused fixture responses");
+        let errors = self.errors.lock();
         assert!(errors.is_empty(), "fixture errors: {errors:?}");
     }
 }
@@ -726,7 +720,7 @@ async fn auto_update_setting_and_check_interval_control_network_requests() {
     let source = SourceFixture::new(replies);
     let skipped = refresh(&prices, &source, false).await.unwrap();
     assert!(skipped.checked_at.is_none());
-    assert!(source.requests.lock().unwrap().is_empty());
+    assert!(source.requests.lock().is_empty());
     let forced = refresh(&prices, &source, true).await.unwrap();
     assert_eq!(forced.models["fixture-model"], rates("0.000001"));
     let mut config = forced.config.clone();
@@ -735,7 +729,7 @@ async fn auto_update_setting_and_check_interval_control_network_requests() {
     let throttled = refresh(&prices, &source, false).await.unwrap();
     assert_same_prices(&forced, &throttled);
     assert_eq!(throttled.checked_at, forced.checked_at);
-    assert_eq!(source.requests.lock().unwrap().len(), 2);
+    assert_eq!(source.requests.lock().len(), 2);
     drop(prices);
     age_cache(dir.path());
     let prices = Pricing::new(dir.path()).unwrap();

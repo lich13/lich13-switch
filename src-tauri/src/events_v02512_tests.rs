@@ -1,6 +1,7 @@
 use super::{Action, Filter, Journal, Reason, Record, Service};
 use crate::gateway::ClientId;
-use std::sync::{mpsc, Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::{mpsc, Arc};
 use tokio::sync::broadcast;
 
 const PROVIDER: &str = "00000000-0000-0000-0000-000000000001";
@@ -236,7 +237,7 @@ async fn burst_preserves_each_change_merge_notification_and_clear_barrier() {
     let (tx, done) = tokio::sync::oneshot::channel();
     {
         // Hold the published snapshot until the complete burst is queued.
-        let _snapshot = service.journal.lock().unwrap();
+        let _snapshot = service.journal.lock();
         for n in 0..70 {
             let record = Record::new(
                 Some(ClientId::Codex),
@@ -294,7 +295,7 @@ async fn burst_preserves_each_change_merge_notification_and_clear_barrier() {
     let last = changes.recv().await.unwrap().record.unwrap();
     assert_eq!(last.model.as_deref(), Some("after-clear"));
     assert_eq!(service.query(Filter::default()).total, 1);
-    assert!(service.journal.lock().unwrap().aliases.is_empty());
+    assert!(service.journal.lock().aliases.is_empty());
     let restored = Service::new(dir.path());
     assert_eq!(restored.query(Filter::default()).items[0].id, last.id);
     restored.clear().await.unwrap();

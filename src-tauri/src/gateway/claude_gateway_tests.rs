@@ -422,7 +422,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
         async move {
             let (parts, body) = request.into_parts();
             let payload = body.collect().await.unwrap().to_bytes();
-            captured.lock().unwrap().push((
+            captured.lock().push((
                 parts.uri.path_and_query().unwrap().to_string(),
                 parts.headers,
                 payload,
@@ -443,7 +443,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
     )
     .await;
     start_client(&f.claude, &f.claude_home).await;
-    let claude_local_token = f.claude.0.inner.lock().unwrap().store.local_token.clone();
+    let claude_local_token = f.claude.0.inner.lock().store.local_token.clone();
     let payload = br#"{ "model":"claude-fixture", "max_tokens":17, "messages":[{"role":"user","content":"unchanged"}], "metadata":{"fixture":true} }"#.to_vec();
     let response = request(
         &f.claude,
@@ -472,7 +472,7 @@ async fn claude_messages_preserve_deployment_path_query_payload_and_anthropic_he
         reply
     );
     {
-        let captured = seen.lock().unwrap();
+        let captured = seen.lock();
         assert_eq!(captured.len(), 1);
         let (path, headers, actual_payload) = &captured[0];
         assert_eq!(

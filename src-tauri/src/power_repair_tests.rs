@@ -2,11 +2,12 @@
 //! Isolated helper transactions; no native power command or authorization UI runs.
 use super::{Service, State, System};
 use crate::storage::{AppError, Result};
+use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc,
     },
     time::Duration,
 };
@@ -34,13 +35,10 @@ struct MockHelper {
 
 impl MockHelper {
     fn reply(&self, state: State, error: Option<&'static str>) {
-        self.replies
-            .lock()
-            .unwrap()
-            .push_back(Reply { state, error });
+        self.replies.lock().push_back(Reply { state, error });
     }
     fn repair_to(&self, state: State) {
-        *self.repaired.lock().unwrap() = Some(state);
+        *self.repaired.lock() = Some(state);
     }
     fn repair_count(&self) -> usize {
         self.repairs.load(Ordering::SeqCst)
@@ -50,35 +48,33 @@ impl MockHelper {
 impl System for MockHelper {
     fn read(&self) -> Result<State> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        Ok(self.current.lock().unwrap().clone())
+        Ok(self.current.lock().clone())
     }
     fn prepare(&self) -> Result<()> {
         self.repairs.fetch_add(1, Ordering::SeqCst);
-        if let Some(gate) = self.repair_gate.lock().unwrap().take() {
+        if let Some(gate) = self.repair_gate.lock().take() {
             gate.entered.send(()).unwrap();
             gate.release
                 .lock()
-                .unwrap()
                 .recv_timeout(Duration::from_secs(5))
                 .expect("fixture repair was not released");
         }
-        if let Some(code) = *self.repair_error.lock().unwrap() {
+        if let Some(code) = *self.repair_error.lock() {
             return Err(AppError::new(code, "fixture authorization failed"));
         }
-        if let Some(prepared) = self.repaired.lock().unwrap().take() {
-            *self.current.lock().unwrap() = prepared;
+        if let Some(prepared) = self.repaired.lock().take() {
+            *self.current.lock() = prepared;
         }
         Ok(())
     }
     fn apply(&self, enabled: bool) -> Result<State> {
-        self.calls.lock().unwrap().push(enabled);
+        self.calls.lock().push(enabled);
         let reply = self
             .replies
             .lock()
-            .unwrap()
             .pop_front()
             .expect("fixture apply reply");
-        *self.current.lock().unwrap() = reply.state.clone();
+        *self.current.lock() = reply.state.clone();
         reply.error.map_or(Ok(reply.state), |code| {
             Err(AppError::new(code, "fixture helper transaction failed"))
         })
@@ -132,7 +128,7 @@ fn missing_and_needs_repair_authorize_once_then_apply_the_original_intent() {
 
             assert_eq!(service.set(!enabled, &original.revision).unwrap(), actual);
             assert_eq!(helper.repair_count(), 1);
-            assert_eq!(*helper.calls.lock().unwrap(), [!enabled]);
+            assert_eq!(*helper.calls.lock(), [!enabled]);
         }
     }
 }
@@ -143,14 +139,14 @@ fn cancelled_authorization_and_failed_repair_preserve_power() {
         for code in ["POWER_AUTH", "POWER_HELPER"] {
             let original = state(helper_status, false, 7, "fixture-before");
             let (_dir, service, helper) = fixture(original.clone());
-            *helper.repair_error.lock().unwrap() = Some(code);
+            *helper.repair_error.lock() = Some(code);
             assert_eq!(
                 service.set(true, &original.revision).unwrap_err().code,
                 code
             );
             assert_eq!(service.state().unwrap(), original);
             assert_eq!(helper.repair_count(), 1);
-            assert!(helper.calls.lock().unwrap().is_empty());
+            assert!(helper.calls.lock().is_empty());
         }
     }
 }
@@ -165,7 +161,7 @@ fn repair_returning_an_unavailable_helper_never_applies_or_prompts_twice() {
         "POWER_HELPER"
     );
     assert_eq!(helper.repair_count(), 1);
-    assert!(helper.calls.lock().unwrap().is_empty());
+    assert!(helper.calls.lock().is_empty());
 }
 
 #[test]
@@ -187,7 +183,7 @@ fn external_power_changes_during_repair_stop_before_apply() {
         );
         assert_eq!(service.state().unwrap(), prepared);
         assert_eq!(helper.repair_count(), 1);
-        assert!(helper.calls.lock().unwrap().is_empty());
+        assert!(helper.calls.lock().is_empty());
     }
 }
 
@@ -201,7 +197,7 @@ fn duplicate_click_during_authorization_is_busy_without_another_repair() {
     helper.reply(actual.clone(), None);
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    *helper.repair_gate.lock().unwrap() = Some(RepairGate {
+    *helper.repair_gate.lock() = Some(RepairGate {
         entered: entered_tx,
         release: Mutex::new(release_rx),
     });
@@ -216,7 +212,7 @@ fn duplicate_click_during_authorization_is_busy_without_another_repair() {
     assert_eq!(duplicate.unwrap_err().code, "BUSY");
     assert_eq!(result.unwrap(), actual);
     assert_eq!(helper.repair_count(), 1);
-    assert_eq!(helper.calls.lock().unwrap().len(), 1);
+    assert_eq!(helper.calls.lock().len(), 1);
 }
 
 #[test]
@@ -228,7 +224,7 @@ fn ready_helper_is_reused_without_authorization() {
     assert_eq!(service.set(true, &original.revision).unwrap(), actual);
     assert_eq!(helper.repair_count(), 0);
     assert_eq!(helper.reads.load(Ordering::SeqCst), 1);
-    assert_eq!(*helper.calls.lock().unwrap(), [true]);
+    assert_eq!(*helper.calls.lock(), [true]);
 }
 
 #[test]
@@ -250,7 +246,7 @@ fn apply_errors_are_returned_without_retry_or_rollback() {
         );
         assert_eq!(service.state().unwrap(), external);
         assert_eq!(helper.repair_count(), 0);
-        assert_eq!(*helper.calls.lock().unwrap(), [true]);
+        assert_eq!(*helper.calls.lock(), [true]);
     }
 }
 
@@ -262,7 +258,7 @@ fn disable_if_enabled_turns_off_active_clamshell_and_repairs_when_needed() {
     helper.reply(disabled.clone(), None);
 
     assert_eq!(service.disable_if_enabled(|| true).unwrap(), Some(disabled));
-    assert_eq!(*helper.calls.lock().unwrap(), [false]);
+    assert_eq!(*helper.calls.lock(), [false]);
     assert_eq!(helper.repair_count(), 0);
 
     assert_eq!(service.disable_if_enabled(|| true).unwrap(), None);
@@ -280,7 +276,7 @@ fn disable_if_enabled_turns_off_active_clamshell_and_repairs_when_needed() {
                 .enabled
         );
         assert_eq!(helper.repair_count(), 1);
-        assert_eq!(helper.calls.lock().unwrap().len(), 1);
+        assert_eq!(helper.calls.lock().len(), 1);
     }
 }
 
@@ -307,12 +303,12 @@ fn automatic_close_keeps_cancelled_and_failed_authorization_available_for_manual
     for code in ["POWER_AUTH", "POWER_HELPER"] {
         let initial = state("missing", true, 0, "fixture-initial");
         let (_dir, service, helper) = fixture(initial.clone());
-        *helper.repair_error.lock().unwrap() = Some(code);
+        *helper.repair_error.lock() = Some(code);
         assert_eq!(service.disable_if_enabled(|| true).unwrap_err().code, code);
         assert_eq!(service.state().unwrap(), initial);
         assert_eq!(helper.repair_count(), 1);
-        assert!(helper.calls.lock().unwrap().is_empty());
-        *helper.repair_error.lock().unwrap() = None;
+        assert!(helper.calls.lock().is_empty());
+        *helper.repair_error.lock() = None;
         helper.repair_to(state("ready", true, 0, "fixture-repaired"));
         helper.reply(state("ready", false, 5, "fixture-disabled"), None);
         assert!(!service.set(false, &initial.revision).unwrap().enabled);
@@ -332,7 +328,7 @@ fn thawing_during_authorization_prevents_automatic_close() {
         .is_none());
     assert_eq!(service.state().unwrap(), prepared);
     assert_eq!(helper.repair_count(), 1);
-    assert!(helper.calls.lock().unwrap().is_empty());
+    assert!(helper.calls.lock().is_empty());
 }
 
 #[test]

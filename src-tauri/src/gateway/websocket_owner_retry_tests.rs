@@ -64,7 +64,7 @@ async fn settled(gateway: &Gateway) {
 
 async fn responses_client(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     yawc::WebSocket::connect(

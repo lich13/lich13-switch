@@ -6,11 +6,12 @@ use futures_util::{stream, SinkExt, StreamExt};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use std::{
     convert::Infallible,
     future::Future,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -42,14 +43,14 @@ struct TaskScope(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
 
 impl TaskScope {
     fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         if !state.0 {
             state.1.push(tokio::spawn(future));
         }
     }
 
     fn close(&self) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         state.0 = true;
         for task in state.1.drain(..) {
             task.abort();
@@ -170,7 +171,7 @@ impl Fixture {
     }
 
     fn local_token(&self, gateway: &Gateway) -> String {
-        gateway.0.inner.lock().unwrap().store.local_token.clone()
+        gateway.0.inner.lock().store.local_token.clone()
     }
 }
 
@@ -237,7 +238,7 @@ fn auth(headers: &hyper::HeaderMap) -> Option<String> {
 }
 
 fn recorded(seen: &Arc<Mutex<Vec<SeenRequest>>>) -> Vec<SeenRequest> {
-    seen.lock().unwrap().clone()
+    seen.lock().clone()
 }
 
 type Sender = hyper::client::conn::http1::SendRequest<super::replay::WireBody>;
@@ -293,7 +294,7 @@ async fn response_bytes(response: Response<Incoming>) -> Vec<u8> {
 
 async fn one_request(gateway: &Gateway, path: &str, body: &[u8]) -> (StatusCode, Vec<u8>) {
     let port = gateway.listener_view().port;
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let (mut sender, task) = connection(port).await;
     let response = tokio::time::timeout(WAIT, send(&mut sender, port, path, &token, body, None))
         .await
@@ -355,7 +356,7 @@ async fn shared_tcp_connection_reuses_client_auth_and_preserves_request_and_sse_
         async move {
             let (parts, body) = request.into_parts();
             let body = body.collect().await.unwrap().to_bytes().to_vec();
-            seen.lock().unwrap().push(SeenRequest {
+            seen.lock().push(SeenRequest {
                 path_and_query: parts
                     .uri
                     .path_and_query()
@@ -490,7 +491,7 @@ async fn stopping_claude_cancels_an_incomplete_upload_and_keeps_codex_live() {
         async move {
             let (parts, body) = request.into_parts();
             let body = body.collect().await.unwrap().to_bytes().to_vec();
-            seen.lock().unwrap().push(SeenRequest {
+            seen.lock().push(SeenRequest {
                 path_and_query: parts
                     .uri
                     .path_and_query()
@@ -574,7 +575,7 @@ async fn stopping_claude_cancels_first_byte_wait_while_codex_keeps_serving() {
                 .path_and_query()
                 .map(|value| value.as_str().to_owned())
                 .unwrap_or_default();
-            seen.lock().unwrap().push(SeenRequest {
+            seen.lock().push(SeenRequest {
                 path_and_query: path.clone(),
                 body,
                 authorization: auth(&parts.headers),
@@ -696,7 +697,7 @@ async fn stopping_claude_closes_its_active_websocket_and_keeps_codex_live() {
                     }
                     closed.notify_one();
                 });
-                seen.lock().unwrap().push(SeenRequest {
+                seen.lock().push(SeenRequest {
                     path_and_query: request
                         .uri()
                         .path_and_query()
@@ -709,7 +710,7 @@ async fn stopping_claude_closes_its_active_websocket_and_keeps_codex_live() {
             } else {
                 let (parts, body) = request.into_parts();
                 let body = body.collect().await.unwrap().to_bytes().to_vec();
-                seen.lock().unwrap().push(SeenRequest {
+                seen.lock().push(SeenRequest {
                     path_and_query: parts
                         .uri
                         .path_and_query()

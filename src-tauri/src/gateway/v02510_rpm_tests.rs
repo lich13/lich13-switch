@@ -18,13 +18,14 @@ use hyper_util::{
     client::legacy::Client,
     rt::{TokioExecutor, TokioIo},
 };
+use parking_lot::Mutex;
 use serde_json::json;
 use std::{
     fs,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant as StdInstant},
 };
@@ -148,7 +149,7 @@ async fn http_loopback(fail_first: bool) -> HttpLoopback {
                                             .map(|bytes| bytes.to_bytes().to_vec())
                                             .unwrap_or_default();
                                         let attempt = {
-                                            let mut seen = shared.lock().unwrap();
+                                            let mut seen = shared.lock();
                                             let attempt = seen.len();
                                             seen.push((StdInstant::now(), body));
                                             attempt
@@ -255,7 +256,7 @@ async fn native_ws_loopback() -> NativeWsLoopback {
                                         if !is_create {
                                             continue;
                                         }
-                                        seen.lock().unwrap().push((StdInstant::now(), payload));
+                                        seen.lock().push((StdInstant::now(), payload));
                                         if socket.send(yawc::Frame::text(NATIVE_CREATED.to_owned())).await.is_err() {
                                             break;
                                         }
@@ -426,7 +427,7 @@ async fn gateway_http_request(gateway: &Gateway, body: Vec<u8>) -> (StatusCode, 
     let client: Client<Connector, WireBody> =
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let request = Request::builder()
@@ -444,7 +445,7 @@ async fn gateway_http_request(gateway: &Gateway, body: Vec<u8>) -> (StatusCode, 
 
 async fn gateway_ws_client(gateway: &Gateway) -> yawc::TcpWebSocket {
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     yawc::WebSocket::connect(
@@ -598,7 +599,7 @@ async fn rpm_waiters_resume_fifo_when_the_window_clears() {
                 .acquire(std::slice::from_ref(&route_copy), false, 8, &mut budget)
                 .await;
             if result.is_ok() {
-                order.lock().unwrap().push(index);
+                order.lock().push(index);
             }
             result
         }));
@@ -620,7 +621,7 @@ async fn rpm_waiters_resume_fifo_when_the_window_clears() {
         waiters.iter().all(|waiter| waiter.is_finished()),
         "both waiters should resume without another RPM interval"
     );
-    assert_eq!(*order.lock().unwrap(), [1, 2]);
+    assert_eq!(*order.lock(), [1, 2]);
     for waiter in waiters {
         let mut admission = waiter.await.unwrap().expect("FIFO admission");
         admission.commit_rpm();
@@ -891,7 +892,7 @@ async fn http_retry_and_concurrent_requests_use_available_rolling_budget() {
     assert_eq!(first.1, Bytes::from_static(br#"{"ok":true}"#));
     assert_eq!(second.1, Bytes::from_static(br#"{"ok":true}"#));
 
-    let seen = upstream.seen.lock().unwrap().clone();
+    let seen = upstream.seen.lock().clone();
     assert_eq!(seen.len(), 3, "one retry plus the concurrent request");
     assert!(seen.iter().all(|(_, bytes)| bytes == &body));
     let mut times: Vec<_> = seen.iter().map(|(at, _)| *at).collect();
@@ -927,7 +928,7 @@ async fn native_websocket_two_rounds_reuse_one_handshake_and_preserve_request_by
             .contains("response.completed"));
     }
 
-    let seen = upstream.seen.lock().unwrap().clone();
+    let seen = upstream.seen.lock().clone();
     assert_eq!(upstream.connections.load(Ordering::SeqCst), 1);
     assert_eq!(seen.len(), 2);
     assert!(seen

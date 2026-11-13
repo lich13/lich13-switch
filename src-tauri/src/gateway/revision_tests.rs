@@ -43,14 +43,14 @@ async fn resume_checkpoints_do_not_invalidate_editors_for_either_client() {
         let revision = g.view().revision;
         assert_ne!(revision, stopped);
         let live = std::fs::read(&config).unwrap();
-        let providers = g.0.inner.lock().unwrap().store.providers.clone();
-        let file_revision = g.0.inner.lock().unwrap().revision.clone();
+        let providers = g.0.inner.lock().store.providers.clone();
+        let file_revision = g.0.inner.lock().revision.clone();
         for p in [&providers[1], &providers[0], &providers[1]] {
             g.successful_response(p);
             assert_eq!(g.view().revision, revision);
             assert_eq!(std::fs::read(&config).unwrap(), live);
         }
-        assert_ne!(g.0.inner.lock().unwrap().revision, file_revision);
+        assert_ne!(g.0.inner.lock().revision, file_revision);
         let peer = if g.0.client == ClientId::Codex {
             &claude
         } else {
@@ -170,9 +170,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
     let (dir, gateway) = fixture(vec!["https://api.example.invalid/v1".into()]).await;
     let initial = gateway.view();
     let id = initial.providers[0].id.clone();
-    let version = gateway.0.inner.lock().unwrap().store.providers[0]
-        .version
-        .clone();
+    let version = gateway.0.inner.lock().store.providers[0].version.clone();
     let edit = |base: &str, role: Option<bool>| Edit::SaveProvider {
         id: Some(id.clone()),
         base_url: base.into(),
@@ -200,7 +198,7 @@ async fn api_edit_saves_search_policy_atomically_with_credentials_and_revision()
         "https://changed.example.invalid/v1"
     );
     {
-        let inner = gateway.0.inner.lock().unwrap();
+        let inner = gateway.0.inner.lock();
         assert_ne!(inner.store.providers[0].version, version);
         assert_eq!(inner.store.providers[0].token, "fixture-rotated");
     }

@@ -3,11 +3,9 @@ use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 #[cfg(not(target_os = "macos"))]
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
+use parking_lot::Mutex;
 use serde::Serialize;
-use std::{
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::path::{Path, PathBuf};
 pub const LOGIN_ARG: &str = "--vela-login-startup";
 pub fn is_login_argument(arg: &str) -> bool {
     arg == LOGIN_ARG
@@ -27,13 +25,13 @@ impl Service {
         }
     }
     pub fn view(&self) -> Result<View> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock();
         Ok(View {
             launch_on_boot: registered()?,
         })
     }
     pub fn update(&self, enabled: bool) -> Result<View> {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock();
         register(enabled)?;
         Ok(View {
             launch_on_boot: enabled,

@@ -7,13 +7,9 @@ use crate::gateway::compaction::Registry;
 use futures_util::{SinkExt, StreamExt};
 use hyper::{body::Incoming, Request, Response};
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    convert::Infallible,
-    future::Future,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 const OLD: &str = "old";
 const NEW: &str = "new";
@@ -64,7 +60,7 @@ async fn native_endpoint(name: &'static str) -> (u16, Arc<Mutex<Vec<Vec<u8>>>>) 
                         continue;
                     }
                     let bytes = frame.payload().to_vec();
-                    captured.lock().unwrap().push(bytes);
+                    captured.lock().push(bytes);
                     let event = json!({
                         "type": "response.completed",
                         "response": {
@@ -185,7 +181,7 @@ async fn websocket_later_turn_uses_ledger_owner_after_external_handoff() {
     let new_id = provider_ids[1].clone();
     start(&gateway, &dir).await;
 
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!(
             "ws://127.0.0.1:{}/v1/responses",
@@ -207,7 +203,7 @@ async fn websocket_later_turn_uses_ledger_owner_after_external_handoff() {
         ws_turn(&mut peer, ordinary).await["response"]["provider"],
         OLD
     );
-    assert_eq!(old_seen.lock().unwrap().len(), 1);
+    assert_eq!(old_seen.lock().len(), 1);
 
     // Construct a legal boundary handoff in the ledger while the existing
     // native connection remains open.  The next turn has no cursor and must
@@ -245,9 +241,9 @@ async fn websocket_later_turn_uses_ledger_owner_after_external_handoff() {
         gateway.0.compaction.owner(&session).as_deref(),
         Some(new_id.as_str())
     );
-    assert_eq!(old_seen.lock().unwrap().len(), 1);
-    assert_eq!(new_seen.lock().unwrap().len(), 1);
-    assert_eq!(new_seen.lock().unwrap()[0], ordinary.as_bytes());
+    assert_eq!(old_seen.lock().len(), 1);
+    assert_eq!(new_seen.lock().len(), 1);
+    assert_eq!(new_seen.lock()[0], ordinary.as_bytes());
 
     drop(peer);
     gateway.stop().await.unwrap();

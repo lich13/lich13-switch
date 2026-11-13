@@ -16,6 +16,7 @@ use hyper::{
     Request, Response,
 };
 use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioIo};
+use parking_lot::Mutex;
 use serde_json::json;
 use std::{
     convert::Infallible,
@@ -23,7 +24,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -43,14 +44,14 @@ struct TaskScope(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
 
 impl TaskScope {
     fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         if !state.0 {
             state.1.push(tokio::spawn(future));
         }
     }
 
     fn close(&self) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         state.0 = true;
         for task in state.1.drain(..) {
             task.abort();
@@ -205,7 +206,7 @@ impl Fixture {
 async fn request(gateway: &Gateway, path: &str, body: &[u8]) -> Response<Incoming> {
     let client: HttpClient =
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let request = Request::builder()
         .method("POST")
         .uri(format!(
@@ -287,7 +288,7 @@ async fn settled(check: impl Fn() -> bool) {
 }
 
 async fn websocket(gateway: &Gateway) -> yawc::TcpWebSocket {
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     tokio::time::timeout(
         WAIT,
         yawc::WebSocket::connect(
@@ -399,15 +400,7 @@ async fn freeze_drains_http_and_releases_only_connected_requests() {
     });
     settled(|| gate.view().queued == 1).await;
     let port = fixture.gateway.view().settings.port;
-    let token = fixture
-        .gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .store
-        .local_token
-        .clone();
+    let token = fixture.gateway.0.inner.lock().store.local_token.clone();
     let mut cancelled = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
@@ -550,10 +543,7 @@ async fn http_usage_preserves_request_and_response_bytes() {
         async move {
             let (parts, body) = request.into_parts();
             let bytes = body.collect().await.unwrap().to_bytes();
-            observed
-                .lock()
-                .unwrap()
-                .push((parts.uri.to_string(), bytes));
+            observed.lock().push((parts.uri.to_string(), bytes));
             Response::builder()
                 .header("content-type", "application/json")
                 .header("x-fixture", "preserved")
@@ -574,7 +564,7 @@ async fn http_usage_preserves_request_and_response_bytes() {
     assert_eq!(response.headers()["x-fixture"], "preserved");
     assert_eq!(response_bytes(response).await.as_ref(), HTTP_RESPONSE);
     assert_eq!(
-        *seen.lock().unwrap(),
+        *seen.lock(),
         vec![(
             "/v1/responses?item=1&item=2".into(),
             Bytes::from_static(HTTP_REQUEST)
@@ -655,7 +645,7 @@ async fn search_usage_case(path: &str, status: u16, with_tokens: bool) {
         let payload = response_payload.clone();
         async move {
             let body = request.into_body().collect().await.unwrap().to_bytes();
-            observed.lock().unwrap().push(body);
+            observed.lock().push(body);
             Response::builder()
                 .status(status)
                 .header("content-type", "application/json")
@@ -682,10 +672,7 @@ async fn search_usage_case(path: &str, status: u16, with_tokens: bool) {
     let response = request(&fixture.gateway, path, SEARCH_REQUEST).await;
     assert_eq!(response.status().as_u16(), status, "{path}");
     assert_eq!(response_bytes(response).await.as_ref(), expected_response);
-    assert_eq!(
-        *seen.lock().unwrap(),
-        vec![Bytes::from_static(SEARCH_REQUEST)]
-    );
+    assert_eq!(*seen.lock(), vec![Bytes::from_static(SEARCH_REQUEST)]);
     let rows = recorded(&fixture.usage, 1).await;
     let row = &rows[0];
     assert_eq!(row.client, "codex");
@@ -740,10 +727,7 @@ async fn claude_sse_preserves_wire_bytes_and_normalizes_cache_usage() {
         async move {
             let (parts, body) = request.into_parts();
             let bytes = body.collect().await.unwrap().to_bytes();
-            observed
-                .lock()
-                .unwrap()
-                .push((parts.uri.to_string(), bytes));
+            observed.lock().push((parts.uri.to_string(), bytes));
             Response::builder()
                 .header("content-type", "text/event-stream; charset=utf-8")
                 .header("x-fixture", "sse-preserved")
@@ -763,7 +747,7 @@ async fn claude_sse_preserves_wire_bytes_and_normalizes_cache_usage() {
     assert_eq!(response.headers()["x-fixture"], "sse-preserved");
     assert_eq!(response_bytes(response).await.as_ref(), sse.as_bytes());
     assert_eq!(
-        *seen.lock().unwrap(),
+        *seen.lock(),
         vec![(
             "/deployment/v1/messages?beta=fixture".into(),
             Bytes::from_static(body)
@@ -811,7 +795,7 @@ async fn failed_provider_then_success_keeps_two_attempts_in_one_record() {
         let first_seen = first_seen.clone();
         async move {
             let body = request.into_body().collect().await.unwrap().to_bytes();
-            first_seen.lock().unwrap().push(("P1", body));
+            first_seen.lock().push(("P1", body));
             Response::builder()
                 .status(503)
                 .header("content-type", "application/json")
@@ -827,7 +811,7 @@ async fn failed_provider_then_success_keeps_two_attempts_in_one_record() {
         let second_seen = second_seen.clone();
         async move {
             let body = request.into_body().collect().await.unwrap().to_bytes();
-            second_seen.lock().unwrap().push(("P2", body));
+            second_seen.lock().push(("P2", body));
             Response::builder()
                 .header("content-type", "application/json")
                 .body(full(HTTP_RESPONSE))
@@ -851,7 +835,7 @@ async fn failed_provider_then_success_keeps_two_attempts_in_one_record() {
     assert_eq!(response.status(), 200);
     assert_eq!(response_bytes(response).await.as_ref(), HTTP_RESPONSE);
     assert_eq!(
-        *seen.lock().unwrap(),
+        *seen.lock(),
         vec![
             ("P1", Bytes::from_static(HTTP_REQUEST)),
             ("P2", Bytes::from_static(HTTP_REQUEST))
@@ -921,7 +905,7 @@ async fn responses_websocket_records_each_turn_without_idle_records() {
                     if frame.opcode().is_control() {
                         continue;
                     }
-                    observed.lock().unwrap().push(frame.payload().to_vec());
+                    observed.lock().push(frame.payload().to_vec());
                     turn += 1;
                     socket.send(yawc::Frame::text(WS_DELTA)).await.unwrap();
                     socket
@@ -984,7 +968,7 @@ async fn responses_websocket_records_each_turn_without_idle_records() {
         settled(|| fixture.gateway.view().providers[0].active_requests == 0).await;
         no_new_records(&fixture.usage, turn as usize).await;
     }
-    assert_eq!(*seen.lock().unwrap(), sent);
+    assert_eq!(*seen.lock(), sent);
     drop(socket);
     fixture.stop().await;
     no_new_records(&fixture.usage, 2).await;

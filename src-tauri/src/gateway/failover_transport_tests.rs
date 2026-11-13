@@ -216,7 +216,7 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
         let captured = captured.clone();
         async move {
             let body = req.into_body().collect().await.unwrap().to_bytes();
-            captured.lock().unwrap().push((0, body));
+            captured.lock().push((0, body));
             Response::builder()
                 .status(502)
                 .header("x-upstream", "failed")
@@ -231,7 +231,7 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
         let captured = captured.clone();
         async move {
             let body = req.into_body().collect().await.unwrap().to_bytes();
-            captured.lock().unwrap().push((1, body));
+            captured.lock().push((1, body));
             Response::builder()
                 .header("content-type", "application/json")
                 .header("x-upstream", "final")
@@ -273,7 +273,7 @@ async fn failover_preserves_requests_returns_final_response_and_releases_both_sl
     );
     settle(&g).await;
     assert_eq!(
-        seen.lock().unwrap().as_slice(),
+        seen.lock().as_slice(),
         &[(0, Bytes::from(req.clone())), (1, Bytes::from(req))]
     );
     let view = g.view();

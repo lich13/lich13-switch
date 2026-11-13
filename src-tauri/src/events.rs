@@ -12,12 +12,13 @@ pub use details::{
     QuotaBasis, QuotaCheck, QuotaSource, QuotaVerdict, RoutingDetails, RoutingOutcome,
     RpmWaitReason,
 };
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
     io::{BufRead, BufReader},
     path::Path,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, oneshot};
@@ -975,7 +976,7 @@ impl Service {
             // Retention also runs after restart, before processing queued writes.
             {
                 let startup = {
-                    let mut initial = j.lock().unwrap();
+                    let mut initial = j.lock();
                     (initial.error.is_none() && path.exists()).then(|| {
                         let snapshot = initial.prepare_rewrite(&path, false);
                         let retained = initial.retained_raw_ids();
@@ -992,7 +993,7 @@ impl Service {
                     } else {
                         Ok(())
                     };
-                    let mut initial = j.lock().unwrap();
+                    let mut initial = j.lock();
                     if written.is_err() {
                         initial.error = Some("日志写入失败，请检查文件权限与空间".into());
                     } else {
@@ -1016,7 +1017,7 @@ impl Service {
                     },
                 };
                 if matches!(&job, Job::Prune) {
-                    let mut current = j.lock().unwrap();
+                    let mut current = j.lock();
                     if !current.needs_write(&path) {
                         if prune_raw(&raw_path, &current).is_err() {
                             current.error = Some("日志原文清理失败，请重试".into());
@@ -1037,7 +1038,7 @@ impl Service {
                         Ok(())
                     };
                     let error = {
-                        let mut current = j.lock().unwrap();
+                        let mut current = j.lock();
                         if result.is_ok() {
                             current.records.clear();
                             current.aliases.clear();
@@ -1101,7 +1102,7 @@ impl Service {
                             }
                             notify = r.reason.notifiable(r.action);
                             let outcome = {
-                                let mut journal = j.lock().unwrap();
+                                let mut journal = j.lock();
                                 resolve_cause_id(
                                     &mut r,
                                     &journal.aliases,
@@ -1153,7 +1154,7 @@ impl Service {
                                             reference.incomplete = Some("错误原文保存失败".into());
                                         }
                                     }
-                                    let mut journal = j.lock().unwrap();
+                                    let mut journal = j.lock();
                                     if raw_failed {
                                         journal.error =
                                             Some("错误原文保存失败，请检查文件权限与空间".into());
@@ -1164,7 +1165,7 @@ impl Service {
                             }
                         }
                         Job::NotificationAccepted(id) => {
-                            let mut journal = j.lock().unwrap();
+                            let mut journal = j.lock();
                             if let Some(r_arc) = journal.records.iter_mut().find(|r| r.id == id) {
                                 let r = Arc::make_mut(r_arc);
                                 r.notified_at = now();
@@ -1176,7 +1177,7 @@ impl Service {
                     changes.push((changed, notify));
                 }
                 let (snapshot, retained_raw_ids) = {
-                    let mut journal = j.lock().unwrap();
+                    let mut journal = j.lock();
                     let before_retention = journal.records.len();
                     append_only &= !journal.needs_write(&path);
                     let snapshot = if append_only {
@@ -1209,7 +1210,7 @@ impl Service {
                     Ok(())
                 };
                 let error = {
-                    let mut journal = j.lock().unwrap();
+                    let mut journal = j.lock();
                     if result.is_ok() {
                         if snapshot.is_some() {
                             journal.dirty = false;
@@ -1254,7 +1255,7 @@ impl Service {
         }
         r.details = r.details.sanitized();
         if self.sender.try_send(Job::Append(Box::new(r))).is_err() {
-            let mut j = self.journal.lock().unwrap();
+            let mut j = self.journal.lock();
             j.error = Some("日志队列已满，部分事件未记录".into());
             let _ = self.events.send(Change {
                 record: None,
@@ -1270,7 +1271,7 @@ impl Service {
         let _ = self.sender.try_send(Job::NotificationAccepted(id));
     }
     pub fn query(&self, f: Filter) -> Page {
-        let j = self.journal.lock().unwrap();
+        let j = self.journal.lock();
         let cutoff = now().saturating_sub(RETENTION);
         let causes = j.circuit_causes(cutoff);
         let mut rows: Vec<_> = j
@@ -1313,7 +1314,7 @@ impl Service {
     }
     pub fn sync_antigravity_logs(&self, home: &Path) {
         let cutoff = now().saturating_sub(RETENTION);
-        let mut cursors = self.antigravity_cursors.lock().unwrap();
+        let mut cursors = self.antigravity_cursors.lock();
         let mut discovered = Vec::new();
         let brain = home.join(".gemini/antigravity/brain");
         if let Ok(entries) = std::fs::read_dir(&brain) {
@@ -1444,7 +1445,7 @@ impl Service {
         }
         drop(cursors);
         if !discovered.is_empty() {
-            let mut guard = self.journal.lock().unwrap();
+            let mut guard = self.journal.lock();
             let mut added = false;
             for r in discovered {
                 if !guard.records.iter().any(|existing| existing.id == r.id) {
@@ -1459,7 +1460,7 @@ impl Service {
         }
     }
     pub fn detail(&self, id: &str) -> Option<ClassifiedRecord> {
-        let journal = self.journal.lock().unwrap();
+        let journal = self.journal.lock();
         let cutoff = now().saturating_sub(RETENTION);
         let causes = journal.circuit_causes(cutoff);
         let target = journal
@@ -1754,19 +1755,14 @@ mod routing_visibility_tests {
             .failure
             .is_some()));
         let service = Service::new(dir.path());
-        *service.journal.lock().unwrap() = loaded;
+        *service.journal.lock() = loaded;
         assert_eq!(service.query(Filter::default()).total, 5);
         // Query/count also defend against routine records still held in memory.
-        let mut routine = (*service.journal.lock().unwrap().records[0]).clone();
+        let mut routine = (*service.journal.lock().records[0]).clone();
         routine.id = uuid::Uuid::new_v4().to_string();
         routine.details.routing.as_mut().unwrap().failure = None;
         let id = routine.id.clone();
-        service
-            .journal
-            .lock()
-            .unwrap()
-            .records
-            .push_back(Arc::new(routine));
+        service.journal.lock().records.push_back(Arc::new(routine));
         assert_eq!(
             service
                 .query(Filter {
@@ -1799,7 +1795,7 @@ mod routing_visibility_tests {
         rx.recv().await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
 
-        service.journal.lock().unwrap().error = Some("fixture attachment warning".into());
+        service.journal.lock().error = Some("fixture attachment warning".into());
         // Keep a handle to the old file: append updates it, atomic replacement does not.
         let mut original = std::fs::File::open(&path).unwrap();
 

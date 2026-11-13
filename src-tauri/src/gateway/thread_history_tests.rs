@@ -18,11 +18,9 @@ use hyper::{
     Request, Response,
 };
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 const WINDOW: &str = "fixture-v0211-window";
 
@@ -67,7 +65,7 @@ async fn request_with_headers(
         super::super::connector::Connector::new(Duration::from_secs(2), 0),
     );
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let mut request = Request::builder()
@@ -594,7 +592,7 @@ async fn compaction_endpoint(name: &'static str) -> (u16, Arc<Mutex<Vec<Vec<u8>>
                 .unwrap()
                 .to_bytes()
                 .to_vec();
-            captured.lock().unwrap().push(bytes);
+            captured.lock().push(bytes);
             let output = if compact {
                 json!([{"type":"compaction","encrypted_content":WINDOW}])
             } else {
@@ -652,8 +650,8 @@ async fn v0211_http_window_handoff_uses_new_thread_header_and_preserves_bytes() 
     let handed = request_with_headers(&gateway, "/v1/responses", window.clone(), &headers).await;
     assert_eq!(handed.status(), 200);
     assert_eq!(response_value(handed).await["provider"], "new");
-    assert_eq!(new_seen.lock().unwrap().last(), Some(&window));
-    assert!(old_seen.lock().unwrap().len() >= 2);
+    assert_eq!(new_seen.lock().last(), Some(&window));
+    assert!(old_seen.lock().len() >= 2);
     gateway.stop().await.unwrap();
 }
 
@@ -677,7 +675,7 @@ async fn native_endpoint(name: &'static str) -> (u16, Arc<Mutex<Vec<Vec<u8>>>>) 
                     }
                     let payload = frame.payload().to_vec();
                     let value: Value = serde_json::from_slice(&payload).unwrap();
-                    captured.lock().unwrap().push(payload);
+                    captured.lock().push(payload);
                     let compact = value["input"].as_array().is_some_and(|items| {
                         items
                             .iter()
@@ -736,7 +734,7 @@ async fn v0211_native_ws_reuses_thread_identity_across_turns_and_hands_off_once(
     automatic(&gateway, &dir);
     enable_takeover(&gateway, &dir);
     start(&gateway, &dir).await;
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!(
             "ws://127.0.0.1:{}/v1/responses",
@@ -792,9 +790,9 @@ async fn v0211_native_ws_reuses_thread_identity_across_turns_and_hands_off_once(
         "new"
     );
     wait_settled(&gateway).await;
-    assert_eq!(old_seen.lock().unwrap().len(), 3);
+    assert_eq!(old_seen.lock().len(), 3);
     assert_eq!(
-        new_seen.lock().unwrap().last().map(Vec::as_slice),
+        new_seen.lock().last().map(Vec::as_slice),
         Some(window.as_bytes())
     );
 

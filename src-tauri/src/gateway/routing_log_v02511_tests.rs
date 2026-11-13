@@ -180,7 +180,7 @@ fn normal_length_limited_continuation_settles_as_preserved_instead_of_failed() {
     protocol.delivery().handed(payload.len(), true);
     protocol.finish(Some(200), crate::errors::code::OK);
     drop(protocol);
-    let record = log.state.lock().unwrap().record.clone().unwrap();
+    let record = log.state.lock().record.clone().unwrap();
     assert_eq!(
         record.details.routing.unwrap().outcome,
         RoutingOutcome::OwnerPreserved

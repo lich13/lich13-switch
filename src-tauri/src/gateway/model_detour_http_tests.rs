@@ -7,11 +7,12 @@ use hyper::{
     body::{Frame, Incoming},
     Request, Response, StatusCode,
 };
+use parking_lot::Mutex;
 use serde_json::json;
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -207,7 +208,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         let seen = main_seen.clone();
         async move {
             let body = v0255_body(request).await;
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             super::v022_sse_response(Bytes::from_static(V0255_MAIN_RESPONSE))
         }
     })
@@ -224,7 +225,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         let release = side_release.clone();
         async move {
             let body = v0255_body(request).await;
-            seen.lock().unwrap().push(body.clone());
+            seen.lock().push(body.clone());
             if body.as_slice() == V0255_SIDE_ONE || body.as_slice() == V0255_SIDE_TWO {
                 arrived.send(body.clone()).unwrap();
                 let _permit = release.acquire_owned().await.unwrap();
@@ -256,10 +257,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         Bytes::from_static(V0255_MAIN_RESPONSE),
         "initial main SSE bytes must pass through unchanged"
     );
-    assert_eq!(
-        *main_requests.lock().unwrap(),
-        vec![V0255_MAIN_INITIAL.to_vec()]
-    );
+    assert_eq!(*main_requests.lock(), vec![V0255_MAIN_INITIAL.to_vec()]);
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),
         Some(ids[0].clone())
@@ -358,7 +356,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
     );
 
     assert_eq!(
-        *main_requests.lock().unwrap(),
+        *main_requests.lock(),
         vec![
             V0255_MAIN_INITIAL.to_vec(),
             V0255_MAIN_DURING.to_vec(),
@@ -366,7 +364,7 @@ async fn v0255_http_parallel_side_models_preserve_owner_during_and_after_complet
         ],
         "all main-model request bytes must stay on A"
     );
-    let mut observed_side = side_requests.lock().unwrap().clone();
+    let mut observed_side = side_requests.lock().clone();
     observed_side.sort();
     assert_eq!(observed_side, expected_side_requests);
 
@@ -401,7 +399,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         let seen = main_seen.clone();
         async move {
             let body = v0255_body(request).await;
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             super::v022_sse_response(Bytes::from_static(V0255_MAIN_RESPONSE))
         }
     })
@@ -422,7 +420,7 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         let cancelled = cancelled_signal.clone();
         async move {
             let body = v0255_body(request).await;
-            seen.lock().unwrap().push(body.clone());
+            seen.lock().push(body.clone());
             if body.as_slice() == V0255_FAIL_RETRY_REQUEST {
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     super::v022_json_response(StatusCode::BAD_REQUEST, V0255_FAILURE_RESPONSE)
@@ -520,12 +518,9 @@ async fn v0255_http_failure_client_retry_and_cancel_leave_owner_reservation_unch
         Some(ids[0].clone())
     );
 
+    assert_eq!(*main_requests.lock(), vec![V0255_MAIN_INITIAL.to_vec()]);
     assert_eq!(
-        *main_requests.lock().unwrap(),
-        vec![V0255_MAIN_INITIAL.to_vec()]
-    );
-    assert_eq!(
-        *side_requests.lock().unwrap(),
+        *side_requests.lock(),
         vec![
             V0255_FAIL_RETRY_REQUEST.to_vec(),
             V0255_FAIL_RETRY_REQUEST.to_vec(),
@@ -544,7 +539,7 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
         let seen = main_seen.clone();
         async move {
             let body = v0255_body(request).await;
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             super::v022_sse_response(Bytes::from_static(V0255_MAIN_RESPONSE))
         }
     })
@@ -556,7 +551,7 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
         let seen = first_candidate_seen.clone();
         async move {
             let body = v0255_body(request).await;
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             super::v022_json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 V0255_INTERNAL_RETRY_FAILURE_RESPONSE,
@@ -571,7 +566,7 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
         let seen = fallback_seen.clone();
         async move {
             let body = v0255_body(request).await;
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             super::v022_sse_response(Bytes::from_static(V0255_SIDE_RESPONSE))
         }
     })
@@ -633,18 +628,15 @@ async fn v0255_http_internal_retry_keeps_one_request_and_preserves_detour_owner(
         );
     }
     assert_eq!(
-        *first_candidate_requests.lock().unwrap(),
+        *first_candidate_requests.lock(),
         vec![V0255_INTERNAL_RETRY_REQUEST.to_vec()]
     );
     assert_eq!(
-        *fallback_requests.lock().unwrap(),
+        *fallback_requests.lock(),
         vec![V0255_INTERNAL_RETRY_REQUEST.to_vec()],
         "both providers must receive the same original HTTP request bytes"
     );
-    assert_eq!(
-        *main_requests.lock().unwrap(),
-        vec![V0255_MAIN_INITIAL.to_vec()]
-    );
+    assert_eq!(*main_requests.lock(), vec![V0255_MAIN_INITIAL.to_vec()]);
 
     assert_eq!(
         gateway.0.compaction.owner(&thread_hash),

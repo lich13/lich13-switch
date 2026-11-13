@@ -427,7 +427,7 @@ async fn stale_saved_receipt_cannot_replace_the_newer_routing_outcome() {
         false,
         None,
     );
-    let final_record = log.state.lock().unwrap().record.clone().unwrap();
+    let final_record = log.state.lock().record.clone().unwrap();
     assert_eq!(
         final_record.details.routing.unwrap().outcome,
         RoutingOutcome::WindowReleased

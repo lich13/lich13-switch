@@ -19,6 +19,7 @@ use hyper::{
     Request, Response,
 };
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use std::{
     convert::Infallible,
     future::Future,
@@ -27,7 +28,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     task::{Context, Poll},
     time::Duration,
@@ -88,14 +89,14 @@ struct Tasks(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
 
 impl Tasks {
     fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         if !state.0 {
             state.1.push(tokio::spawn(future));
         }
     }
 
     fn close(&self) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         state.0 = true;
         for task in state.1.drain(..) {
             task.abort();
@@ -206,14 +207,7 @@ impl Fixture {
     }
 
     fn token(&self) -> String {
-        self.gateway
-            .0
-            .inner
-            .lock()
-            .unwrap()
-            .store
-            .local_token
-            .clone()
+        self.gateway.0.inner.lock().store.local_token.clone()
     }
 
     async fn socket(&self) -> TcpStream {
@@ -339,7 +333,7 @@ async fn sse_wire_case(payload: &'static [u8]) {
         let observed = observed.clone();
         async move {
             let bytes = request.into_body().collect().await.unwrap().to_bytes();
-            observed.lock().unwrap().push(bytes);
+            observed.lock().push(bytes);
             let chunks = payload
                 .chunks(1)
                 .map(|bytes| Ok::<_, BoxError>(Frame::data(Bytes::copy_from_slice(bytes))))
@@ -355,7 +349,7 @@ async fn sse_wire_case(payload: &'static [u8]) {
     let (mut sender, task) = connection(&fixture).await;
     let response = request(&mut sender, &fixture, "fixture-wire").await;
     assert_eq!(body_bytes(response).await.as_ref(), payload);
-    assert_eq!(*seen.lock().unwrap(), vec![Bytes::from_static(SSE_REQUEST)]);
+    assert_eq!(*seen.lock(), vec![Bytes::from_static(SSE_REQUEST)]);
     let rows = recorded(&fixture.usage, 1).await;
     drop(sender);
     task.abort();
@@ -497,7 +491,7 @@ async fn http_write_half_close_still_delivers_the_complete_response() {
             let request_seen = request_seen.clone();
             async move {
                 let bytes = request.into_body().collect().await.unwrap().to_bytes();
-                request_seen.lock().unwrap().push(bytes);
+                request_seen.lock().push(bytes);
                 received.notify_one();
                 release.notified().await;
                 Response::builder()
@@ -531,10 +525,7 @@ async fn http_write_half_close_still_delivers_the_complete_response() {
         .expect("write-half-closed client did not receive response EOF")
         .unwrap();
     fixture.stop().await;
-    assert_eq!(
-        *request_seen.lock().unwrap(),
-        vec![Bytes::from_static(HTTP_REQUEST)]
-    );
+    assert_eq!(*request_seen.lock(), vec![Bytes::from_static(HTTP_REQUEST)]);
     assert_eq!(decode_http_body(&wire), HTTP_RESPONSE);
     let rows = recorded(&fixture.usage, 1).await;
     assert_success(&rows[0], HTTP_RESPONSE.len());

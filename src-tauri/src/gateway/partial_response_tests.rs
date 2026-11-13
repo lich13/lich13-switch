@@ -13,6 +13,7 @@ use hyper_util::{
     client::legacy::Client,
     rt::{TokioExecutor, TokioIo},
 };
+use parking_lot::Mutex;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 use std::{
@@ -21,7 +22,7 @@ use std::{
     io,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -49,11 +50,11 @@ struct Tasks(Arc<Mutex<Vec<JoinHandle<()>>>>);
 
 impl Tasks {
     fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        self.0.lock().unwrap().push(tokio::spawn(future));
+        self.0.lock().push(tokio::spawn(future));
     }
 
     fn close(&self) {
-        let handles: Vec<_> = self.0.lock().unwrap().drain(..).collect();
+        let handles: Vec<_> = self.0.lock().drain(..).collect();
         for handle in handles {
             handle.abort();
         }
@@ -203,7 +204,7 @@ impl Fixture {
     }
 
     fn auth(&self) -> (String, u16) {
-        let state = self.gateway.0.inner.lock().unwrap();
+        let state = self.gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     }
 

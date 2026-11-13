@@ -122,7 +122,7 @@ async fn capacity_retries_exceed_old_budget_and_preserve_the_permanent_last_erro
         async move {
             let body = req.into_body().collect().await.unwrap().to_bytes();
             let attempts = {
-                let mut seen = copy.lock().unwrap();
+                let mut seen = copy.lock();
                 seen.push(body);
                 seen.len()
             };
@@ -163,10 +163,9 @@ async fn capacity_retries_exceed_old_budget_and_preserve_the_permanent_last_erro
         response.into_body().collect().await.unwrap().to_bytes(),
         r#"{"error":{"code":"insufficient_quota","message":"insufficient balance — original error"}}"#
     );
-    assert_eq!(seen.lock().unwrap().len(), 6);
+    assert_eq!(seen.lock().len(), 6);
     assert!(seen
         .lock()
-        .unwrap()
         .iter()
         .all(|b| b.as_ref() == original.as_slice()));
     assert_eq!(
@@ -184,7 +183,7 @@ async fn capacity_retries_exceed_old_budget_and_preserve_the_permanent_last_erro
 }
 
 async fn raw_request(g: &Gateway) -> tokio::net::TcpStream {
-    let token = g.0.inner.lock().unwrap().store.local_token.clone();
+    let token = g.0.inner.lock().store.local_token.clone();
     let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", g.view().settings.port))
         .await
         .unwrap();
@@ -767,7 +766,7 @@ async fn responses_ws_handshake_capacity_fails_over_and_stays_on_established_pro
         .await
         .unwrap();
     }
-    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(seen.lock().len(), 2);
     until(|| g.view().providers.iter().all(|p| p.active_requests == 0)).await;
     drop(ws);
     g.stop().await.unwrap();
@@ -804,7 +803,7 @@ async fn capacity_errors_preserve_compressed_spooled_multipart_and_stream_payloa
             let error = error.clone();
             async move {
                 let bytes = req.into_body().collect().await.unwrap().to_bytes();
-                a.lock().unwrap().push(bytes);
+                a.lock().push(bytes);
                 Response::builder()
                     .status(503)
                     .header("content-encoding", "gzip")
@@ -818,7 +817,7 @@ async fn capacity_errors_preserve_compressed_spooled_multipart_and_stream_payloa
             let a = a.clone();
             async move {
                 let bytes = req.into_body().collect().await.unwrap().to_bytes();
-                a.lock().unwrap().push(bytes);
+                a.lock().push(bytes);
                 Response::builder()
                     .header("content-type", "text/event-stream")
                     .body(full("data: {\"type\":\"response.completed\"}\n\n"))
@@ -845,7 +844,7 @@ async fn capacity_errors_preserve_compressed_spooled_multipart_and_stream_payloa
         .await;
         assert_eq!(r.status(), 200);
         r.into_body().collect().await.unwrap();
-        let received = seen.lock().unwrap().clone();
+        let received = seen.lock().clone();
         assert_eq!(received.len(), 2);
         assert!(received
             .iter()

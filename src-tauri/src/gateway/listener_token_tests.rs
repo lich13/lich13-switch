@@ -49,7 +49,7 @@ impl Fixture {
 
 fn set_local_token(gateway: &Gateway, token: &str) {
     {
-        let mut state = gateway.0.inner.lock().unwrap();
+        let mut state = gateway.0.inner.lock();
         state.editable_mut().store.local_token = token.to_owned();
     }
     gateway.0.registry.publish_token(&gateway.0, token);
@@ -57,7 +57,7 @@ fn set_local_token(gateway: &Gateway, token: &str) {
 
 fn persist_local_token(gateway: &Gateway, token: &str) {
     set_local_token(gateway, token);
-    let mut state = gateway.0.inner.lock().unwrap();
+    let mut state = gateway.0.inner.lock();
     state.revision = state
         .store
         .persist(&gateway.0.data.join("gateway.json"), &state.revision)
@@ -319,7 +319,7 @@ async fn route_does_not_wait_for_another_gateways_inner_lock() {
     let (locked_tx, locked_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let holder = thread::spawn(move || {
-        let _guard = other.inner.lock().unwrap();
+        let _guard = other.inner.lock();
         locked_tx.send(()).unwrap();
         release_rx.recv().unwrap();
     });
@@ -383,7 +383,7 @@ fn persisted_store_token_is_registered_after_gateway_reload() {
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("reload-data");
     let first = Gateway::new(data.clone()).unwrap();
-    let old_token = first.0.inner.lock().unwrap().store.local_token.clone();
+    let old_token = first.0.inner.lock().store.local_token.clone();
     let store_path = data.join("gateway.json");
 
     persist_local_token(&first, RELOADED_TOKEN);

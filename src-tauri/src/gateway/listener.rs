@@ -4,11 +4,9 @@ use crate::{
     errors::code,
     storage::{self, AppError, Result},
 };
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
 
 #[derive(Serialize, Deserialize)]
@@ -79,10 +77,10 @@ impl Listener {
         })
     }
     pub(super) fn request_port(&self) -> Result<u16> {
-        Ok(self.state.lock().unwrap().port)
+        Ok(self.state.lock().port)
     }
     pub fn view(&self) -> Result<View> {
-        let s = self.state.lock().unwrap();
+        let s = self.state.lock();
         Ok(View {
             port: s.port,
             revision: s.revision.clone(),
@@ -102,7 +100,7 @@ impl Listener {
         Ok(())
     }
     pub fn set_port(&self, port: u16, expected: &str) -> Result<()> {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock();
         if expected != s.revision {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -181,7 +179,7 @@ impl Listener {
         registry: Arc<Registry>,
         commit: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock();
         commit()?;
         if let Some(client) = client {
             if !s.clients.contains(&client) {
@@ -205,7 +203,7 @@ impl Listener {
     }
     async fn deactivate_resource(&self, client: Option<ClientId>) -> Result<()> {
         let task = {
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock();
             if let Some(client) = client {
                 s.clients.retain(|id| *id != client);
             } else {

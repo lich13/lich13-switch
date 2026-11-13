@@ -82,7 +82,7 @@ async fn exact_rules_filter_before_attempts_and_preserve_original_json_and_resou
             let seen = seen.clone();
             async move {
                 let payload = req.into_body().collect().await.unwrap().to_bytes();
-                seen.lock().unwrap().push((n, payload.clone()));
+                seen.lock().push((n, payload.clone()));
                 Response::new(full(payload))
             }
         })
@@ -119,7 +119,7 @@ async fn exact_rules_filter_before_attempts_and_preserve_original_json_and_resou
         payload
     );
     settle(&g).await;
-    assert_eq!(seen.lock().unwrap()[0].0, 4);
+    assert_eq!(seen.lock()[0].0, 4);
     assert_eq!(g.view().providers[4].active_requests, 0);
     assert!(g.view().providers[..4]
         .iter()

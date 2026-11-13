@@ -6,11 +6,8 @@ use super::{Batch, Measurement, Service};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, header, Request, Response};
 use hyper_util::rt::TokioIo;
-use std::{
-    convert::Infallible,
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use parking_lot::Mutex;
+use std::{convert::Infallible, sync::Arc, time::Instant};
 
 fn v0212_provider(base_url: &str) -> Provider {
     Provider {
@@ -150,7 +147,7 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
             dir.path(),
         )
         .unwrap();
-    let provider = gateway.0.inner.lock().unwrap().store.providers[0].clone();
+    let provider = gateway.0.inner.lock().store.providers[0].clone();
     let stale = gateway.view().revision;
     gateway
         .edit(
@@ -174,11 +171,11 @@ fn v0212_gateway_rejects_stale_edit_revision_and_persists_endpoints_across_resta
         .err()
         .unwrap();
     assert_eq!(error.code, "CONFLICT");
-    let before_restart = gateway.0.inner.lock().unwrap().store.clone();
+    let before_restart = gateway.0.inner.lock().store.clone();
     drop(gateway);
 
     let restarted = Gateway::new(dir.path().to_path_buf()).unwrap();
-    let after_restart = restarted.0.inner.lock().unwrap().store.clone();
+    let after_restart = restarted.0.inner.lock().store.clone();
     assert_eq!(after_restart.providers.len(), 1);
     assert_eq!(after_restart.providers[0].id, provider.id);
     assert_eq!(after_restart.providers[0].token, provider.token);
@@ -207,7 +204,7 @@ fn v0212_service_prefers_fastest_endpoint_and_keeps_thread_and_response_pins_aft
     let provider = v0212_provider(primary_raw);
     let urls = vec![primary_raw.to_owned(), secondary.clone()];
     let config = Service::config(&provider, &urls);
-    service.samples.lock().unwrap().insert(
+    service.samples.lock().insert(
         provider.id.clone(),
         Batch {
             config,
@@ -280,7 +277,7 @@ async fn v0212_loopback_server(seen: Arc<Mutex<Vec<(String, bool)>>>) -> u16 {
                     async move {
                         let (parts, body) = request.into_parts();
                         let _ = body.collect().await;
-                        seen.lock().unwrap().push((
+                        seen.lock().push((
                             parts.uri.path().to_owned(),
                             parts.headers.contains_key(header::AUTHORIZATION),
                         ));
@@ -337,7 +334,7 @@ async fn v0212_loopback_probe_sends_no_authorization_or_business_rpm_and_keeps_e
     let after = gateway.view();
     assert_eq!(after.revision, before.revision);
     assert_eq!(after.providers[0].rpm_used, 0);
-    let requests = seen.lock().unwrap().clone();
+    let requests = seen.lock().clone();
     assert_eq!(requests.len(), 2);
     assert!(requests
         .iter()

@@ -4,15 +4,9 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    collections::HashSet,
-    convert::Infallible,
-    fs,
-    path::Path,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashSet, convert::Infallible, fs, path::Path, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -256,7 +250,7 @@ impl Upstream {
                                     let model = serde_json::from_slice::<Value>(&body).ok()
                                         .and_then(|value| value.get("model")
                                             .and_then(Value::as_str).map(str::to_owned));
-                                    seen.lock().unwrap().push(SeenRequest { path, model, authorization, api_key });
+                                    seen.lock().push(SeenRequest { path, model, authorization, api_key });
                                     Ok::<_, Infallible>(Response::builder()
                                         .status(StatusCode::OK)
                                         .header("content-type", "application/json")
@@ -350,7 +344,7 @@ fn add_provider(gateway: &Gateway, home: &Path, base_url: &str, token: &str) {
 }
 
 fn local_token(gateway: &Gateway) -> String {
-    gateway.0.inner.lock().unwrap().store.local_token.clone()
+    gateway.0.inner.lock().store.local_token.clone()
 }
 
 async fn post(port: u16, path: &str, token: &str, body: &[u8]) -> u16 {
@@ -521,7 +515,7 @@ async fn shared_tcp_listener_isolates_three_clients_and_releases_after_last_stop
             401
         );
     }
-    let requests = upstream.seen.lock().unwrap().clone();
+    let requests = upstream.seen.lock().clone();
     assert_eq!(
         requests.len(),
         3,
@@ -547,7 +541,7 @@ async fn shared_tcp_listener_isolates_three_clients_and_releases_after_last_stop
     {
         assert_eq!(post(listener_port, path, &tokens[index], &body).await, 200);
     }
-    let requests = upstream.seen.lock().unwrap().clone();
+    let requests = upstream.seen.lock().clone();
     assert_eq!(requests.len(), 6);
     for (index, request) in requests[3..].iter().enumerate() {
         let client = ["codex", "claude", "grok"][index];

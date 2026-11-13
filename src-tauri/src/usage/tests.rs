@@ -1450,10 +1450,10 @@ fn service_query_reads_only_its_isolated_store() {
 fn successful_backfill_clears_only_its_previous_error() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(dir.path());
-    *service.0.backfill_error.lock().unwrap() = Some("fixture previous backfill failure".into());
-    *service.0.error.lock().unwrap() = Some("fixture unrelated failure".into());
+    *service.0.backfill_error.lock() = Some("fixture previous backfill failure".into());
+    *service.0.error.lock() = Some("fixture unrelated failure".into());
     service.backfill_prices().unwrap();
-    assert!(service.0.backfill_error.lock().unwrap().is_none());
+    assert!(service.0.backfill_error.lock().is_none());
     assert_eq!(
         service.state().error.as_deref(),
         Some("fixture unrelated failure")
@@ -1939,7 +1939,7 @@ fn maintenance_compacts_history_when_session_auto_sync_is_disabled() {
 fn unavailable_source_root_does_not_block_other_sources() {
     let dir = tempfile::tempdir().unwrap();
     let service = Service::new(&dir.path().join("db"));
-    service.0.report.lock().unwrap().insert(
+    service.0.report.lock().insert(
         "codex".into(),
         sessions::Report {
             phase: "complete".into(),
@@ -1992,7 +1992,7 @@ fn claude_retries_keep_each_attempt_and_rebuild_keeps_unexported_old_rows() {
     for _ in 0..140 {
         let _attempt = trace.attempt("fixture-provider", false, "http");
     }
-    let attempts = trace.0.attempts.lock().unwrap();
+    let attempts = trace.0.attempts.lock();
     assert_eq!(attempts.len(), 140);
     assert!(attempts.iter().all(|a| a.repeat_count == 1));
     drop(attempts);

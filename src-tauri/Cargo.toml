@@ -16,6 +16,7 @@ tauri-build = { version = "~2.6.3", features = [] }
 tauri-codegen = "~2.6.3"
 
 [dependencies]
+parking_lot = "0.12"
 lmfpd = { path = "vendor/lmfpd" }
 tauri = { version = "~2.11", features = ["tray-icon", "image-png"] }
 # Keep the runtime and menu macro interfaces compatible with Tauri 2.11.

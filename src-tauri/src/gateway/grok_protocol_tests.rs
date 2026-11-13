@@ -14,13 +14,8 @@ use crate::usage::{
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioIo};
-use std::{
-    convert::Infallible,
-    future::Future,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use parking_lot::Mutex;
+use std::{convert::Infallible, future::Future, path::PathBuf, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -65,14 +60,14 @@ struct TaskScope(Arc<Mutex<(bool, Vec<JoinHandle<()>>)>>);
 
 impl TaskScope {
     fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         if !state.0 {
             state.1.push(tokio::spawn(future));
         }
     }
 
     fn close(&self) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         state.0 = true;
         for task in state.1.drain(..) {
             task.abort();
@@ -141,7 +136,7 @@ async fn capturing_server(
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_owned)
             };
-            seen.lock().unwrap().push(ObservedRequest {
+            seen.lock().push(ObservedRequest {
                 path_and_query: parts
                     .uri
                     .path_and_query()
@@ -326,7 +321,7 @@ async fn gateway_request(gateway: &Gateway, path: &str, body: &[u8]) -> Response
     let client: HttpClient =
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
     let token = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         state.store.local_token.clone()
     };
     let port = gateway.listener_view().port;
@@ -431,7 +426,6 @@ fn grok_connection(gateway: &Gateway, provider_id: &str) -> grok_config::Connect
         .0
         .inner
         .lock()
-        .unwrap()
         .store
         .grok_connections
         .get(provider_id)
@@ -440,7 +434,7 @@ fn grok_connection(gateway: &Gateway, provider_id: &str) -> grok_config::Connect
 }
 
 fn requests(seen: &Arc<Mutex<Vec<ObservedRequest>>>) -> Vec<ObservedRequest> {
-    seen.lock().unwrap().clone()
+    seen.lock().clone()
 }
 
 fn query_pairs(uri: &str) -> std::collections::BTreeMap<String, String> {
@@ -789,7 +783,7 @@ async fn grok_initial_discovery_is_read_only_and_manual_connection_survives_reop
     let grok_data = dir.path().join("grok-gateway-data");
     let primary = Gateway::new(primary_data.clone()).unwrap();
     let gateway = primary.grok_companion(grok_data.clone()).unwrap();
-    assert!(!gateway.0.inner.lock().unwrap().store.initialized);
+    assert!(!gateway.0.inner.lock().store.initialized);
     let native_before = std::fs::read(home.join("config.toml")).unwrap();
     gateway.import_initial(&home).unwrap();
     assert!(gateway.view().providers.is_empty());

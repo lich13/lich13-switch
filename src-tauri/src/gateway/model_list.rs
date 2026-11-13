@@ -6,11 +6,11 @@ use crate::{
     storage::{self, AppError, Result},
 };
 use futures_util::{stream, StreamExt};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Mutex,
 };
 
 const LIMIT: u64 = 256 * 1024;
@@ -115,11 +115,11 @@ impl Service {
         }
     }
     pub fn snapshot(&self) -> (File, Option<String>) {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         (state.0.clone(), state.2.clone())
     }
     fn update(&self, change: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state.2.is_some() {
             return Err(error(INVALID));
         }
@@ -195,7 +195,7 @@ pub enum Operation {
 
 impl Gateway {
     pub fn report_model_error(&self, error: AppError) {
-        self.0.inner.lock().unwrap().error = Some(error.message);
+        self.0.inner.lock().error = Some(error.message);
         self.changed();
     }
     pub(crate) fn union_models(&self, protocol: Option<Protocol>) -> Result<Vec<Model>> {
@@ -268,7 +268,7 @@ impl Gateway {
     }
     pub fn gateway_models(&self) -> Result<View> {
         let mut models = self.union_models(None)?;
-        let usage = self.0.usage.lock().unwrap().clone();
+        let usage = self.0.usage.lock().clone();
         let prices = usage.as_ref().and_then(|u| u.prices().ok());
         if let Some(prices) = prices {
             for model in &mut models {
@@ -321,7 +321,7 @@ impl Gateway {
             return Err(error("模型 ID 无效"));
         }
         if let Some(source) = source {
-            let usage = self.0.usage.lock().unwrap().clone();
+            let usage = self.0.usage.lock().clone();
             if !usage
                 .as_ref()
                 .and_then(|u| u.prices().ok())
@@ -381,7 +381,7 @@ impl Gateway {
         for result in results {
             result?;
         }
-        let usage = self.0.usage.lock().unwrap().clone();
+        let usage = self.0.usage.lock().clone();
         if let Some(prices) = usage.as_ref().and_then(|u| u.prices().ok()) {
             let before = prices.models_dev.view().version;
             let refreshed = prices.models_dev.refresh(false).await?;
@@ -490,7 +490,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let g = Gateway::new(dir.path().join("data")).unwrap();
         {
-            let mut state = g.0.inner.lock().unwrap();
+            let mut state = g.0.inner.lock();
             let store = &mut state.editable_mut().store;
             for n in 0..4 {
                 store
@@ -586,7 +586,7 @@ mod tests {
             .grok_companion(dir.path().join("data/grok"))
             .unwrap();
         {
-            let mut state = g.0.inner.lock().unwrap();
+            let mut state = g.0.inner.lock();
             let store = &mut state.editable_mut().store;
             for (name, protocol) in [
                 ("a", Protocol::Messages),
@@ -654,8 +654,7 @@ mod tests {
             ["a", "c"]
         );
         assert!(models[0].manual);
-        g.0.inner.lock().unwrap().editable_mut().store.providers[2].version =
-            "fixture-changed".into();
+        g.0.inner.lock().editable_mut().store.providers[2].version = "fixture-changed".into();
         assert!(!g
             .model_union(Some(Protocol::Messages))
             .unwrap()

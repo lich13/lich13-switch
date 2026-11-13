@@ -2,12 +2,9 @@ use super::*;
 use crate::gateway::{grok_protocol_tests::server, model::Store, replay, Edit};
 use http_body_util::BodyExt;
 use hyper::Response;
+use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    fs,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{fs, sync::Arc, time::Duration};
 
 #[test]
 fn discovers_all_profiles_deduplicates_connections_and_preserves_manual_mapping() {
@@ -207,15 +204,7 @@ impl Fixture {
         }
     }
     async fn request(&self, model: &str, stream: bool) -> reqwest::Response {
-        let token = self
-            .gateway
-            .0
-            .inner
-            .lock()
-            .unwrap()
-            .store
-            .local_token
-            .clone();
+        let token = self.gateway.0.inner.lock().store.local_token.clone();
         reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(8)).build().unwrap()
             .post(format!("http://127.0.0.1:{}/v1/chat/completions", self.gateway.listener_view().port))
             .bearer_auth(token).json(&json!({"model": model, "stream": stream, "messages": [{"role":"user","content":"fixture"}], "future": {"integer": 9007199254740993_u64}})).send().await.unwrap()
@@ -238,7 +227,6 @@ async fn arbitrary_official_id_skips_unmapped_providers_and_remaps_each_retry() 
                     let body = request.into_body().collect().await.unwrap().to_bytes();
                     let value: Value = serde_json::from_slice(&body).unwrap();
                     seen.lock()
-                        .unwrap()
                         .push((index, value["model"].as_str().unwrap().to_owned()));
                     if index == 1 {
                         Response::builder()
@@ -278,7 +266,7 @@ async fn arbitrary_official_id_skips_unmapped_providers_and_remaps_each_retry() 
     assert_eq!(response.status(), 200);
     response.bytes().await.unwrap();
     assert_eq!(
-        *seen.lock().unwrap(),
+        *seen.lock(),
         [(1, "vendor-1-future".into()), (2, "vendor-2-future".into())]
     );
     fixture.gateway.stop().await.unwrap();
@@ -310,7 +298,6 @@ async fn retries_account_rate_service_model_and_first_byte_failures_with_each_pr
                 let value: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["future"]["integer"].as_u64(), Some(9007199254740993));
                 seen.lock()
-                    .unwrap()
                     .push(value["model"].as_str().unwrap().to_owned());
                 if delay {
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -343,7 +330,6 @@ async fn retries_account_rate_service_model_and_first_byte_failures_with_each_pr
                 let body = request.into_body().collect().await.unwrap().to_bytes();
                 let value: Value = serde_json::from_slice(&body).unwrap();
                 seen.lock()
-                    .unwrap()
                     .push(value["model"].as_str().unwrap().to_owned());
                 success()
             }
@@ -354,7 +340,7 @@ async fn retries_account_rate_service_model_and_first_byte_failures_with_each_pr
         assert_eq!(response.status(), 200, "{status}/{code}");
         response.bytes().await.unwrap();
         assert_eq!(
-            *seen.lock().unwrap(),
+            *seen.lock(),
             ["vendor-0-pro", "vendor-1-pro"],
             "{status}/{code}"
         );
@@ -388,7 +374,7 @@ async fn manual_mode_and_empty_pro_mapping_do_not_fall_back_to_flash() {
     let upstream = server(move |_| {
         let count = count.clone();
         async move {
-            *count.lock().unwrap() += 1;
+            *count.lock() += 1;
             Response::builder()
                 .status(401)
                 .body(replay::full("unauthorized"))
@@ -400,7 +386,7 @@ async fn manual_mode_and_empty_pro_mapping_do_not_fall_back_to_flash() {
     let response = fixture.request(models::FLASH, false).await;
     assert_eq!(response.status(), 401);
     response.bytes().await.unwrap();
-    assert_eq!(*seen.lock().unwrap(), 1);
+    assert_eq!(*seen.lock(), 1);
     let providers = fixture.gateway.try_view().unwrap().providers;
     for p in providers {
         fixture
@@ -421,7 +407,7 @@ async fn manual_mode_and_empty_pro_mapping_do_not_fall_back_to_flash() {
     let response = fixture.request(models::PRO, false).await;
     assert!(!response.status().is_success());
     response.bytes().await.unwrap();
-    assert_eq!(*seen.lock().unwrap(), 1);
+    assert_eq!(*seen.lock(), 1);
     fixture.gateway.stop().await.unwrap();
 }
 
@@ -432,7 +418,7 @@ async fn connection_failure_retries_but_output_followed_by_error_never_replays()
     let second = server(move |_| {
         let count = count.clone();
         async move {
-            *count.lock().unwrap() += 1;
+            *count.lock() += 1;
             success()
         }
     })
@@ -448,7 +434,7 @@ async fn connection_failure_retries_but_output_followed_by_error_never_replays()
     let response = fixture.request(models::FLASH, false).await;
     assert_eq!(response.status(), 200);
     response.bytes().await.unwrap();
-    assert_eq!(*hits.lock().unwrap(), 1);
+    assert_eq!(*hits.lock(), 1);
     fixture.gateway.stop().await.unwrap();
     let first = server(|_| async {
         let frames = async_stream::try_stream! {
@@ -464,7 +450,7 @@ async fn connection_failure_retries_but_output_followed_by_error_never_replays()
     let output = response.text().await.unwrap();
     assert!(output.contains("fixture") && output.contains("insufficient_balance"));
     assert_eq!(
-        *hits.lock().unwrap(),
+        *hits.lock(),
         1,
         "must not replay once business output was sent"
     );
@@ -481,7 +467,7 @@ async fn a_model_error_isolated_to_pro_still_allows_flash_on_the_same_provider()
             let body = request.into_body().collect().await.unwrap().to_bytes();
             let value: Value = serde_json::from_slice(&body).unwrap();
             let model = value["model"].as_str().unwrap().to_owned();
-            seen.lock().unwrap().push(model.clone());
+            seen.lock().push(model.clone());
             if model.ends_with("pro") {
                 Response::builder()
                     .status(404)
@@ -501,7 +487,7 @@ async fn a_model_error_isolated_to_pro_still_allows_flash_on_the_same_provider()
         assert_eq!(response.status(), 200);
         response.bytes().await.unwrap();
     }
-    assert_eq!(*seen.lock().unwrap(), ["vendor-0-pro", "vendor-0-flash"]);
+    assert_eq!(*seen.lock(), ["vendor-0-pro", "vendor-0-flash"]);
     fixture.gateway.stop().await.unwrap();
 }
 
@@ -512,7 +498,7 @@ async fn exhausted_candidates_return_failure_within_the_retry_budget() {
     let upstream = server(move |_| {
         let count = count.clone();
         async move {
-            *count.lock().unwrap() += 1;
+            *count.lock() += 1;
             Response::builder()
                 .status(429)
                 .header("retry-after", "5")
@@ -537,7 +523,7 @@ async fn exhausted_candidates_return_failure_within_the_retry_budget() {
     let response = fixture.request(models::FLASH, false).await;
     assert_eq!(response.status(), 504);
     response.bytes().await.unwrap();
-    assert_eq!(*calls.lock().unwrap(), 2);
+    assert_eq!(*calls.lock(), 2);
     fixture.gateway.stop().await.unwrap();
 }
 
@@ -554,7 +540,7 @@ async fn identical_model_mapping_preserves_body_bytes_and_content_encoding() {
                 .get("content-encoding")
                 .map(|v| v.to_str().unwrap().to_owned());
             let body = request.into_body().collect().await.unwrap().to_bytes();
-            seen.lock().unwrap().push((encoding, body.to_vec()));
+            seen.lock().push((encoding, body.to_vec()));
             success()
         }
     })
@@ -579,15 +565,7 @@ async fn identical_model_mapping_preserves_body_bytes_and_content_encoding() {
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     gzip.write_all(&raw).unwrap();
     let compressed = gzip.finish().unwrap();
-    let token = fixture
-        .gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .store
-        .local_token
-        .clone();
+    let token = fixture.gateway.0.inner.lock().store.local_token.clone();
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(8))
@@ -609,7 +587,7 @@ async fn identical_model_mapping_preserves_body_bytes_and_content_encoding() {
         assert_eq!(response.status(), 200);
         response.bytes().await.unwrap();
         assert_eq!(
-            seen.lock().unwrap().last().unwrap(),
+            seen.lock().last().unwrap(),
             &(encoding.map(str::to_owned), body)
         );
     }
@@ -658,7 +636,7 @@ async fn fixed_provider_retries_service_errors_before_delivery() {
                     let body = request.into_body().collect().await.unwrap().to_bytes();
                     let value: Value = serde_json::from_slice(&body).unwrap();
                     assert_eq!(value["model"], "vendor-0-flash");
-                    let count = { let mut count = seen.lock().unwrap(); *count += 1; *count };
+                    let count = { let mut count = seen.lock(); *count += 1; *count };
                     if count == 1 {
                         if framed {
                             Response::builder().header("content-type", "text/event-stream")
@@ -687,7 +665,7 @@ async fn fixed_provider_retries_service_errors_before_delivery() {
             let (response, ()) = tokio::join!(request, waiting);
             assert_eq!(response.status(), 200, "manual={manual}, framed={framed}");
             assert!(response.text().await.unwrap().contains("fixture"));
-            assert_eq!(*calls.lock().unwrap(), 2);
+            assert_eq!(*calls.lock(), 2);
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     if let Some(event) = events
@@ -718,7 +696,7 @@ async fn fixed_provider_short_retries_obey_attempt_limit_and_two_retry_cap() {
         let upstream = server(move |_| {
             let seen = seen.clone();
             async move {
-                *seen.lock().unwrap() += 1;
+                *seen.lock() += 1;
                 Response::builder()
                     .status(502)
                     .body(replay::full("fixture bad gateway"))
@@ -731,7 +709,7 @@ async fn fixed_provider_short_retries_obey_attempt_limit_and_two_retry_cap() {
         let response = fixture.request(models::FLASH, false).await;
         assert_eq!(response.status(), 502);
         response.bytes().await.unwrap();
-        assert_eq!(*calls.lock().unwrap(), expected);
+        assert_eq!(*calls.lock(), expected);
         assert_eq!(fixture.gateway.view().providers[0].rpm_used, expected);
         assert_eq!(fixture.gateway.view().providers[0].active_requests, 0);
         fixture.gateway.stop().await.unwrap();
@@ -800,7 +778,7 @@ async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt()
         let received = received.clone();
         async move {
             request.into_body().collect().await.unwrap();
-            *seen.lock().unwrap() += 1;
+            *seen.lock() += 1;
             received.notify_one();
             Response::builder()
                 .status(502)
@@ -812,15 +790,7 @@ async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt()
     let fixture = Fixture::new(&[upstream.url("/v1")], false).await;
     retry_settings(&fixture, 3);
     let mut changes = fixture.gateway.subscribe();
-    let token = fixture
-        .gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .store
-        .local_token
-        .clone();
+    let token = fixture.gateway.0.inner.lock().store.local_token.clone();
     let mut client =
         tokio::net::TcpStream::connect(("127.0.0.1", fixture.gateway.listener_view().port))
             .await
@@ -855,7 +825,7 @@ async fn fixed_provider_client_cancellation_stops_wait_without_another_attempt()
     .unwrap();
     assert_eq!(fixture.gateway.view().providers[0].active_requests, 0);
     assert_eq!(fixture.gateway.view().providers[0].rpm_used, 1);
-    assert_eq!(*calls.lock().unwrap(), 1);
+    assert_eq!(*calls.lock(), 1);
     fixture.gateway.stop().await.unwrap();
 }
 
@@ -868,7 +838,7 @@ async fn exhausted_dsh_timeouts_preserve_504_without_replaying_same_provider() {
             let upstream = server(move |_| {
                 let seen = seen.clone();
                 async move {
-                    *seen.lock().unwrap() += 1;
+                    *seen.lock() += 1;
                     if phase == "headers" {
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         return success();
@@ -899,7 +869,7 @@ async fn exhausted_dsh_timeouts_preserve_504_without_replaying_same_provider() {
                 "FIRST_BYTE_TIMEOUT"
             }));
             let expected = if manual { 1 } else { count };
-            assert_eq!(*calls.lock().unwrap(), expected);
+            assert_eq!(*calls.lock(), expected);
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let page = events.query(crate::events::Filter::default());
@@ -930,7 +900,7 @@ async fn filtered_dsh_provider_retries_interrupted_prebuffer_and_honors_retry_af
         let upstream = server(move |_| {
             let seen = seen.clone();
             async move {
-                let attempt = { let mut n = seen.lock().unwrap(); *n += 1; *n };
+                let attempt = { let mut n = seen.lock(); *n += 1; *n };
                 if attempt > 1 { return success(); }
                 if !interrupted {
                     return Response::builder().status(503).header("retry-after", "2")
@@ -966,7 +936,7 @@ async fn filtered_dsh_provider_retries_interrupted_prebuffer_and_honors_retry_af
         let response = fixture.request(models::FLASH, interrupted).await;
         assert_eq!(response.status(), 200);
         assert!(response.text().await.unwrap().contains("fixture"));
-        assert_eq!(*calls.lock().unwrap(), 2);
+        assert_eq!(*calls.lock(), 2);
         if !interrupted {
             assert!(started.elapsed() >= Duration::from_secs(2));
         }
@@ -982,7 +952,7 @@ async fn dsh_failure_reaching_breaker_threshold_does_not_schedule_short_wait() {
         let upstream = server(move |_| {
             let seen = seen.clone();
             async move {
-                *seen.lock().unwrap() += 1;
+                *seen.lock() += 1;
                 if framed {
                     Response::builder().header("content-type", "text/event-stream")
                         .body(replay::full("data: {\"error\":{\"type\":\"server_error\",\"message\":\"fixture failure\"}}\n\n")).unwrap()
@@ -1008,7 +978,7 @@ async fn dsh_failure_reaching_breaker_threshold_does_not_schedule_short_wait() {
         let response = fixture.request(models::FLASH, framed).await;
         assert_eq!(response.status().as_u16(), if framed { 502 } else { 503 });
         response.bytes().await.unwrap();
-        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(*calls.lock(), 1);
         assert!(fixture.gateway.view().transient_retries.is_empty());
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {

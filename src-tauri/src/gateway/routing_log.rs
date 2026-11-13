@@ -18,7 +18,8 @@ use crate::{
     events,
     usage::model::{RoutingDecision, RoutingEvidence},
 };
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[derive(Default)]
 struct State {
@@ -41,7 +42,7 @@ pub(super) struct RoutingLog {
 }
 impl RoutingLog {
     pub fn new(gateway: &super::Gateway) -> Option<Arc<Self>> {
-        let service = gateway.0.diagnostics.lock().unwrap().clone()?;
+        let service = gateway.0.diagnostics.lock().clone()?;
         Some(Arc::new(Self {
             service,
             client: gateway.client_id(),
@@ -56,9 +57,7 @@ impl RoutingLog {
         evidence: RoutingEvidence,
         attempt_id: Option<&str>,
     ) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
+        let mut state = self.state.lock();
         if state.handled || state.save_generation != 0 {
             return;
         }
@@ -133,7 +132,8 @@ impl RoutingLog {
             evidence,
             None,
         );
-        if let Ok(mut state) = self.state.lock() {
+        {
+            let mut state = self.state.lock();
             state.attempts = 0;
             if let Some(record) = &mut state.record {
                 record.attempt = None;
@@ -141,9 +141,7 @@ impl RoutingLog {
         }
     }
     pub fn failure(&self, failure: super::failover::Failure) -> u64 {
-        let Ok(mut state) = self.state.lock() else {
-            return 0;
-        };
+        let mut state = self.state.lock();
         state.unreported |= state.failure_generation != state.reported_generation;
         state.failure_generation = state.failure_generation.saturating_add(1);
         state.failure = Some(failure);
@@ -157,23 +155,21 @@ impl RoutingLog {
         state.failure_generation
     }
     pub fn reported(&self, generation: u64) {
-        if let Ok(mut state) = self.state.lock() {
+        {
+            let mut state = self.state.lock();
             if generation != 0 && generation == state.failure_generation {
                 state.reported_generation = generation;
             }
         }
     }
     pub fn failure_reported(&self) -> bool {
-        self.state.lock().is_ok_and(|state| {
-            state.failure_generation != 0
-                && state.failure_generation == state.reported_generation
-                && !state.unreported
-        })
+        let state = self.state.lock();
+        state.failure_generation != 0
+            && state.failure_generation == state.reported_generation
+            && !state.unreported
     }
     pub fn outcome(&self, outcome: events::RoutingOutcome) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
+        let mut state = self.state.lock();
         // Explicit outcomes describe work or an unsettled/unknown result;
         // they must not be mistaken for the final protocol's quiet close.
         state.keep = true;
@@ -188,7 +184,8 @@ impl RoutingLog {
     pub fn window_consumed(&self, no_receiver: bool) {
         if !no_receiver {
             self.outcome(events::RoutingOutcome::WindowConsumed);
-        } else if let Ok(mut state) = self.state.lock() {
+        } else {
+            let mut state = self.state.lock();
             if let Some(routing) = state
                 .record
                 .as_mut()
@@ -199,9 +196,7 @@ impl RoutingLog {
         }
     }
     pub fn begin_save(&self) -> u64 {
-        let Ok(mut state) = self.state.lock() else {
-            return 0;
-        };
+        let mut state = self.state.lock();
         state.save_generation = state.save_generation.saturating_add(1);
         state.save_generation
     }
@@ -213,9 +208,7 @@ impl RoutingLog {
         handoff: bool,
         notification: Option<String>,
     ) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
+        let mut state = self.state.lock();
         let failed = outcome == events::RoutingOutcome::SaveFailed;
         if state.save_failed || (generation != state.save_generation && !failed) {
             return;
@@ -250,9 +243,7 @@ impl RoutingLog {
         }
     }
     pub fn finish(&self, status: Option<u16>, success: bool) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
+        let mut state = self.state.lock();
         // Non-protocol callers use false for admission, cancellation or an
         // unknown failure. A later downstream close cannot erase that fact.
         state.unreported |= !success;
@@ -287,9 +278,7 @@ impl RoutingLog {
     }
     pub fn settle(&self, status: Option<u16>, result: super::protocol::RoutingSettlement) {
         use super::protocol::RoutingSettlement;
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
+        let mut state = self.state.lock();
         state.unreported |= result == RoutingSettlement::Failed;
         state.settled = Some(result);
         if let Some(record) = &mut state.record {
@@ -320,9 +309,7 @@ impl RoutingLog {
     /// keep the log alive and pass through the final settlement filter instead.
     #[cfg(test)]
     pub fn take(&self, outcome: events::RoutingOutcome) -> Option<events::Record> {
-        let Ok(mut state) = self.state.lock() else {
-            return None;
-        };
+        let mut state = self.state.lock();
         if state.handled {
             return None;
         }
@@ -336,9 +323,7 @@ impl RoutingLog {
 }
 impl Drop for RoutingLog {
     fn drop(&mut self) {
-        let Ok(state) = self.state.get_mut() else {
-            return;
-        };
+        let state = self.state.get_mut();
         if !state.handled {
             if let Some(record) = state.record.take() {
                 let quiet = !state.keep

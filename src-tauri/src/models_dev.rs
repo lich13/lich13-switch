@@ -3,13 +3,14 @@ use crate::{
     storage::{self, Result},
     usage::model::{decimal, failure, now},
 };
+use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -200,10 +201,10 @@ impl Catalog {
         }
     }
     fn ensure_loaded(&self) {
-        if self.state.read().unwrap().loaded {
+        if self.state.read().loaded {
             return;
         }
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write();
         if state.loaded {
             return;
         }
@@ -236,13 +237,13 @@ impl Catalog {
         self.ensure_loaded();
         Self {
             path: self.path.clone(),
-            state: Arc::new(RwLock::new(self.state.read().unwrap().clone())),
+            state: Arc::new(RwLock::new(self.state.read().clone())),
             sync: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
     pub fn view(&self) -> View {
         self.ensure_loaded();
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         View {
             updated_at: state.index.as_ref().map(|i| i.updated_at),
             version: state.version.clone(),
@@ -262,7 +263,7 @@ impl Catalog {
         let _guard = self.sync.lock().await;
         self.ensure_loaded();
         let skip = {
-            let state = self.state.read().unwrap();
+            let state = self.state.read();
             state.attempted.is_some_and(|t| t >= began)
                 || (!force && (self.path.exists() || state.attempted.is_some()))
         };
@@ -270,7 +271,7 @@ impl Catalog {
             return Ok(self.view());
         }
         let result = download(source).await.and_then(|index| {
-            let state = self.state.read().unwrap();
+            let state = self.state.read();
             if state
                 .index
                 .as_ref()
@@ -283,7 +284,7 @@ impl Catalog {
             storage::atomic_write(&self.path, &bytes, None)?;
             Ok((index, storage::digest(&bytes)))
         });
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write();
         state.loaded = true;
         state.attempted = Some(Instant::now());
         match result {
@@ -303,7 +304,7 @@ impl Catalog {
     }
     pub fn metadata_from(&self, id: &str, source: Option<&str>) -> Option<Metadata> {
         self.ensure_loaded();
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         let (matches, basis) = resolve_source(state.index.as_deref()?, id, false, source)?;
         let (_, first_id, first) = *matches.first()?;
         if matches.iter().any(|(_, _, m)| {
@@ -355,7 +356,7 @@ impl Catalog {
     }
     pub fn price_from(&self, id: &str, source: Option<&str>) -> Option<(Value, String)> {
         self.ensure_loaded();
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         let (matches, basis) = resolve_source(state.index.as_deref()?, id, true, source)?;
         let (_, source_model, first) = *matches.first()?;
         let cost = first.cost.as_ref()?;
@@ -382,7 +383,7 @@ impl Catalog {
         Ok(self.vertex_choices())
     }
     fn vertex_choices(&self) -> VertexModels {
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         let Some(index) = state.index.as_ref() else {
             return VertexModels {
                 models: vec![],
@@ -432,14 +433,13 @@ impl Catalog {
         self.ensure_loaded();
         self.state
             .read()
-            .unwrap()
             .index
             .as_ref()
             .is_some_and(|index| qualified(index, source).is_some())
     }
     pub fn search(&self, query: &str, limit: usize) -> Search {
         self.ensure_loaded();
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         let Some(index) = &state.index else {
             return Search {
                 hits: vec![],
@@ -484,7 +484,7 @@ impl Catalog {
     }
     pub(crate) fn pricing_names(&self) -> BTreeMap<String, Option<String>> {
         self.ensure_loaded();
-        let state = self.state.read().unwrap();
+        let state = self.state.read();
         let mut names = BTreeMap::new();
         if let Some(index) = &state.index {
             for (provider_id, provider) in &index.providers {
@@ -887,10 +887,10 @@ mod tests {
         let cat = catalog(dir.path(), source(1));
         let frozen = cat.frozen();
         assert!(Arc::ptr_eq(
-            cat.state.read().unwrap().index.as_ref().unwrap(),
-            frozen.state.read().unwrap().index.as_ref().unwrap()
+            cat.state.read().index.as_ref().unwrap(),
+            frozen.state.read().index.as_ref().unwrap()
         ));
-        cat.state.write().unwrap().index = Some(Arc::new(crop(source(9)).unwrap()));
+        cat.state.write().index = Some(Arc::new(crop(source(9)).unwrap()));
         assert_eq!(
             cat.price("fixture-model").unwrap().0["models_dev_cost"]["input"],
             9

@@ -8,11 +8,12 @@ use crate::errors::code;
 use crate::storage::{self, AppError, Result};
 use http_body_util::BodyExt;
 use hyper::{header, Request};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
@@ -80,7 +81,7 @@ impl Service {
         }
     }
     pub fn cached(&self, id: &str, version: &str) -> View {
-        let disk = self.disk.lock().unwrap();
+        let disk = self.disk.lock();
         let mut view = disk.0.providers.get(id).cloned().unwrap_or(View {
             metadata: BTreeMap::new(),
             provider_id: id.into(),
@@ -100,7 +101,7 @@ impl Service {
     }
     /// Called only while the gateway holds its current provider/configuration lock.
     pub fn commit(&self, view: &View) -> Result<()> {
-        let mut disk = self.disk.lock().unwrap();
+        let mut disk = self.disk.lock();
         if disk.1 && view.error.is_some() {
             return Ok(());
         }
@@ -122,13 +123,13 @@ impl Service {
         }
         // In-flight queries may finish through their Arc, but can no longer
         // retain a deleted provider in the cache or pass Gateway's live check.
-        self.entries.lock().unwrap().retain(|key, _| {
+        self.entries.lock().retain(|key, _| {
             !ids.iter().any(|id| {
                 key.strip_prefix(id)
                     .is_some_and(|tail| tail.starts_with(':'))
             })
         });
-        let mut disk = self.disk.lock().unwrap();
+        let mut disk = self.disk.lock();
         // Keep a damaged file for recovery rather than replacing it with an empty cache.
         if disk.1 {
             return Ok(());
@@ -140,10 +141,7 @@ impl Service {
         Ok(())
     }
     pub fn discard_version(&self, id: &str, version: &str) {
-        self.entries
-            .lock()
-            .unwrap()
-            .remove(&format!("{id}:{version}"));
+        self.entries.lock().remove(&format!("{id}:{version}"));
     }
     pub async fn query_with_connection(
         &self,
@@ -157,7 +155,7 @@ impl Service {
         let began = Instant::now();
         let key = format!("{}:{}", input.id, input.version);
         let entry = {
-            let mut entries = self.entries.lock().unwrap();
+            let mut entries = self.entries.lock();
             entries.retain(|k, _| !k.starts_with(&format!("{}:", input.id)) || k == &key);
             entries
                 .entry(key)
@@ -227,7 +225,6 @@ pub(super) fn local_list(
             .0
             .inner
             .lock()
-            .unwrap()
             .store
             .dsh
             .as_ref()
@@ -263,7 +260,7 @@ pub(super) fn local_list(
         })).collect::<Vec<_>>()})
     };
     if anthropic {
-        let usage = gateway.0.usage.lock().unwrap().clone();
+        let usage = gateway.0.usage.lock().clone();
         let prices = usage.as_ref().and_then(|u| u.prices().ok());
         if let Some(prices) = prices {
             let (choices, _) = gateway.0.model_list.snapshot();
@@ -477,14 +474,12 @@ mod v02514_tests {
         service
             .entries
             .lock()
-            .unwrap()
             .insert("fixture:v1".into(), entry.clone());
         service
             .entries
             .lock()
-            .unwrap()
             .insert("fixture:v2".into(), entry.clone());
-        service.entries.lock().unwrap().insert(
+        service.entries.lock().insert(
             "fixture-other:v1".into(),
             Arc::new(AsyncMutex::new(Entry {
                 view: service.cached("fixture-other", "v1"),
@@ -492,17 +487,16 @@ mod v02514_tests {
             })),
         );
         service.remove(&["fixture".into()]).unwrap();
-        assert_eq!(service.entries.lock().unwrap().len(), 1);
+        assert_eq!(service.entries.lock().len(), 1);
         // A query captured before deletion may acquire its memory entry afterwards.
         service
             .entries
             .lock()
-            .unwrap()
             .insert("fixture:v1".into(), entry.clone());
         service.discard_version("fixture", "v1");
         drop(entry);
         assert!(stale.upgrade().is_none());
-        assert_eq!(service.entries.lock().unwrap().len(), 1);
+        assert_eq!(service.entries.lock().len(), 1);
     }
     #[test]
     fn corrupt_and_oversized_cache_is_preserved_until_success_and_reopens() {

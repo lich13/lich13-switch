@@ -148,9 +148,9 @@ async fn completion_handle_keeps_one_record_until_attempt_drop_and_preserves_met
     // completion state and must not create a second record.
     completion.saved(generation, RoutingOutcome::OwnerPreserved);
     drop(attempt);
-    let before = trace.0.attempts.lock().unwrap()[0].clone();
+    let before = trace.0.attempts.lock()[0].clone();
     completion.saved(generation, RoutingOutcome::OwnerPreserved);
-    let after = trace.0.attempts.lock().unwrap()[0].clone();
+    let after = trace.0.attempts.lock()[0].clone();
     assert_eq!(before.duration_ms, after.duration_ms);
     assert_eq!(before.started_at, after.started_at);
     assert_eq!(
@@ -207,7 +207,7 @@ async fn completion_receipts_are_generation_ordered_and_save_failed_is_sticky() 
     completion.saved(second, RoutingOutcome::OwnerPreserved);
     drop(attempt);
     assert_eq!(
-        trace.0.attempts.lock().unwrap()[0].routing_outcome,
+        trace.0.attempts.lock()[0].routing_outcome,
         Some(RoutingOutcome::SaveFailed),
         "stale or later success receipts must not hide SaveFailed"
     );

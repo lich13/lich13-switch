@@ -185,7 +185,7 @@ async fn cancellation_and_stop_during_owner_wait_do_not_send_another_attempt() {
     for stop in [false, true] {
         let (_dir, gateway, _port, backup) = setup().await;
         let (token, port) = {
-            let state = gateway.0.inner.lock().unwrap();
+            let state = gateway.0.inner.lock();
             (state.store.local_token.clone(), state.store.settings.port)
         };
         let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))

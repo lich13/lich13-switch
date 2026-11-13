@@ -13,13 +13,9 @@ use crate::gateway::{
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::Response;
+use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    fs,
-    net::TcpListener,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{fs, net::TcpListener, sync::Arc, time::Duration};
 
 fn policy_provider(id: &str, handoff: bool, take: bool) -> Provider {
     Provider {
@@ -620,7 +616,7 @@ async fn legacy_provider_capability_is_ignored_and_native_upgrade_forwards_exact
                 };
                 if let Some(frame) = peer.next().await {
                     if !frame.opcode().is_control() {
-                        captured.lock().unwrap().push(frame.payload().to_vec());
+                        captured.lock().push(frame.payload().to_vec());
                         let _ = peer
                             .send(yawc::Frame::text(
                                 r#"{"type":"response.created","response":{"id":"fixture-native"}}"#,
@@ -698,7 +694,7 @@ async fn legacy_provider_capability_is_ignored_and_native_upgrade_forwards_exact
         .await
         .unwrap();
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let mut client = yawc::WebSocket::connect(
@@ -733,7 +729,7 @@ async fn legacy_provider_capability_is_ignored_and_native_upgrade_forwards_exact
         .as_str()
         .contains("response.completed"));
     settled(&gateway).await;
-    assert_eq!(observed.lock().unwrap().as_slice(), &[payload.to_vec()]);
+    assert_eq!(observed.lock().as_slice(), &[payload.to_vec()]);
     client
         .send(yawc::Frame::close(1000.into(), "fixture done"))
         .await

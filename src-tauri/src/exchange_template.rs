@@ -1,11 +1,11 @@
 //! Private, lossless Sub2API templates. Only the selected prototype is retained.
 use crate::errors::code;
 use crate::storage::{self, AppError, Result};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     path::Path,
-    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -152,7 +152,7 @@ pub fn oauth_envelope(document: &Value) -> Value {
 
 impl Service {
     pub fn prune(&self) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
         if pending
             .as_ref()
             .is_some_and(|p| p.at.elapsed() >= Duration::from_secs(900))
@@ -162,7 +162,7 @@ impl Service {
     }
 
     pub fn cancel(&self, token: &str) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
         if pending.as_ref().is_some_and(|p| p.token == token) {
             pending.take();
         }
@@ -218,11 +218,11 @@ impl Service {
         }
         if rows.len() == 1 {
             Self::save(document, rows[0].id, path, platform, kind)?;
-            self.pending.lock().unwrap().take();
+            self.pending.lock().take();
             return Ok(Prepared::ready());
         }
         let token = uuid::Uuid::new_v4().to_string();
-        *self.pending.lock().unwrap() = Some(Pending {
+        *self.pending.lock() = Some(Pending {
             token: token.clone(),
             document,
             rows: rows.clone(),
@@ -245,7 +245,7 @@ impl Service {
         platform: &str,
         kind: &str,
     ) -> Result<()> {
-        let mut guard = self.pending.lock().unwrap();
+        let mut guard = self.pending.lock();
         let pending = guard
             .as_ref()
             .filter(|p| {

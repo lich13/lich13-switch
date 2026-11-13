@@ -8,11 +8,11 @@ use crate::{
     errors::code,
     storage::{self, AppError, Result},
 };
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 use toml_edit::{value, DocumentMut, Item, Table};
 
@@ -426,8 +426,8 @@ impl Gateway {
         if self.0.client != ClientId::Grok {
             return Err(error("此操作仅适用于 Grok Build"));
         }
-        *self.0.grok_import.0.lock().unwrap() = None;
-        let s = self.0.inner.lock().unwrap();
+        *self.0.grok_import.0.lock() = None;
+        let s = self.0.inner.lock();
         if s.running || self.0.data.join("gateway-recovery.json").exists() {
             return Err(error("请先停用 Grok 网关并完成配置恢复，再导入"));
         }
@@ -524,14 +524,14 @@ impl Gateway {
         match prepared {
             Ok(pending) => {
                 preview.token = Some(pending.token.clone());
-                *self.0.grok_import.0.lock().unwrap() = Some(pending);
+                *self.0.grok_import.0.lock() = Some(pending);
             }
             Err(e) => preview.error = Some(e.message),
         }
         Ok(preview)
     }
     pub fn cancel_grok_import(&self, token: Option<&str>) {
-        let mut pending = self.0.grok_import.0.lock().unwrap();
+        let mut pending = self.0.grok_import.0.lock();
         if token.is_none()
             || pending
                 .as_ref()
@@ -546,9 +546,9 @@ impl Gateway {
             .lifecycle
             .try_lock()
             .map_err(|_| error("Grok 网关正在启停"))?;
-        let _mutation = self.0.registry.mutation.lock().unwrap();
-        let mut s = self.0.inner.lock().unwrap();
-        let mut pending = self.0.grok_import.0.lock().unwrap();
+        let _mutation = self.0.registry.mutation.lock();
+        let mut s = self.0.inner.lock();
+        let mut pending = self.0.grok_import.0.lock();
         let p = pending
             .as_ref()
             .filter(|p| p.token == token)

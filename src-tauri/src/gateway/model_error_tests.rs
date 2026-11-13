@@ -3,11 +3,12 @@ use crate::gateway::{failure_policy, protocol::Terminal};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::Response;
+use parking_lot::Mutex;
 use std::{
     io::Write,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -377,7 +378,7 @@ async fn previous_response_affinity_stays_on_owner_after_priority_changes() {
         let seen = seen.clone();
         async move {
             let body = req.into_body().collect().await.unwrap().to_bytes();
-            seen.lock().unwrap().push(body);
+            seen.lock().push(body);
             Response::builder()
                 .header("content-type", "application/json")
                 .body(full(
@@ -425,7 +426,7 @@ async fn previous_response_affinity_stays_on_owner_after_priority_changes() {
     assert_eq!(second_response.status(), 200);
     second_response.into_body().collect().await.unwrap();
     assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
-    assert_eq!(first_bodies.lock().unwrap().len(), 2);
+    assert_eq!(first_bodies.lock().len(), 2);
     g.stop().await.unwrap();
 }
 

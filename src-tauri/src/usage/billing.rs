@@ -446,7 +446,7 @@ fn cleanup(
 impl Service {
     pub fn export_bill(&self, request: &Request, path: &Path) -> Result<Exported> {
         request.validate()?;
-        let mut syncing = self.0.syncing.lock().unwrap();
+        let mut syncing = self.0.syncing.lock();
         if *syncing {
             return Err(failure("用量正在同步，请完成后导出"));
         }
@@ -466,7 +466,7 @@ impl Service {
             }
             Ok(result)
         })();
-        *self.0.syncing.lock().unwrap() = false;
+        *self.0.syncing.lock() = false;
         let _ = self.0.events.send(());
         result
     }

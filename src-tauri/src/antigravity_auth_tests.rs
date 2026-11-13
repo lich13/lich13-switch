@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use tempfile::TempDir;
 
 struct MockLifecycle {
@@ -20,32 +20,32 @@ impl MockLifecycle {
     }
 
     fn events(&self) -> Vec<&'static str> {
-        self.events.lock().unwrap().clone()
+        self.events.lock().clone()
     }
 }
 
 impl AppLifecycle for MockLifecycle {
     fn is_running(&self) -> Result<bool> {
-        Ok(*self.running.lock().unwrap())
+        Ok(*self.running.lock())
     }
 
     fn quit(&self) -> Result<()> {
-        drop(AUTH_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
-        self.events.lock().unwrap().push("quit");
+        drop(AUTH_LOCK.lock());
+        self.events.lock().push("quit");
         if self.fail_quit {
             return Err(AppError::new(code::PROCESS, "模拟退出 Antigravity 失败"));
         }
-        *self.running.lock().unwrap() = false;
+        *self.running.lock() = false;
         Ok(())
     }
 
     fn launch(&self) -> Result<()> {
-        drop(AUTH_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
-        self.events.lock().unwrap().push("launch");
+        drop(AUTH_LOCK.lock());
+        self.events.lock().push("launch");
         if self.fail_launch {
             return Err(AppError::new(code::PROCESS, "模拟重启 Antigravity 失败"));
         }
-        *self.running.lock().unwrap() = true;
+        *self.running.lock() = true;
         Ok(())
     }
 }

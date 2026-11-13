@@ -6,6 +6,7 @@ use crate::errors::code;
 use crate::storage::{AppError, Result};
 use http_body_util::BodyExt;
 use hyper::{header, Request};
+use parking_lot::Mutex;
 use probe::ProbeStore;
 use serde::Serialize;
 use serde_json::Value;
@@ -13,7 +14,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -134,7 +135,7 @@ impl Service {
     }
     pub fn set_interval(&self, seconds: u64) {
         self.0.interval.store(seconds, Ordering::Relaxed);
-        for e in self.0.entries.lock().unwrap().values_mut() {
+        for e in self.0.entries.lock().values_mut() {
             self.schedule(&mut e.view);
             let _ = self.0.events.send(e.view.clone());
         }
@@ -164,7 +165,6 @@ impl Service {
         self.0
             .entries
             .lock()
-            .unwrap()
             .get(id)
             .filter(|e| e.view.version == version)
             .map(|e| {
@@ -174,17 +174,16 @@ impl Service {
             })
     }
     pub fn retain(&self, versions: &HashMap<String, String>) {
-        self.0.probes.lock().unwrap().retain(versions);
+        self.0.probes.lock().retain(versions);
         self.0
             .entries
             .lock()
-            .unwrap()
             .retain(|id, e| versions.get(id) == Some(&e.view.version));
     }
     pub async fn query(&self, input: Query, force: bool) -> Result<QuotaView> {
         let retry_at = self.query_retry_at(&input);
         let mut rx = {
-            let mut entries = self.0.entries.lock().unwrap();
+            let mut entries = self.0.entries.lock();
             let e = entries.entry(input.id.clone()).or_insert_with(|| Entry {
                 view: QuotaView::empty(&input.id, &input.version),
                 flight: None,
@@ -261,7 +260,7 @@ impl Service {
                         }
                     }
                     service.schedule(&mut view);
-                    let mut entries = service.0.entries.lock().unwrap();
+                    let mut entries = service.0.entries.lock();
                     if let Some(e) = entries
                         .get_mut(&input.id)
                         .filter(|e| e.view.version == input.version)

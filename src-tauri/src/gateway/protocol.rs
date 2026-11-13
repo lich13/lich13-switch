@@ -668,7 +668,7 @@ pub struct Delivery {
     pub finished: std::sync::atomic::AtomicBool,
     // 1: body dropped; 2: HTTP connection error; 3: downstream stall.
     pub error: std::sync::atomic::AtomicU8,
-    activity: std::sync::Mutex<Option<std::sync::Arc<super::wire_progress::Activity>>>,
+    activity: parking_lot::Mutex<Option<std::sync::Arc<super::wire_progress::Activity>>>,
     request_sequence: std::sync::atomic::AtomicU64,
     settled: std::sync::atomic::AtomicBool,
     settled_notify: tokio::sync::Notify,
@@ -682,7 +682,7 @@ impl Delivery {
             activity.begin_request(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        *self.activity.lock().unwrap() = Some(activity.clone());
+        *self.activity.lock() = Some(activity.clone());
         activity.track(self);
     }
     pub fn is_settled(&self) -> bool {
@@ -705,7 +705,7 @@ impl Delivery {
         }
     }
     pub async fn wait(&self) {
-        if self.activity.lock().unwrap().is_none() {
+        if self.activity.lock().is_none() {
             return;
         }
         while !self.is_settled() {
@@ -721,7 +721,7 @@ impl Delivery {
         }
     }
     pub fn event(&self, kind: &str) {
-        if let Some(activity) = self.activity.lock().unwrap().as_ref() {
+        if let Some(activity) = self.activity.lock().as_ref() {
             activity.event(kind);
         }
     }
@@ -729,7 +729,7 @@ impl Delivery {
         if self.finished.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        let activity = self.activity.lock().unwrap();
+        let activity = self.activity.lock();
         let code = activity.as_ref().map_or(0, |a| a.error_code());
         if let Some(activity) = activity.as_ref() {
             activity.event("response_body_cancelled");
@@ -785,7 +785,7 @@ pub struct Protocol {
     end_reason: Option<String>,
     routing_fault: bool,
     routing_tail_failure: bool,
-    fault_reports: std::sync::Mutex<FaultReports>,
+    fault_reports: parking_lot::Mutex<FaultReports>,
     failover_generation: std::sync::atomic::AtomicU64,
 }
 impl Protocol {
@@ -822,7 +822,7 @@ impl Protocol {
             end_reason: None,
             routing_fault: false,
             routing_tail_failure: false,
-            fault_reports: std::sync::Mutex::default(),
+            fault_reports: parking_lot::Mutex::default(),
             failover_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -859,20 +859,14 @@ impl Protocol {
         }
     }
     pub fn diagnostics(&mut self, gateway: &super::Gateway, provider: &str, model: Option<&str>) {
-        self.diagnostics = gateway
-            .0
-            .diagnostics
-            .lock()
-            .unwrap()
-            .clone()
-            .map(|service| {
-                (
-                    service,
-                    gateway.client_id(),
-                    provider.into(),
-                    model.map(str::to_owned),
-                )
-            });
+        self.diagnostics = gateway.0.diagnostics.lock().clone().map(|service| {
+            (
+                service,
+                gateway.client_id(),
+                provider.into(),
+                model.map(str::to_owned),
+            )
+        });
     }
     pub fn downstream_closed(&mut self, activity: &super::wire_progress::Activity, writing: bool) {
         super::attempt::DownstreamEnd::PeerClosed {
@@ -1151,7 +1145,8 @@ impl Protocol {
             || unspecified
             || self.routing_tail_failure
         {
-            if let Ok(mut reports) = self.fault_reports.lock() {
+            {
+                let mut reports = self.fault_reports.lock();
                 reports.observe(RoutingFault {
                     protocol_sequence: self.observation.fault_sequence,
                     error,
@@ -1175,10 +1170,11 @@ impl Protocol {
         emit: impl FnOnce() -> super::health_settlement::Reported,
     ) -> super::health_settlement::Reported {
         self.observe_routing_fault();
-        let generation = self.fault_reports.lock().ok().map(|state| state.generation);
+        let generation = Some(self.fault_reports.lock().generation);
         let report = emit();
         if report.queued {
-            if let Ok(mut state) = self.fault_reports.lock() {
+            {
+                let mut state = self.fault_reports.lock();
                 if generation == Some(state.generation) {
                     state.reported = state.generation;
                 }
@@ -1531,7 +1527,6 @@ impl Protocol {
             .delivery
             .activity
             .lock()
-            .unwrap()
             .as_ref()
             .map(|activity| activity.snapshot(self.delivery.request_sequence.load(Relaxed)));
         self.transfer.response_hash = self
@@ -1656,9 +1651,7 @@ impl Protocol {
         )
     }
     fn routing_settlement(&self, interruption_reported: bool) -> RoutingSettlement {
-        let Ok(reports) = self.fault_reports.lock() else {
-            return RoutingSettlement::Failed;
-        };
+        let reports = self.fault_reports.lock();
         let upstream_fault = reports.observed.is_some();
         let interruption = (self.transfer.downstream_error.is_some() && !self.downstream_close())
             || matches!(

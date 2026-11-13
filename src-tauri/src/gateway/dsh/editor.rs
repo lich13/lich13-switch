@@ -314,7 +314,7 @@ impl Gateway {
         if storage::revision(before.as_deref().map(str::as_bytes)) != expected {
             return Err(conflict());
         }
-        let snapshot = self.0.inner.lock().unwrap().store.dsh.clone();
+        let snapshot = self.0.inner.lock().store.dsh.clone();
         if let Some(snapshot) = snapshot.filter(|s| s.active) {
             if key == FileKey::ProfilePatch {
                 if let Some(active) = profile

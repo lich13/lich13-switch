@@ -99,8 +99,8 @@ fn settings_backup_symlink_is_not_followed_and_backup_failure_is_reported() {
 fn successful_configure_clears_only_settings_error() {
     let temp = tempfile::tempdir().unwrap();
     let service = Service::new(temp.path());
-    *service.0.settings_error.lock().unwrap() = Some("stale settings error".into());
-    *service.0.error.lock().unwrap() = Some("unrelated service error".into());
+    *service.0.settings_error.lock() = Some("stale settings error".into());
+    *service.0.error.lock() = Some("unrelated service error".into());
     let settings = Settings {
         log_columns: Default::default(),
         log_number_mode: "compact".into(),
@@ -113,7 +113,7 @@ fn successful_configure_clears_only_settings_error() {
 
     let state = service.configure(settings.clone()).unwrap();
 
-    assert!(service.0.settings_error.lock().unwrap().is_none());
+    assert!(service.0.settings_error.lock().is_none());
     assert_eq!(state.error.as_deref(), Some("unrelated service error"));
     assert!(!state.settings.recording);
     assert!(!state.settings.auto_sync);

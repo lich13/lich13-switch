@@ -1,7 +1,8 @@
 //! One deadline and cancellation boundary cover a request up to effective output.
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -65,7 +66,7 @@ impl Registry {
         }))
     }
     fn remove(&self, id: &str) {
-        self.0.requests.lock().unwrap().remove(id);
+        self.0.requests.lock().remove(id);
         let _ = self.0.events.send(());
     }
     pub fn view(&self) -> Vec<PendingRequest> {
@@ -73,14 +74,13 @@ impl Registry {
             .0
             .requests
             .lock()
-            .unwrap()
             .values()
             .filter_map(Weak::upgrade)
             .collect();
         let mut result: Vec<_> = entries
             .iter()
             .filter_map(|shared| {
-                let state = shared.state.lock().unwrap();
+                let state = shared.state.lock();
                 let active = state.active.as_ref()?;
                 let mut view = active.view.clone();
                 view.elapsed_seconds = active
@@ -110,17 +110,11 @@ impl Registry {
         result
     }
     pub fn cancel(&self, id: &str) -> bool {
-        let shared = self
-            .0
-            .requests
-            .lock()
-            .unwrap()
-            .get(id)
-            .and_then(Weak::upgrade);
+        let shared = self.0.requests.lock().get(id).and_then(Weak::upgrade);
         let Some(shared) = shared else {
             return false;
         };
-        let mut state = shared.state.lock().unwrap();
+        let mut state = shared.state.lock();
         if !state.active.as_ref().is_some_and(|p| {
             p.view.request_id == id
                 && (p.compaction_execution || p.paused() || p.expires_at() > Instant::now())
@@ -136,9 +130,7 @@ impl Registry {
 }
 impl Drop for Shared {
     fn drop(&mut self) {
-        if let (Some(registry), Some(active)) =
-            (&self.registry, &self.state.get_mut().unwrap().active)
-        {
+        if let (Some(registry), Some(active)) = (&self.registry, &self.state.get_mut().active) {
             registry.remove(&active.view.request_id);
         }
     }
@@ -171,7 +163,7 @@ impl WaitBudget {
     }
     pub fn begin_at(&self, started: Instant) {
         let id = uuid::Uuid::new_v4().to_string();
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock();
         if let (Some(registry), Some(old)) = (&self.shared.registry, state.active.take()) {
             registry.remove(&old.view.request_id);
         }
@@ -201,7 +193,6 @@ impl WaitBudget {
                 .0
                 .requests
                 .lock()
-                .unwrap()
                 .insert(id, Arc::downgrade(&self.shared));
             let _ = registry.0.events.send(());
         }
@@ -209,7 +200,7 @@ impl WaitBudget {
         self.shared.changes.send_replace(());
     }
     pub fn attach_traffic(&self, traffic: &super::freeze::Ticket) {
-        if let Some(active) = &mut self.shared.state.lock().unwrap().active {
+        if let Some(active) = &mut self.shared.state.lock().active {
             active.paused_before = traffic.paused_for();
             active.traffic = Some(traffic.clone());
         }
@@ -219,13 +210,12 @@ impl WaitBudget {
         self.shared
             .state
             .lock()
-            .unwrap()
             .active
             .as_ref()
             .and_then(|p| p.traffic.clone())
     }
     pub fn describe(&self, provider: Option<&str>, model: Option<&str>, phase: &str) {
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock();
         if let Some(active) = &mut state.active {
             if matches!(phase, "admission" | "capacity" | "retry" | "ws_wait") {
                 if let Some(traffic) = &active.traffic {
@@ -248,16 +238,10 @@ impl WaitBudget {
         }
     }
     pub fn deadline(&self) -> Option<Instant> {
-        self.shared
-            .state
-            .lock()
-            .unwrap()
-            .active
-            .as_ref()
-            .map(|p| p.deadline)
+        self.shared.state.lock().active.as_ref().map(|p| p.deadline)
     }
     pub fn compaction_execution(&self, deadline: Option<Instant>, executing: bool) {
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock();
         if let Some(active) = state
             .active
             .as_mut()
@@ -278,7 +262,6 @@ impl WaitBudget {
         self.shared
             .state
             .lock()
-            .unwrap()
             .active
             .as_ref()
             .is_some_and(|p| p.compaction_execution)
@@ -308,7 +291,7 @@ impl WaitBudget {
         }
     }
     pub fn complete(&self, deadline: Option<Instant>) {
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock();
         if state
             .active
             .as_ref()
@@ -322,34 +305,28 @@ impl WaitBudget {
         self.shared.changes.send_replace(());
     }
     pub fn is_cancelled(&self, deadline: Option<Instant>) -> bool {
-        let state = self.shared.state.lock().unwrap();
+        let state = self.shared.state.lock();
         state.cancelled.is_some() && state.cancelled == deadline
     }
     pub fn cancel_requested(&self) -> bool {
-        self.shared.state.lock().unwrap().cancelled.is_some()
+        self.shared.state.lock().cancelled.is_some()
     }
     pub fn acknowledge_cancel(&self) {
-        self.shared.state.lock().unwrap().cancelled = None;
+        self.shared.state.lock().cancelled = None;
     }
     pub fn expired(&self, deadline: Option<Instant>) -> bool {
-        self.shared
-            .state
-            .lock()
-            .unwrap()
-            .active
-            .as_ref()
-            .is_some_and(|p| {
-                !p.compaction_execution
-                    && Some(p.deadline) == deadline
-                    && !p.paused()
-                    && Instant::now() >= p.expires_at()
-            })
+        self.shared.state.lock().active.as_ref().is_some_and(|p| {
+            !p.compaction_execution
+                && Some(p.deadline) == deadline
+                && !p.paused()
+                && Instant::now() >= p.expires_at()
+        })
     }
     pub async fn cancelled(&self) {
         let mut changes = self.shared.changes.subscribe();
         loop {
             changes.borrow_and_update();
-            if self.shared.state.lock().unwrap().cancelled.is_some() {
+            if self.shared.state.lock().cancelled.is_some() {
                 return;
             }
             if changes.changed().await.is_err() {
@@ -366,7 +343,6 @@ impl WaitBudget {
                 .shared
                 .state
                 .lock()
-                .unwrap()
                 .active
                 .as_ref()
                 .filter(|p| !p.compaction_execution && !p.paused())

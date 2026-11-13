@@ -62,7 +62,6 @@ fn finish_attempt(trace: &super::Trace, attempt: super::AttemptTrace) -> Attempt
         .0
         .attempts
         .lock()
-        .unwrap()
         .iter()
         .find(|attempt| attempt.id == id)
         .cloned()

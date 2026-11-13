@@ -764,7 +764,7 @@ fn pending_usage_record_is_replayed_after_the_writer_recovers() {
     );
     // Drop the live connection to model a transient database outage. The
     // writer must reopen it and replay the durable pending record.
-    service.0.store.lock().unwrap().take();
+    service.0.store.lock().take();
     service.0.persist_pending(&row).unwrap();
     let pending = dir
         .path()

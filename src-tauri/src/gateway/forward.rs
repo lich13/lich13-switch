@@ -43,7 +43,7 @@ pub async fn serve(
                     let connection_activity = activity.clone();
                     let service=hyper::service::service_fn(move|mut request: Request<Incoming>|{
                         let antigravity = request.uri().path().starts_with("/antigravity/");
-                        let vertex = antigravity.then(|| (registry.antigravity.lock().unwrap().clone(), registry.freeze.clone()));
+                        let vertex = antigravity.then(|| (registry.antigravity.lock().clone(), registry.freeze.clone()));
                         let routed = (!antigravity).then(|| super::listener::route(request.uri(), request.headers(), &registry).and_then(|(client, uri)| {
                             *request.uri_mut() = uri;
                             registry.gateway(client).ok_or(super::listener::RouteError::NotFound)

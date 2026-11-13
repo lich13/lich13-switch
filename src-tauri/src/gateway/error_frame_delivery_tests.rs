@@ -6,9 +6,10 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Request, Response};
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use std::{
     convert::Infallible,
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 use tokio::{
@@ -92,7 +93,7 @@ async fn run_case(streaming: bool, ending: ConsumerEnd) -> (u8, bool, Vec<String
         .start(&gateway.view().revision, temp.path())
         .await
         .unwrap();
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let delivery = Arc::new(Delivery::default());
     let activity = Arc::new(Activity::default());
     delivery.track(activity.clone());
@@ -118,12 +119,7 @@ async fn run_case(streaming: bool, ending: ConsumerEnd) -> (u8, bool, Vec<String
                 let response = forward(gateway, request).await;
                 let mut body = response.into_body();
                 let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
-                seen.lock()
-                    .unwrap()
-                    .take()
-                    .unwrap()
-                    .send(bytes.to_vec())
-                    .unwrap();
+                seen.lock().take().unwrap().send(bytes.to_vec()).unwrap();
                 held_body.notified().await;
                 drop(body);
                 Ok::<_, Infallible>(Response::new(replay::full(Vec::new())))

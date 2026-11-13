@@ -2,7 +2,8 @@ use super::super::store::Store;
 use super::*;
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Bytes, service::service_fn, Response};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 fn step() -> Value {
     json!({"metadata":{"executionId":"exec","startedAt":"2026-01-01T00:00:00Z","finishedGeneratingAt":"2026-01-01T00:00:02Z","completedAt":"2026-01-01T00:00:30Z"}})
@@ -358,7 +359,7 @@ async fn fixture(broken: bool) -> Fixture {
                             &r.into_body().collect().await.unwrap().to_bytes(),
                         )
                         .unwrap();
-                        history.lock().unwrap().push((method.clone(), body.clone()));
+                        history.lock().push((method.clone(), body.clone()));
                         let value = if body["cascadeId"] == "a-broken" {
                             json!({"unexpected":"fixture"})
                         } else {
@@ -370,7 +371,7 @@ async fn fixture(broken: bool) -> Fixture {
                                     json!({"response":{"groups":[{"buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2026-11-05T18:00:00Z"}]}]}})
                                 }
                                 "GetAllCascadeTrajectories" => {
-                                    let mut summaries = json!({"z-good":{"lastModifiedTime":*version.lock().unwrap(),"stepCount":2}});
+                                    let mut summaries = json!({"z-good":{"lastModifiedTime":*version.lock(),"stepCount":2}});
                                     if broken {
                                         summaries["a-broken"] =
                                             json!({"lastModifiedTime":"first","stepCount":1});
@@ -381,7 +382,7 @@ async fn fixture(broken: bool) -> Fixture {
                                     let offset =
                                         body["generatorMetadataOffset"].as_u64().unwrap_or(0)
                                             as usize;
-                                    let mut entries = metadata.lock().unwrap().clone();
+                                    let mut entries = metadata.lock().clone();
                                     if body["cascadeId"] != "z-good" {
                                         for (i, entry) in entries.iter_mut().enumerate() {
                                             let response = json!(format!(
@@ -519,8 +520,8 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
             .as_deref(),
         Some("Fixture Model")
     );
-    f.calls.lock().unwrap().clear();
-    *f.changed.lock().unwrap() = "next".into();
+    f.calls.lock().clear();
+    *f.changed.lock() = "next".into();
     let sequence: i64 = store
         .connection
         .query_row(
@@ -549,7 +550,7 @@ async fn manual_repair_bypasses_cursor_and_incremental_sync_reads_only_needed_st
         )
         .unwrap();
     assert_eq!(sequence, next);
-    let calls = f.calls.lock().unwrap();
+    let calls = f.calls.lock();
     assert!(!calls.iter().any(|(m, _)| m == "GetCascadeTrajectory"));
     assert!(calls
         .iter()
@@ -597,7 +598,7 @@ async fn failed_session_does_not_block_other_sessions_or_advance_its_cursor() {
 async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_transcript() {
     let f = fixture(false).await;
     let dir = tempfile::tempdir().unwrap();
-    f.entries.lock().unwrap()[1]
+    f.entries.lock()[1]
         .as_object_mut()
         .unwrap()
         .remove("stepIndices");
@@ -658,14 +659,12 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
     assert!(f
         .calls
         .lock()
-        .unwrap()
         .iter()
         .filter(|(m, _)| m == "GetCascadeTrajectorySteps")
         .all(|(_, b)| b["trajectoryVerbosity"] == 2));
     assert_eq!(
         f.calls
             .lock()
-            .unwrap()
             .iter()
             .filter(|(m, b)| {
                 m == "GetCascadeTrajectoryGeneratorMetadata" && b["cascadeId"] == "local-only"
@@ -706,7 +705,6 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
     assert_eq!(
         f.calls
             .lock()
-            .unwrap()
             .iter()
             .filter(|(m, b)| {
                 m == "GetCascadeTrajectoryGeneratorMetadata" && b["cascadeId"] == "local-only"
@@ -719,9 +717,9 @@ async fn local_history_discovers_unlisted_sessions_and_fallback_steps_cover_tran
 #[tokio::test]
 async fn missing_identity_keeps_gap_but_saves_later_requests_and_repairs_after_restart() {
     let f = fixture(false).await;
-    let original = f.entries.lock().unwrap()[0].clone();
+    let original = f.entries.lock()[0].clone();
     {
-        let mut entries = f.entries.lock().unwrap();
+        let mut entries = f.entries.lock();
         entries[0].as_object_mut().unwrap().remove("executionId");
         entries[0]["chatModel"]
             .as_object_mut()
@@ -759,7 +757,7 @@ async fn missing_identity_keeps_gap_but_saves_later_requests_and_repairs_after_r
     assert!(cursor.modified.is_empty());
     assert_eq!(cursor.covered, BTreeSet::from([1]));
     drop(store);
-    f.entries.lock().unwrap()[0] = original;
+    f.entries.lock()[0] = original;
     let mut store = Store::open(dir.path()).unwrap();
     for _ in 0..2 {
         let mut report = Report::default();
@@ -1621,7 +1619,7 @@ fn remove_superseded_rejects_invalid_ids_wrong_sources_missing_rpc_and_rolls_bac
 async fn rpc_sync_does_not_delete_history_step_when_later_entry_in_same_session_fails_that_step() {
     let f = fixture(false).await;
     {
-        let mut entries = f.entries.lock().unwrap();
+        let mut entries = f.entries.lock();
         let mut bad = entry("bad-second", 1);
         bad["chatModel"]["usage"]
             .as_object_mut()
@@ -1961,7 +1959,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
                     .collect::<Vec<_>>())
             })
             .unwrap();
-        fixture.calls.lock().unwrap().clear();
+        fixture.calls.lock().clear();
         let state = auth::with_usage_sync(
             true,
             || {
@@ -1987,7 +1985,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
             || {
                 let switched =
                     auth::switch_fixture_account(&paths, &Lifecycle, &adc, &added.revision)?;
-                *fixture.changed.lock().unwrap() = "after-switch".into();
+                *fixture.changed.lock() = "after-switch".into();
                 Ok(switched)
             },
         )
@@ -2015,7 +2013,7 @@ async fn credential_switch_reuses_incremental_cursors_before_and_after() {
                 .unwrap(),
             2
         );
-        let calls = fixture.calls.lock().unwrap();
+        let calls = fixture.calls.lock();
         assert!(!calls.iter().any(|(m, _)| m == "GetCascadeTrajectory"));
         assert!(calls
             .iter()
@@ -2084,7 +2082,7 @@ async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
         "an unchanged untitled legacy cursor needs no write"
     );
     let before = store.logs(&Filter::default()).unwrap();
-    fixture.calls.lock().unwrap().clear();
+    fixture.calls.lock().clear();
     summary["summary"] = json!("修改后的会话");
     fixture
         .api
@@ -2101,7 +2099,7 @@ async fn session_title_changes_only_cursor_metadata_and_survives_app_closure() {
         )
         .await
         .unwrap();
-    assert!(fixture.calls.lock().unwrap().is_empty());
+    assert!(fixture.calls.lock().is_empty());
     let after = store.logs(&Filter::default()).unwrap();
     assert_eq!(before.data_version, after.data_version);
     assert_eq!(

@@ -5,14 +5,10 @@ use super::{
     query, storage_v12,
 };
 use crate::storage::{self, Result};
+use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{
-    cell::Cell,
-    collections::BTreeMap,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{cell::Cell, collections::BTreeMap, path::Path, sync::Arc};
 const DAY: i64 = 86_400_000;
 #[derive(Default)]
 pub(super) struct BackfillCursor {
@@ -326,13 +322,13 @@ impl Store {
     pub fn dashboard(&self, f: &Filter) -> Result<Dashboard> {
         let _snapshot = self.read_snapshot()?;
         let key = query::overview_key(&self.connection, f)?;
-        if let Some((saved, view)) = self.overview_cache.lock().unwrap().as_ref() {
+        if let Some((saved, view)) = self.overview_cache.lock().as_ref() {
             if saved == &key {
                 return Ok(view.clone());
             }
         }
         let view = query::dashboard(&self.connection, f, self.detail_since()?)?;
-        *self.overview_cache.lock().unwrap() = Some((key, view.clone()));
+        *self.overview_cache.lock() = Some((key, view.clone()));
         Ok(view)
     }
     pub(super) fn save_antigravity_quota(

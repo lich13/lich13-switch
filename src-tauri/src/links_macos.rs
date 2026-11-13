@@ -1,7 +1,8 @@
 use super::*;
 use objc2_app_kit::NSWorkspace;
 use objc2_foundation::{NSBundle, NSError, NSString, NSURL};
-use std::{path::Path, sync::Mutex};
+use parking_lot::Mutex;
+use std::path::Path;
 
 pub fn installed() -> bool {
     let bundle = NSBundle::mainBundle();
@@ -33,7 +34,7 @@ pub fn ensure(tx: tokio::sync::oneshot::Sender<Result<()>>) {
     }
     let tx = Mutex::new(Some(tx));
     let block = block2::RcBlock::new(move |error: *mut NSError| {
-        if let Some(tx) = tx.lock().unwrap().take() {
+        if let Some(tx) = tx.lock().take() {
             let _ = tx.send(if error.is_null() && current_is_self() {
                 Ok(())
             } else {

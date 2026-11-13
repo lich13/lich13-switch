@@ -10,7 +10,7 @@ use tokio::sync::Semaphore;
 
 struct NativeState {
     connections: AtomicUsize,
-    requests: std::sync::Mutex<Vec<Vec<u8>>>,
+    requests: parking_lot::Mutex<Vec<Vec<u8>>>,
     request_seen: Semaphore,
 }
 
@@ -21,7 +21,7 @@ where
 {
     let state = Arc::new(NativeState {
         connections: AtomicUsize::new(0),
-        requests: std::sync::Mutex::new(Vec::new()),
+        requests: parking_lot::Mutex::new(Vec::new()),
         request_seen: Semaphore::new(0),
     });
     let shared_state = state.clone();
@@ -72,11 +72,7 @@ async fn wait_for_websocket_retry(gateway: &Gateway, phase: &'static str) {
 
 fn record_native_request(state: &NativeState, frame: &yawc::Frame) {
     if !frame.opcode().is_control() {
-        state
-            .requests
-            .lock()
-            .unwrap()
-            .push(frame.payload().to_vec());
+        state.requests.lock().push(frame.payload().to_vec());
         state.request_seen.add_permits(1);
     }
 }
@@ -179,7 +175,7 @@ async fn native_websocket_reconnects_and_replays_only_before_first_response_fram
     assert!(completed.as_str().contains("response.completed"));
     assert_eq!(state.connections.load(Ordering::SeqCst), 2);
     assert_eq!(
-        state.requests.lock().unwrap().as_slice(),
+        state.requests.lock().as_slice(),
         &[NATIVE_CREATE.as_bytes(), NATIVE_CREATE.as_bytes()]
     );
     assert_eq!(g.view().providers[0].rpm_used, 2);
@@ -242,12 +238,12 @@ async fn native_websocket_exhausts_retry_budget_without_switching_provider() {
     .expect("exhausted native retries did not release the provider slot");
     assert_eq!(state.connections.load(Ordering::SeqCst), 2);
     assert_eq!(
-        state.requests.lock().unwrap().as_slice(),
+        state.requests.lock().as_slice(),
         &[NATIVE_CREATE.as_bytes(), NATIVE_CREATE.as_bytes()]
     );
     assert_eq!(g.view().providers[0].rpm_used, 2);
     assert_eq!(backup_state.connections.load(Ordering::SeqCst), 0);
-    assert!(backup_state.requests.lock().unwrap().is_empty());
+    assert!(backup_state.requests.lock().is_empty());
     assert_eq!(g.view().providers[1].rpm_used, 0);
     assert_eq!(g.view().providers[1].active_requests, 0);
 
@@ -295,7 +291,7 @@ async fn native_websocket_does_not_replay_after_effective_output() {
         .unwrap();
     assert_eq!(closed.opcode(), yawc::OpCode::Close);
     assert_eq!(state.connections.load(Ordering::SeqCst), 1);
-    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert_eq!(state.requests.lock().len(), 1);
     assert_eq!(g.view().providers[0].rpm_used, 1);
 
     drop(client);
@@ -471,7 +467,7 @@ async fn native_websocket_reconnects_on_the_next_turn_after_idle_upstream_close(
     .as_str()
     .contains("response.completed"));
     assert_eq!(state.connections.load(Ordering::SeqCst), 2);
-    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    assert_eq!(state.requests.lock().len(), 2);
     assert_eq!(g.view().providers[0].rpm_used, 2);
 
     client
@@ -761,7 +757,7 @@ async fn native_websocket_second_turn_has_a_fresh_wait_budget() {
         }
     }
     assert_eq!(state.connections.load(Ordering::SeqCst), 1);
-    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    assert_eq!(state.requests.lock().len(), 2);
     client
         .send(yawc::Frame::close(1000.into(), "fixture complete"))
         .await

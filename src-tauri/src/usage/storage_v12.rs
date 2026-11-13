@@ -1246,9 +1246,9 @@ pub(super) fn register_values(c: &Connection) -> Result<()> {
             // SQLite auxiliary data belongs to this statement; the constant second
             // argument keeps its bounded cache alive across rows, never across snapshots.
             let cache = ctx.get_or_create_aux(1, |_| {
-                Ok::<_, rusqlite::Error>(std::sync::Mutex::new(diagnostics::ScanCache::default()))
+                Ok::<_, rusqlite::Error>(parking_lot::Mutex::new(diagnostics::ScanCache::default()))
             })?;
-            let mut cache = cache.lock().unwrap();
+            let mut cache = cache.lock();
             diagnostic_u64(&c, ctx.get(0)?, &mut cache, "generationMs")
                 .map(|value| value.filter(|ms| *ms > 50))
                 .map_err(|_| rusqlite::Error::InvalidQuery)

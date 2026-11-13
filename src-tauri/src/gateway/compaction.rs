@@ -1,12 +1,9 @@
 //! Hash-only, bounded conversation ownership. Request content is never persisted.
 use crate::storage;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 const MAX_THREADS: usize = 4096;
 const RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -350,7 +347,7 @@ impl PendingReport {
             usage.saved(generation, outcome);
         }
         let notification = self.handoff.as_ref().filter(|_| saved).map(|(from, to)| {
-            let names = registry.names.lock().unwrap();
+            let names = registry.names.lock();
             let label = |id: &String| {
                 names
                     .get(id)
@@ -379,7 +376,7 @@ impl PendingReport {
             } else {
                 record.notification_message = notification;
             }
-            if let Some((_, events)) = registry.notifications.lock().unwrap().as_ref() {
+            if let Some((_, events)) = registry.notifications.lock().as_ref() {
                 events.emit(record);
             }
         }
@@ -490,7 +487,7 @@ impl Registry {
                     break;
                 };
                 let (entries, version) = {
-                    let state = registry.state.lock().unwrap();
+                    let state = registry.state.lock();
                     (state.entries.clone(), state.save_version)
                 };
                 let saved = serde_json::to_vec(&entries)
@@ -498,7 +495,7 @@ impl Registry {
                     .and_then(|raw| storage::atomic_write(&registry.path, &raw, None).ok())
                     .is_some();
                 let notifications = {
-                    let mut state = registry.state.lock().unwrap();
+                    let mut state = registry.state.lock();
                     state.error = (!saved).then(|| "线程归属记录保存失败".into());
                     if saved {
                         state.last_saved = now();
@@ -517,16 +514,16 @@ impl Registry {
                 for report in notifications {
                     report.settle(&registry, saved);
                 }
-                registry.state.lock().unwrap().settled_version = version;
+                registry.state.lock().settled_version = version;
             }
         });
         registry
     }
     pub fn notifications(&self, client: super::ClientId, events: crate::events::Service) {
-        *self.notifications.lock().unwrap() = Some((client, events));
+        *self.notifications.lock() = Some((client, events));
     }
     pub fn provider_names(&self, providers: &[super::model::Provider]) {
-        *self.names.lock().unwrap() = providers
+        *self.names.lock() = providers
             .iter()
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
@@ -552,7 +549,7 @@ impl Registry {
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             {
-                let state = self.state.lock().unwrap();
+                let state = self.state.lock();
                 if state.settled_version == state.save_version {
                     return;
                 }
@@ -593,7 +590,7 @@ impl Registry {
         use super::replay::TurnEvidence;
         let first_turn = can_handoff && turn == TurnEvidence::First;
         let first = eligible.first()?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         // Check the unfiltered queue under the ownership lock, before touching
         // history, sequence, timestamps or the one-use compaction claim.
         if let Some(entry) = state.entries.get(&session).filter(|entry| {
@@ -825,7 +822,7 @@ impl Registry {
         queued: &[super::model::Provider],
         capacity: &super::admission::Scheduler,
     ) -> Vec<HandoffWaiting> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let (active, _) = capacity.counts();
         let mut result = std::collections::BTreeMap::new();
         for entry in state
@@ -879,17 +876,9 @@ impl Registry {
     }
     pub fn boundary_matches(&self, session: &str, input: Option<&str>) -> bool {
         input.is_some()
-            && self
-                .state
-                .lock()
-                .unwrap()
-                .entries
-                .get(session)
-                .is_some_and(|entry| {
-                    entry.claim.is_none()
-                        && entry.boundary_fresh
-                        && entry.boundary.as_deref() == input
-                })
+            && self.state.lock().entries.get(session).is_some_and(|entry| {
+                entry.claim.is_none() && entry.boundary_fresh && entry.boundary.as_deref() == input
+            })
     }
     pub fn model_detour(
         &self,
@@ -899,7 +888,6 @@ impl Registry {
     ) -> bool {
         self.state
             .lock()
-            .unwrap()
             .entries
             .get(session)
             .is_some_and(|entry| model_detour(entry, queued, requirement))
@@ -909,7 +897,7 @@ impl Registry {
         session: String,
     ) -> storage::Result<Option<Arc<Lease>>> {
         use crate::{errors::code, storage::AppError};
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         if state.error.is_some() {
             return Err(AppError::new(
                 code::CONVERSATION_OWNERSHIP,
@@ -951,24 +939,19 @@ impl Registry {
     pub fn owner(&self, session: &str) -> Option<String> {
         self.state
             .lock()
-            .unwrap()
             .entries
             .get(session)
             .filter(|e| !e.establishing && now().saturating_sub(e.updated) < RETENTION_MS)
             .map(|e| e.provider.clone())
     }
     pub fn error(&self) -> Option<String> {
-        self.state.lock().unwrap().error.clone()
+        self.state.lock().error.clone()
     }
 }
 
 impl Drop for Registry {
     fn drop(&mut self) {
-        let reports = self
-            .state
-            .get_mut()
-            .map(|state| std::mem::take(&mut state.notifications))
-            .unwrap_or_default();
+        let reports = std::mem::take(&mut self.state.get_mut().notifications);
         for report in reports {
             report.settle(self, false);
         }
@@ -988,7 +971,6 @@ impl Lease {
                 .registry
                 .state
                 .lock()
-                .unwrap()
                 .entries
                 .get(&self.session)
                 .is_some_and(|e| e.establishing)
@@ -1023,7 +1005,7 @@ impl Lease {
             };
         }
         if let Some(window) = hints.and_then(|h| h.compacted_window.as_deref()) {
-            let state = self.registry.state.lock().unwrap();
+            let state = self.registry.state.lock();
             if state.entries.get(&self.session).is_some_and(|entry| {
                 entry.claim.is_some() && entry.boundary.as_deref() == Some(window)
             }) {
@@ -1047,7 +1029,6 @@ impl Lease {
             .registry
             .state
             .lock()
-            .unwrap()
             .entries
             .get(&self.session)
             .is_some_and(|entry| entry.boundary.is_some())
@@ -1057,28 +1038,28 @@ impl Lease {
         D::ExistingThread
     }
     pub fn attach_routing_log(&self, log: Arc<super::routing_log::RoutingLog>) {
-        *self.routing_log.lock().unwrap() = Some(log);
+        *self.routing_log.lock() = Some(log);
     }
     pub fn attach_usage(&self, completion: crate::usage::RoutingCompletion) {
-        *self.usage.lock().unwrap() = Some(completion);
+        *self.usage.lock() = Some(completion);
     }
     pub fn finish_round(
         &self,
         id: Option<&str>,
         log: Option<&Arc<super::routing_log::RoutingLog>>,
     ) {
-        let state = self.registry.state.lock().unwrap();
+        let state = self.registry.state.lock();
         // An uncommitted claim still has a cancellation release to persist.
         let releasing = state
             .entries
             .get(&self.session)
             .is_some_and(|entry| self.handoff && self.current(entry) && entry.boundary_fresh);
         if !releasing {
-            let mut usage = self.usage.lock().unwrap();
+            let mut usage = self.usage.lock();
             if usage.as_ref().is_some_and(|usage| Some(usage.id()) == id) {
                 usage.take();
             }
-            let mut current = self.routing_log.lock().unwrap();
+            let mut current = self.routing_log.lock();
             if current
                 .as_ref()
                 .zip(log)
@@ -1097,13 +1078,11 @@ impl Lease {
         let routing = self
             .routing_log
             .lock()
-            .unwrap()
             .as_ref()
             .map(|log| (log.clone(), log.begin_save()));
         let usage = self
             .usage
             .lock()
-            .unwrap()
             .as_ref()
             .map(|usage| (usage.clone(), usage.begin_save()));
         let scope = storage::digest(format!("{}:{}", self.session, self.sequence).as_bytes());
@@ -1115,7 +1094,6 @@ impl Lease {
                     .registry
                     .notifications
                     .lock()
-                    .unwrap()
                     .as_ref()
                     .map(|(client, _)| *client);
                 let mut record = crate::events::Record::new(
@@ -1144,7 +1122,7 @@ impl Lease {
     }
     pub fn boundary_state(&self, input: Option<&str>) -> crate::usage::model::BoundaryState {
         use crate::usage::model::BoundaryState as B;
-        let state = self.registry.state.lock().unwrap();
+        let state = self.registry.state.lock();
         let Some(entry) = state.entries.get(&self.session) else {
             return B::NotObserved;
         };
@@ -1164,7 +1142,7 @@ impl Lease {
         }
     }
     pub(super) fn admission_policy(&self) -> (Intake, Option<String>) {
-        let state = self.registry.state.lock().unwrap();
+        let state = self.registry.state.lock();
         let entry = state.entries.get(&self.session);
         let intake = if self.intake == Intake::NewThread && entry.is_some_and(|e| e.history_seen) {
             Intake::Ordinary
@@ -1183,7 +1161,6 @@ impl Lease {
                 .registry
                 .state
                 .lock()
-                .unwrap()
                 .entries
                 .get(&self.session)
                 .is_some_and(|entry| !entry.establishing && entry.provider == provider)
@@ -1192,7 +1169,7 @@ impl Lease {
     /// ownership. Competing first requests release their slot and recheck it.
     #[cfg(test)]
     pub fn admitted(&self, provider: &str) -> bool {
-        let mut state = self.registry.state.lock().unwrap();
+        let mut state = self.registry.state.lock();
         self.admit_locked(&mut state, provider)
     }
     /// Recheck the live queue and identity while both snapshots are locked.
@@ -1222,7 +1199,7 @@ impl Lease {
         if !requirement.allows(current.allowed_models.as_deref()) {
             return Err(AppError::new(requirement.code(), requirement.message()));
         }
-        let mut state = self.registry.state.lock().unwrap();
+        let mut state = self.registry.state.lock();
         let entry = state.entries.get(&self.session);
         if self.owner_search
             && !entry.is_some_and(|entry| {
@@ -1490,7 +1467,7 @@ impl Lease {
         if self.request_only {
             return;
         }
-        let mut state = self.registry.state.lock().unwrap();
+        let mut state = self.registry.state.lock();
         let Some(entry) = state.entries.get_mut(&self.session) else {
             return;
         };
@@ -1506,7 +1483,7 @@ impl Lease {
         if entry.boundary_fresh && self.sequence > entry.boundary_sequence {
             entry.consumed_boundary = entry.boundary.take();
             entry.boundary_fresh = false;
-            if let Some(log) = self.routing_log.lock().unwrap().as_ref() {
+            if let Some(log) = self.routing_log.lock().as_ref() {
                 log.window_consumed(
                     !self
                         .receivers
@@ -1520,7 +1497,7 @@ impl Lease {
                 entry.claim = None;
             }
             changed = true;
-            if let Some(usage) = self.usage.lock().unwrap().as_ref() {
+            if let Some(usage) = self.usage.lock().as_ref() {
                 usage.outcome(crate::events::RoutingOutcome::WindowConsumed);
             }
             self.report(
@@ -1537,12 +1514,12 @@ impl Lease {
         if self.request_only {
             return;
         }
-        let mut completed = self.completed_epoch.lock().unwrap();
+        let mut completed = self.completed_epoch.lock();
         let first = completed.is_none();
         if !first && boundary.is_none() {
             return;
         }
-        let mut state = self.registry.state.lock().unwrap();
+        let mut state = self.registry.state.lock();
         let Some(entry) = state.entries.get_mut(&self.session) else {
             return;
         };
@@ -1609,9 +1586,7 @@ impl Drop for Lease {
         }
         // A destructor must not panic while unwinding another failed request.
         // Never repair or persist ownership from a partially edited ledger.
-        let Ok(mut state) = self.registry.state.lock() else {
-            return;
-        };
+        let mut state = self.registry.state.lock();
         if let Some(entry) = state.entries.get_mut(&self.session) {
             if self.current(entry) {
                 let released = entry.boundary_fresh;

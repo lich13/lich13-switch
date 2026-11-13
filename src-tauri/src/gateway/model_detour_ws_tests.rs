@@ -2,11 +2,9 @@
 //! All upstreams are loopback fixtures and use synthetic credentials.
 use super::*;
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 const SESSION: &str = "fixture-ws-model-detour";
 const MAIN_WINDOW: &str = "fixture-main-window";
@@ -41,7 +39,7 @@ async fn native_endpoint(
                         continue;
                     }
                     let payload = frame.payload().to_vec();
-                    captured.lock().unwrap().push(payload.clone());
+                    captured.lock().push(payload.clone());
                     let request: Value = serde_json::from_slice(&payload).unwrap();
                     let model = request["model"].as_str().unwrap_or("fixture-main");
                     let response_id = match model {
@@ -89,7 +87,7 @@ async fn native_endpoint(
 
 async fn connect(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     yawc::WebSocket::connect(
@@ -262,10 +260,7 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
     let mut owner_peer = connect(&gateway, SESSION).await;
     let first = complete_turn(&mut owner_peer, main_turn).await;
     assert_eq!(first["response"]["provider"], "fixture-a");
-    assert_eq!(
-        seen_a.lock().unwrap().as_slice()[0].as_slice(),
-        main_turn.as_bytes()
-    );
+    assert_eq!(seen_a.lock().as_slice()[0].as_slice(), main_turn.as_bytes());
     wait_until(|| gateway.0.compaction.owner(&session_hash).as_deref() == Some(owner.as_str()))
         .await;
     let boundary = crate::storage::digest(MAIN_WINDOW.as_bytes());
@@ -283,14 +278,11 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
     assert_eq!(detour["response"]["provider"], "fixture-b");
     let side_followup_response = complete_turn(&mut side_peer, side_followup).await;
     assert_eq!(side_followup_response["response"]["provider"], "fixture-b");
-    assert_eq!(seen_a.lock().unwrap().len(), 1);
-    assert_eq!(seen_a.lock().unwrap()[0].as_slice(), main_turn.as_bytes());
-    assert_eq!(seen_b.lock().unwrap().len(), 2);
-    assert_eq!(seen_b.lock().unwrap()[0].as_slice(), side_turn.as_bytes());
-    assert_eq!(
-        seen_b.lock().unwrap()[1].as_slice(),
-        side_followup.as_bytes()
-    );
+    assert_eq!(seen_a.lock().len(), 1);
+    assert_eq!(seen_a.lock()[0].as_slice(), main_turn.as_bytes());
+    assert_eq!(seen_b.lock().len(), 2);
+    assert_eq!(seen_b.lock()[0].as_slice(), side_turn.as_bytes());
+    assert_eq!(seen_b.lock()[1].as_slice(), side_followup.as_bytes());
     wait_until(|| {
         gateway
             .view()
@@ -336,11 +328,8 @@ async fn native_websocket_side_model_detour_preserves_owner_epoch_boundary_and_r
     let main_followup = r#"{ "type" : "response.create", "model" : "fixture-main", "input" : [{"role":"user","content":"fixture first"},{"role":"assistant","content":"fixture answer"},{"role":"user","content":"fixture main followup"}], "future" : {"keep" : true} }"#;
     let main_followup_response = complete_turn(&mut owner_peer, main_followup).await;
     assert_eq!(main_followup_response["response"]["provider"], "fixture-a");
-    assert_eq!(seen_a.lock().unwrap().len(), 2);
-    assert_eq!(
-        seen_a.lock().unwrap()[1].as_slice(),
-        main_followup.as_bytes()
-    );
+    assert_eq!(seen_a.lock().len(), 2);
+    assert_eq!(seen_a.lock()[1].as_slice(), main_followup.as_bytes());
 
     side_peer
         .send(yawc::Frame::close(1000.into(), "fixture done"))
@@ -370,8 +359,8 @@ async fn native_websocket_known_cursor_stays_on_its_owner_after_priority_changes
     let mut first_peer = connect(&gateway, "fixture-known-cursor-thread").await;
     let first = complete_turn(&mut first_peer, first_turn).await;
     assert_eq!(first["response"]["provider"], "fixture-a");
-    assert_eq!(seen_a.lock().unwrap().len(), 1);
-    assert_eq!(seen_a.lock().unwrap()[0].as_slice(), first_turn.as_bytes());
+    assert_eq!(seen_a.lock().len(), 1);
+    assert_eq!(seen_a.lock()[0].as_slice(), first_turn.as_bytes());
     first_peer
         .send(yawc::Frame::close(1000.into(), "fixture done"))
         .await
@@ -393,10 +382,10 @@ async fn native_websocket_known_cursor_stays_on_its_owner_after_priority_changes
     let mut known_peer = connect(&gateway, "fixture-known-cursor-thread").await;
     let known = complete_turn(&mut known_peer, &known_turn).await;
     assert_eq!(known["response"]["provider"], "fixture-a");
-    assert_eq!(seen_a.lock().unwrap().len(), 2);
-    assert_eq!(seen_a.lock().unwrap()[0].as_slice(), first_turn.as_bytes());
-    assert_eq!(seen_a.lock().unwrap()[1].as_slice(), known_turn.as_bytes());
-    assert!(seen_b.lock().unwrap().is_empty());
+    assert_eq!(seen_a.lock().len(), 2);
+    assert_eq!(seen_a.lock()[0].as_slice(), first_turn.as_bytes());
+    assert_eq!(seen_a.lock()[1].as_slice(), known_turn.as_bytes());
+    assert!(seen_b.lock().is_empty());
     assert_eq!(
         gateway
             .0
@@ -464,10 +453,10 @@ async fn native_websocket_side_detour_followup_main_without_cursor_is_rejected_w
     })
     .await;
 
-    assert_eq!(seen_a.lock().unwrap().len(), 1);
-    assert_eq!(seen_a.lock().unwrap()[0].as_slice(), main_turn.as_bytes());
-    assert_eq!(seen_b.lock().unwrap().len(), 1);
-    assert_eq!(seen_b.lock().unwrap()[0].as_slice(), side_turn.as_bytes());
+    assert_eq!(seen_a.lock().len(), 1);
+    assert_eq!(seen_a.lock()[0].as_slice(), main_turn.as_bytes());
+    assert_eq!(seen_b.lock().len(), 1);
+    assert_eq!(seen_b.lock()[0].as_slice(), side_turn.as_bytes());
     assert_eq!(
         gateway.0.compaction.owner(&session_hash).as_deref(),
         Some(owner.as_str())
@@ -542,12 +531,12 @@ async fn native_websocket_known_side_cursor_stays_pinned_without_rebinding_owner
     );
     let cursor_response = complete_turn(&mut side_peer, &main_with_side_cursor).await;
     assert_eq!(cursor_response["response"]["provider"], "fixture-b");
-    assert_eq!(seen_a.lock().unwrap().len(), 1);
-    assert_eq!(seen_a.lock().unwrap()[0].as_slice(), main_turn.as_bytes());
-    assert_eq!(seen_b.lock().unwrap().len(), 2);
-    assert_eq!(seen_b.lock().unwrap()[0].as_slice(), side_turn.as_bytes());
+    assert_eq!(seen_a.lock().len(), 1);
+    assert_eq!(seen_a.lock()[0].as_slice(), main_turn.as_bytes());
+    assert_eq!(seen_b.lock().len(), 2);
+    assert_eq!(seen_b.lock()[0].as_slice(), side_turn.as_bytes());
     assert_eq!(
-        seen_b.lock().unwrap()[1].as_slice(),
+        seen_b.lock()[1].as_slice(),
         main_with_side_cursor.as_bytes()
     );
 
@@ -613,8 +602,8 @@ async fn native_websocket_unknown_cursor_does_not_fall_through_to_another_provid
         .unwrap()
         .expect("unknown cursor socket closed without a frame");
     assert_eq!(close.opcode(), yawc::OpCode::Close);
-    assert!(seen_a.lock().unwrap().is_empty());
-    assert!(seen_b.lock().unwrap().is_empty());
+    assert!(seen_a.lock().is_empty());
+    assert!(seen_b.lock().is_empty());
     drop(peer);
     gateway.stop().await.unwrap();
 }

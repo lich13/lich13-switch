@@ -70,13 +70,11 @@ fn global_connection_import_keeps_only_current_api_configuration() {
     let active = fixture.gateway.try_view().unwrap();
     assert!(active.grok_managed);
     assert_eq!(active.providers.len(), 1);
-    assert!(
-        !serde_json::to_value(&fixture.gateway.0.inner.lock().unwrap().store)
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .contains_key("grokNative")
-    );
+    assert!(!serde_json::to_value(&fixture.gateway.0.inner.lock().store)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("grokNative"));
 }
 
 #[test]
@@ -976,7 +974,7 @@ fn repeated_import_normalizes_endpoint_and_refreshes_provider_version_for_connec
     let first_preview = fixture.valid_preview(None, true);
     fixture.commit(&first_preview).unwrap();
     let (first_id, first_version, first_base_url) = {
-        let state = fixture.gateway.0.inner.lock().unwrap();
+        let state = fixture.gateway.0.inner.lock();
         assert_eq!(state.store.providers.len(), 1);
         let provider = &state.store.providers[0];
         (
@@ -990,7 +988,7 @@ fn repeated_import_normalizes_endpoint_and_refreshes_provider_version_for_connec
     let second_preview = fixture.valid_preview(None, true);
     fixture.commit(&second_preview).unwrap();
     let (second_id, second_version, second_count) = {
-        let state = fixture.gateway.0.inner.lock().unwrap();
+        let state = fixture.gateway.0.inner.lock();
         (
             state.store.providers[0].id.clone(),
             state.store.providers[0].version.clone(),
@@ -1013,7 +1011,7 @@ fn repeated_import_normalizes_endpoint_and_refreshes_provider_version_for_connec
     let changed_preview = fixture.valid_preview(None, true);
     fixture.commit(&changed_preview).unwrap();
     let (changed_id, changed_version, changed_count) = {
-        let state = fixture.gateway.0.inner.lock().unwrap();
+        let state = fixture.gateway.0.inner.lock();
         (
             state.store.providers[0].id.clone(),
             state.store.providers[0].version.clone(),

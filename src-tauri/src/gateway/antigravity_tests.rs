@@ -1,9 +1,7 @@
 use super::*;
 use crate::gateway::{grok_protocol_tests::server, Gateway};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Mutex,
-};
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn key(project: Option<&str>, location: &str) -> VertexKey {
@@ -37,7 +35,7 @@ impl Fixture {
         registry
             .listener
             .activate_antigravity(prepared.socket, registry.clone(), || {
-                *registry.antigravity.lock().unwrap() = Some(session.clone());
+                *registry.antigravity.lock() = Some(session.clone());
                 Ok(())
             })
             .unwrap();
@@ -85,7 +83,7 @@ async fn forwards_paths_auth_bytes_catalog_telemetry_and_real_errors() {
                 assert_eq!(parts.headers["user-agent"], "fixture-antigravity");
                 assert_eq!(parts.headers["x-goog-api-client"], "fixture-client");
                 let body = body.collect().await.unwrap().to_bytes().to_vec();
-                captured.lock().unwrap().push((parts.uri.to_string(), body));
+                captured.lock().push((parts.uri.to_string(), body));
                 Response::builder().status(403).header("content-type","application/json")
                     .body(replay::full(r#"{"error":{"status":"PERMISSION_DENIED","message":"fixture upstream denial"}}"#)).unwrap()
             }
@@ -107,7 +105,7 @@ async fn forwards_paths_auth_bytes_catalog_telemetry_and_real_errors() {
                 .await
                 .unwrap()
                 .contains("fixture upstream denial"));
-            let observed = seen.lock().unwrap();
+            let observed = seen.lock();
             let (path, bytes) = observed.last().unwrap();
             assert_eq!(bytes, body);
             assert!(path.contains(if project.is_some() {
@@ -168,7 +166,7 @@ async fn forwards_paths_auth_bytes_catalog_telemetry_and_real_errors() {
                 404
             );
         }
-        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert_eq!(seen.lock().len(), 3);
         fixture.stop().await;
     }
 }

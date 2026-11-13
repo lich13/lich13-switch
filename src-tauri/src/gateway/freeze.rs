@@ -1,10 +1,7 @@
 //! A shared dispatch gate. Only live requests are retained; no payload or
 //! credential is copied into the state sent to windows.
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use parking_lot::Mutex;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -83,16 +80,16 @@ impl Gate {
         view
     }
     pub fn view(&self) -> View {
-        Self::view_locked(&self.0.state.lock().unwrap())
+        Self::view_locked(&self.0.state.lock())
     }
     pub fn is_frozen(&self) -> bool {
-        self.0.state.lock().unwrap().frozen
+        self.0.state.lock().frozen
     }
     pub fn subscribe(&self) -> watch::Receiver<()> {
         self.0.changes.subscribe()
     }
     pub fn set(&self, frozen: bool) -> crate::storage::Result<View> {
-        let mut s = self.0.state.lock().unwrap();
+        let mut s = self.0.state.lock();
         if !frozen && s.frozen && Self::view_locked(&s).draining != 0 {
             return Err(crate::usage::model::failure("等待收尾完成后才能解冻"));
         }
@@ -110,7 +107,7 @@ impl Gate {
         Ok(Self::view_locked(&s))
     }
     pub fn request(&self) -> Ticket {
-        let mut s = self.0.state.lock().unwrap();
+        let mut s = self.0.state.lock();
         s.next += 1;
         let id = s.next;
         s.requests.insert(
@@ -134,7 +131,7 @@ struct Entry {
 }
 impl Drop for Entry {
     fn drop(&mut self) {
-        self.gate.0.state.lock().unwrap().requests.remove(&self.id);
+        self.gate.0.state.lock().requests.remove(&self.id);
         self.gate.0.changes.send_replace(());
     }
 }
@@ -149,7 +146,7 @@ pub async fn changed(receiver: &mut Option<watch::Receiver<()>>) {
 }
 impl Ticket {
     fn phase(&self, phase: Phase) {
-        let mut s = self.0.gate.0.state.lock().unwrap();
+        let mut s = self.0.gate.0.state.lock();
         let frozen = s.frozen;
         if let Some(r) = s.requests.get_mut(&self.0.id) {
             if r.phase == phase || r.phase == Phase::Done {
@@ -176,7 +173,7 @@ impl Ticket {
         self.phase(Phase::Done);
     }
     pub fn paused(&self) -> bool {
-        let s = self.0.gate.0.state.lock().unwrap();
+        let s = self.0.gate.0.state.lock();
         s.frozen
             && s.requests
                 .get(&self.0.id)
@@ -188,7 +185,6 @@ impl Ticket {
             .0
             .state
             .lock()
-            .unwrap()
             .requests
             .get(&self.0.id)
             .map_or(Duration::ZERO, Request::paused_for)
@@ -199,7 +195,7 @@ impl Ticket {
     /// Linearizes admission against the freeze click. A granted request drains;
     /// a losing request remains queued without reserving upstream capacity.
     pub fn dispatch(&self) -> bool {
-        let mut s = self.0.gate.0.state.lock().unwrap();
+        let mut s = self.0.gate.0.state.lock();
         if s.frozen {
             return false;
         }

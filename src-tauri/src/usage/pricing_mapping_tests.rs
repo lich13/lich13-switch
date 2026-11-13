@@ -64,7 +64,6 @@ fn finish_attempt(trace: &super::Trace, attempt: super::AttemptTrace) -> Attempt
         .0
         .attempts
         .lock()
-        .unwrap()
         .iter()
         .find(|attempt| attempt.id == id)
         .cloned()
@@ -649,7 +648,7 @@ fn bounded_mixed_provider_retries_keep_per_provider_consumption_when_dimensions_
         let mut attempt = trace.attempt(provider, false, "http");
         attempt.update(&meter("fixture-visible", 1, 2), Some(429), Some("capacity"));
     }
-    let attempts = trace.0.attempts.lock().unwrap().clone();
+    let attempts = trace.0.attempts.lock().clone();
     assert!(attempts.len() <= 128);
     assert_eq!(attempts.iter().map(|a| a.repeat_count).sum::<u64>(), 300);
     assert!(attempts
@@ -700,7 +699,7 @@ fn unique_retry_dimensions_still_bound_metadata_without_losing_known_or_unknown_
         };
         attempt.update(&meter(model, 1, 2), Some(429), Some("capacity"));
     }
-    let attempts = trace.0.attempts.lock().unwrap().clone();
+    let attempts = trace.0.attempts.lock().clone();
     assert!(attempts.len() <= 128);
     let record = Record {
         attempts,

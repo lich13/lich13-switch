@@ -117,7 +117,6 @@ pub(super) fn publish(g: &Gateway, event: crate::events::Record) -> Reported {
     let queued =
         g.0.diagnostics
             .lock()
-            .unwrap()
             .as_ref()
             .is_some_and(|service| service.emit_checked(event.clone()));
     Reported {
@@ -188,7 +187,7 @@ impl Permits {
             _ => &mut self.model,
         };
         if let Some(permit) = target {
-            let cfg = g.0.inner.lock().unwrap().store.settings.clone();
+            let cfg = g.0.inner.lock().store.settings.clone();
             if let Some(delay) = permit.prepare_delay(&cfg, &details) {
                 details.wait_seconds =
                     Some(delay.as_millis().div_ceil(1000).min(u128::from(u64::MAX)) as u64);

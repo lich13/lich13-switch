@@ -25,7 +25,6 @@ fn provider_version(gateway: &Gateway, id: &str) -> String {
         .0
         .inner
         .lock()
-        .unwrap()
         .store
         .providers
         .iter()

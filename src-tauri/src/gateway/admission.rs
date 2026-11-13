@@ -4,9 +4,10 @@ use super::rpm::Ledger;
 use super::{
     circuit::Circuit, health_settlement::Permits, model::Provider, routing::Requirement, Route,
 };
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -125,7 +126,6 @@ impl Drop for RpmReservation {
             .0
             .state
             .lock()
-            .unwrap()
             .rpm
             .refund(&self.id, self.token);
         self.scheduler.signal();
@@ -185,7 +185,7 @@ impl Scheduler {
     }
 
     pub fn configure(&self, providers: &[Provider], running: bool) {
-        let mut s = self.0.state.lock().unwrap();
+        let mut s = self.0.state.lock();
         let changed: Vec<_> =
             s.versions
                 .iter()
@@ -243,17 +243,17 @@ impl Scheduler {
     }
     /// Sends counted in the current window and seconds until the next one fits.
     pub fn rpm_status(&self, id: &str, limit: u32) -> (usize, u64, bool) {
-        let mut s = self.0.state.lock().unwrap();
+        let mut s = self.0.state.lock();
         let used = if limit == 0 { 0 } else { s.rpm.used(id) };
         let gate = s.rpm.gate(id, limit);
         (used, gate.map_or(0, seconds), gate.is_some())
     }
     pub fn counts(&self) -> (HashMap<String, usize>, usize) {
-        let s = self.0.state.lock().unwrap();
+        let s = self.0.state.lock();
         (s.active.clone(), s.waiting.len() + s.capacity_waits.len())
     }
     pub(super) fn capacity_available(&self, id: &str) -> bool {
-        Self::available(&self.0.state.lock().unwrap(), id)
+        Self::available(&self.0.state.lock(), id)
     }
     pub fn capacity_retries(&self) -> Vec<CapacityRetry> {
         let mut retries = self.retries(WaitKind::Capacity);
@@ -267,7 +267,7 @@ impl Scheduler {
         self.retries(WaitKind::Transient)
     }
     fn retries(&self, kind: WaitKind) -> Vec<CapacityRetry> {
-        let s = self.0.state.lock().unwrap();
+        let s = self.0.state.lock();
         let mut result: Vec<_> = s
             .capacity_waits
             .values()
@@ -300,15 +300,7 @@ impl Scheduler {
     pub fn capacity_source(&self, id: &str) -> CapacitySource {
         CapacitySource {
             provider_id: id.into(),
-            reset_generation: self
-                .0
-                .state
-                .lock()
-                .unwrap()
-                .resets
-                .get(id)
-                .copied()
-                .unwrap_or(0),
+            reset_generation: self.0.state.lock().resets.get(id).copied().unwrap_or(0),
         }
     }
     pub async fn wait_owner_capacity(
@@ -335,15 +327,7 @@ impl Scheduler {
         delay: Duration,
         max_waiting: usize,
     ) -> Result<(), Rejected> {
-        let generation = self
-            .0
-            .state
-            .lock()
-            .unwrap()
-            .resets
-            .get(id)
-            .copied()
-            .unwrap_or(0);
+        let generation = self.0.state.lock().resets.get(id).copied().unwrap_or(0);
         self.wait_kind(
             &[CapacitySource {
                 provider_id: id.into(),
@@ -364,7 +348,7 @@ impl Scheduler {
     ) -> Result<(), Rejected> {
         let until = Instant::now() + delay;
         let (ticket, epoch) = {
-            let mut s = self.0.state.lock().unwrap();
+            let mut s = self.0.state.lock();
             if !s.running {
                 return Err(Rejected::Stopped);
             }
@@ -399,7 +383,7 @@ impl Scheduler {
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
-                let s = self.0.state.lock().unwrap();
+                let s = self.0.state.lock();
                 if !s.running || s.epoch != epoch {
                     return Err(Rejected::Stopped);
                 }
@@ -414,7 +398,7 @@ impl Scheduler {
         }
     }
     pub(super) fn capacity_current(&self, sources: &[CapacitySource]) -> bool {
-        let s = self.0.state.lock().unwrap();
+        let s = self.0.state.lock();
         s.running && !Self::was_reset(&s, sources)
     }
     fn was_reset(state: &State, sources: &[CapacitySource]) -> bool {
@@ -426,7 +410,7 @@ impl Scheduler {
         // Same lock order as admission: slot state, then circuit. Capture the
         // reset generation with each reservation so a reset during an upstream
         // attempt cannot be lost before that attempt registers its wait.
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.state.lock();
         for circuit in circuits {
             circuit.reset();
         }
@@ -480,7 +464,7 @@ impl Scheduler {
             .map_or(Duration::ZERO, |t| t.paused_for());
         let mut paused = Duration::ZERO;
         let mut freeze_changes = budget.traffic.as_ref().map(|t| t.subscribe());
-        let epoch = self.0.state.lock().unwrap().epoch;
+        let epoch = self.0.state.lock().epoch;
         let mut waiting: Option<Waiting> = None;
         let mut deadline = tokio::time::Instant::now() + budget.remaining;
         let mut cooling;
@@ -497,7 +481,7 @@ impl Scheduler {
             notified.as_mut().enable();
             if budget.traffic.as_ref().is_some_and(|t| t.paused()) {
                 {
-                    let mut s = self.0.state.lock().unwrap();
+                    let mut s = self.0.state.lock();
                     if !s.running || s.epoch != epoch {
                         break Err(Rejected::Stopped);
                     }
@@ -525,7 +509,7 @@ impl Scheduler {
                 continue;
             }
             {
-                let mut s = self.0.state.lock().unwrap();
+                let mut s = self.0.state.lock();
                 if !s.running || s.epoch != epoch {
                     break Err(Rejected::Stopped);
                 }
@@ -797,7 +781,7 @@ impl Scheduler {
 }
 impl Drop for Slot {
     fn drop(&mut self) {
-        let mut s = self.scheduler.0.state.lock().unwrap();
+        let mut s = self.scheduler.0.state.lock();
         if let Some(n) = s.active.get_mut(&self.id) {
             *n = n.saturating_sub(1);
         }
@@ -811,7 +795,6 @@ impl Drop for Waiting {
             .0
             .state
             .lock()
-            .unwrap()
             .waiting
             .retain(|(id, _)| *id != self.ticket);
         self.scheduler.signal();
@@ -823,7 +806,6 @@ impl Drop for CapacityWait {
             .0
             .state
             .lock()
-            .unwrap()
             .capacity_waits
             .remove(&self.ticket);
         self.scheduler.signal();

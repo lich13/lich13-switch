@@ -24,10 +24,10 @@ impl ProbeStore {
             let keep = versions.get(id) == Some(version);
             if !keep {
                 if let Some(flight) = entry.flight.upgrade() {
-                    if let Some(task) = flight.abort.lock().unwrap().take() {
+                    if let Some(task) = flight.abort.lock().take() {
                         task.abort();
                     }
-                    *flight.result.lock().unwrap() = Some(unknown());
+                    *flight.result.lock() = Some(unknown());
                     flight.ready.notify_waiters();
                 }
             }
@@ -42,7 +42,7 @@ struct Flight {
 }
 impl Drop for Flight {
     fn drop(&mut self) {
-        if let Some(task) = self.abort.get_mut().unwrap().take() {
+        if let Some(task) = self.abort.get_mut().take() {
             task.abort();
         }
     }
@@ -70,7 +70,6 @@ impl Service {
             .0
             .probes
             .lock()
-            .unwrap()
             .entries
             .get(&(input.id.clone(), input.version.clone()))
             .map(|entry| entry.retry_at);
@@ -86,7 +85,7 @@ impl Service {
         id: &str,
         version: &str,
     ) -> (bool, Option<QuotaCheck>) {
-        let probes = self.0.probes.lock().unwrap();
+        let probes = self.0.probes.lock();
         probes
             .entries
             .get(&(id.into(), version.into()))
@@ -95,7 +94,7 @@ impl Service {
                     entry
                         .flight
                         .upgrade()
-                        .is_some_and(|f| f.result.lock().unwrap().is_none()),
+                        .is_some_and(|f| f.result.lock().is_none()),
                     entry.last.clone(),
                 )
             })
@@ -107,7 +106,7 @@ impl Service {
                 .cached(&input.id, &input.version)
                 .and_then(|v| v.retry_at)
                 .unwrap_or(0);
-            let mut probes = self.0.probes.lock().unwrap();
+            let mut probes = self.0.probes.lock();
             let key = (input.id.clone(), input.version.clone());
             let entry = probes
                 .entries
@@ -118,11 +117,7 @@ impl Service {
                     flight: Weak::new(),
                     last: None,
                 });
-            if let Some(flight) = entry
-                .flight
-                .upgrade()
-                .filter(|f| f.result.lock().unwrap().is_none())
-            {
+            if let Some(flight) = entry.flight.upgrade().filter(|f| f.result.lock().is_none()) {
                 flight
             } else {
                 let start_at = entry.next.max(
@@ -163,7 +158,7 @@ impl Service {
                             break permit;
                         };
                         {
-                            let mut probes = service.0.probes.lock().unwrap();
+                            let mut probes = service.0.probes.lock();
                             let entry = probes
                                 .entries
                                 .get_mut(&key)
@@ -181,9 +176,7 @@ impl Service {
                         Ok(Ok(check)) => check,
                         Ok(Err(failure)) => {
                             if let Some(at) = failure.retry_at {
-                                if let Some(entry) =
-                                    service.0.probes.lock().unwrap().entries.get_mut(&key)
-                                {
+                                if let Some(entry) = service.0.probes.lock().entries.get_mut(&key) {
                                     entry.retry_at = entry.retry_at.max(at);
                                 }
                             }
@@ -195,7 +188,6 @@ impl Service {
                         .0
                         .probes
                         .lock()
-                        .unwrap()
                         .entries
                         .get_mut(&key)
                         .filter(|entry| Weak::ptr_eq(&entry.flight, &weak))
@@ -203,11 +195,11 @@ impl Service {
                         entry.last = Some(check.clone());
                     }
                     if let Some(flight) = weak.upgrade() {
-                        *flight.result.lock().unwrap() = Some(check);
+                        *flight.result.lock() = Some(check);
                         flight.ready.notify_waiters();
                     }
                 });
-                *flight.abort.lock().unwrap() = Some(task.abort_handle());
+                *flight.abort.lock() = Some(task.abort_handle());
                 flight
             }
         };
@@ -215,7 +207,7 @@ impl Service {
             let notified = flight.ready.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(result) = flight.result.lock().unwrap().clone() {
+            if let Some(result) = flight.result.lock().clone() {
                 return result;
             }
             notified.await;

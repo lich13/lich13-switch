@@ -5,12 +5,13 @@ use crate::{
     Runtime,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri_plugin_dialog::DialogExt;
@@ -287,7 +288,8 @@ impl SystemAppLifecycle {
             .map_err(storage::io_error)?;
         let list = parse_running_antigravity_ps(&String::from_utf8_lossy(&out.stdout));
         if let Some((_, bundle)) = list.first() {
-            if let Ok(mut guard) = self.last_bundle.lock() {
+            {
+                let mut guard = self.last_bundle.lock();
                 *guard = Some(bundle.clone());
             }
         }
@@ -344,13 +346,7 @@ impl AppLifecycle for SystemAppLifecycle {
         #[cfg(target_os = "macos")]
         {
             let mut cmd = std::process::Command::new("open");
-            if let Some(p) = self
-                .last_bundle
-                .lock()
-                .ok()
-                .and_then(|g| g.clone())
-                .filter(|p| p.exists())
-            {
+            if let Some(p) = self.last_bundle.lock().clone().filter(|p| p.exists()) {
                 cmd.arg("-a").arg(p);
             } else {
                 cmd.args(["-b", "com.google.antigravity"]);
@@ -406,7 +402,7 @@ fn payload_digest(raw: &str) -> String {
     storage::digest(raw.trim().as_bytes())
 }
 fn with_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _g = AUTH_LOCK.lock().unwrap();
+    let _g = AUTH_LOCK.lock();
     f()
 }
 fn oauth_refresh_token(raw: &str) -> Option<String> {
@@ -1454,7 +1450,7 @@ async fn run_vertex(
     let prepared = registry.listener.prepare().await?;
     registry.update_ports()?;
     let session = Arc::new(vertex::Session::new(key, token.clone(), &registry));
-    let previous = registry.antigravity.lock().unwrap().clone();
+    let previous = registry.antigravity.lock().clone();
     let activate_registry = registry.clone();
     let active = session.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -1481,8 +1477,7 @@ async fn run_vertex(
                             prepared.socket,
                             activate_registry.clone(),
                             || {
-                                *activate_registry.antigravity.lock().unwrap() =
-                                    Some(active.clone());
+                                *activate_registry.antigravity.lock() = Some(active.clone());
                                 Ok(())
                             },
                         )
@@ -1495,7 +1490,7 @@ async fn run_vertex(
     .map_err(|_| err(code::PROCESS, "Vertex API Key 切换任务异常中断"))?;
     if result.is_err() {
         session.stop();
-        *registry.antigravity.lock().unwrap() = previous.clone();
+        *registry.antigravity.lock() = previous.clone();
         if previous.is_none() {
             registry.listener.deactivate_antigravity().await?;
         }
@@ -1547,7 +1542,7 @@ async fn restore_vertex_listener_at(
     registry
         .listener
         .activate_antigravity(prepared.socket, registry.clone(), || {
-            *registry.antigravity.lock().unwrap() = Some(session);
+            *registry.antigravity.lock() = Some(session);
             Ok(())
         })?;
     registry.changed();

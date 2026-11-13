@@ -1,9 +1,7 @@
 //! A model's upstream capacity must never close unrelated models on the same key.
 use super::circuit::{Circuit, CircuitState, Health};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use parking_lot::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 const MAX_MODELS: usize = 1024;
 
@@ -23,7 +21,7 @@ mod v0232_tests;
 
 impl Models {
     pub fn circuit(&self, model: &str) -> Circuit {
-        let mut models = self.0.lock().unwrap();
+        let mut models = self.0.lock();
         if let Some(circuit) = models.get(model) {
             return circuit.clone();
         }
@@ -42,7 +40,6 @@ impl Models {
         let mut result: Vec<_> = self
             .0
             .lock()
-            .unwrap()
             .iter()
             .filter_map(|(model, c)| {
                 let health = c.health();
@@ -60,6 +57,6 @@ impl Models {
         result
     }
     pub fn circuits(&self) -> Vec<Circuit> {
-        self.0.lock().unwrap().values().cloned().collect()
+        self.0.lock().values().cloned().collect()
     }
 }

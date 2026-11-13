@@ -81,7 +81,7 @@ fn route(provider: Provider) -> Route {
 }
 
 fn snapshot(registry: &Registry, session: &str) -> (Value, u64) {
-    let state = registry.state.lock().unwrap();
+    let state = registry.state.lock();
     (
         serde_json::to_value(state.entries.get(session).expect("fixture entry")).unwrap(),
         state.sequence,
@@ -184,14 +184,7 @@ fn receiver_policy_filters_unqueued_disabled_late_and_model_mismatch() {
     let late = provider(NEWER, true, Some("fixture-main"), true);
     let old = provider(OLD, true, Some("fixture-main"), true);
     let queued = vec![new.clone(), disabled, mismatch, old.clone(), late];
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers = queued.clone();
+    gateway.0.inner.lock().editable_mut().store.providers = queued.clone();
     let lease = registry
         .prepare_request(
             session,
@@ -209,7 +202,6 @@ fn receiver_policy_filters_unqueued_disabled_late_and_model_mismatch() {
         .0
         .inner
         .lock()
-        .unwrap()
         .editable_mut()
         .store
         .providers
@@ -368,7 +360,7 @@ async fn registry_drop_settles_unprocessed_usage_receipt_as_save_failed() {
     let generation = completion.begin_save();
     let registry = Registry::new(dir.path().join("owners.json"));
     {
-        let mut state = registry.state.lock().unwrap();
+        let mut state = registry.state.lock();
         state.notifications.push(PendingReport {
             version: 1,
             routing: None,
@@ -416,7 +408,7 @@ async fn disconnected_persistence_sender_rejects_pending_receipt_as_save_failed(
         names: Mutex::new(std::collections::HashMap::new()),
     });
     {
-        let mut state = registry.state.lock().unwrap();
+        let mut state = registry.state.lock();
         state.notifications.push(PendingReport {
             version: 1,
             routing: None,

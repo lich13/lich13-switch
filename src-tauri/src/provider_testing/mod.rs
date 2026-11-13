@@ -18,11 +18,12 @@ use crate::{
     gateway::{testing::Target, ClientId, Gateway},
     storage::{self, AppError, Result},
 };
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Instant,
 };
 use tokio::sync::{broadcast, watch, Semaphore};
@@ -108,8 +109,8 @@ fn retain_terminal_ids<'a>(
     }
     kept
 }
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap()
+fn lock<T>(mutex: &Mutex<T>) -> parking_lot::MutexGuard<'_, T> {
+    mutex.lock()
 }
 #[derive(Clone)]
 struct Context {

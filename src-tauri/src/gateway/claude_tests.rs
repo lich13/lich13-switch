@@ -30,7 +30,7 @@ async fn native_models_paginate_and_config_conflicts_recover_independently() {
         let copy = copy.clone();
         async move {
             assert_eq!(req.headers()["anthropic-version"], "2023-06-01");
-            copy.lock().unwrap().push(req.uri().to_string());
+            copy.lock().push(req.uri().to_string());
             let page = if req.uri().query().is_some() {
                 r#"{"data":[{"id":"Claude-B"}],"has_more":false}"#
             } else {
@@ -48,7 +48,7 @@ async fn native_models_paginate_and_config_conflicts_recover_independently() {
         .unwrap();
     assert_eq!(models.models, ["Claude-A", "Claude-B"]);
     assert_eq!(
-        *seen.lock().unwrap(),
+        *seen.lock(),
         [
             "/deployment/v1/models",
             "/deployment/v1/models?after_id=Claude-A"
@@ -265,7 +265,7 @@ async fn real_claude_http_and_cli_stream_isolated() {
     let http_ok = serde_json::from_slice::<serde_json::Value>(&response)
         .ok()
         .is_some_and(|v| v["type"] == "message" && v["stop_reason"].is_string());
-    claude.0.inner.lock().unwrap().last_successful = None;
+    claude.0.inner.lock().last_successful = None;
     let mut command = tokio::process::Command::new(cli);
     command.args([
         "-p",
@@ -333,7 +333,7 @@ async fn real_claude_http_and_cli_stream_isolated() {
                     .is_some_and(|s| s.contains("gateway-claude-ok"))
         });
     if !(output.status.success() && result_ok) {
-        let local = claude.0.inner.lock().unwrap().store.local_token.clone();
+        let local = claude.0.inner.lock().store.local_token.clone();
         let safe = String::from_utf8_lossy(&output.stderr)
             .replace(token, "[redacted]")
             .replace(&local, "[redacted]");

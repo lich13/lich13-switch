@@ -95,7 +95,6 @@ impl Session {
         let client = registry
             .antigravity
             .lock()
-            .unwrap()
             .as_ref()
             .map(|s| s.client.clone())
             .unwrap_or_else(|| {
@@ -122,7 +121,7 @@ impl Session {
     }
 }
 pub(crate) async fn stop(registry: &Registry) -> Result<()> {
-    if let Some(session) = registry.antigravity.lock().unwrap().take() {
+    if let Some(session) = registry.antigravity.lock().take() {
         session.stop();
     }
     let result = registry.listener.deactivate_antigravity().await;

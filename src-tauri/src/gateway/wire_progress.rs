@@ -1,7 +1,8 @@
 //! Observe socket progress without changing bytes or treating control heartbeats as generation data.
+use parking_lot::Mutex;
 use std::{
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
     task::{Context, Poll},
 };
 use tokio::{
@@ -170,12 +171,12 @@ impl Activity {
         }
     }
     pub fn track(&self, delivery: &Arc<super::protocol::Delivery>) {
-        let mut deliveries = self.deliveries.lock().unwrap();
+        let mut deliveries = self.deliveries.lock();
         deliveries.retain(|d| d.upgrade().is_some_and(|d| !d.is_settled()));
         deliveries.push(Arc::downgrade(delivery));
     }
     fn flushed(&self) {
-        self.deliveries.lock().unwrap().retain(|delivery| {
+        self.deliveries.lock().retain(|delivery| {
             let Some(delivery) = delivery.upgrade() else {
                 return false;
             };
@@ -191,28 +192,22 @@ impl Activity {
         });
     }
     pub fn connection_failed(&self, code: u8) {
-        for delivery in self
-            .deliveries
-            .lock()
-            .unwrap()
-            .drain(..)
-            .filter_map(|d| d.upgrade())
-        {
+        for delivery in self.deliveries.lock().drain(..).filter_map(|d| d.upgrade()) {
             delivery.failed(code);
         }
     }
     pub fn begin_request(&self) -> u64 {
-        let mut evidence = self.evidence.lock().unwrap();
+        let mut evidence = self.evidence.lock();
         evidence.request_sequence += 1;
         evidence.request_sequence
     }
     pub fn snapshot(&self, request_sequence: u64) -> crate::usage::model::ConnectionEvidence {
-        let mut snapshot = self.evidence.lock().unwrap().clone();
+        let mut snapshot = self.evidence.lock().clone();
         snapshot.request_sequence = request_sequence;
         snapshot
     }
     pub fn event(&self, kind: &str) {
-        let mut evidence = self.evidence.lock().unwrap();
+        let mut evidence = self.evidence.lock();
         let sequence = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -257,10 +252,10 @@ impl Activity {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn read_at(&self) -> Option<Instant> {
-        self.read.lock().unwrap().at
+        self.read.lock().at
     }
     pub fn write_at(&self) -> Instant {
-        *self.write.lock().unwrap()
+        *self.write.lock()
     }
 }
 pub struct Tracked<S> {
@@ -285,7 +280,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for Tracked<S> {
         }
         if matches!(result, Poll::Ready(Ok(()))) {
             let size = buf.filled().len() - before;
-            self.activity.evidence.lock().unwrap().read_bytes += size as u64;
+            self.activity.evidence.lock().read_bytes += size as u64;
             if size == 0 && buf.remaining() > 0 {
                 self.activity.read_eof();
             }
@@ -296,11 +291,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for Tracked<S> {
                 .websocket
                 .load(std::sync::atomic::Ordering::Relaxed)
         {
-            self.activity
-                .read
-                .lock()
-                .unwrap()
-                .feed(&buf.filled()[before..]);
+            self.activity.read.lock().feed(&buf.filled()[before..]);
         }
         result
     }
@@ -317,8 +308,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Tracked<S> {
         }
         if let Poll::Ready(Ok(n)) = &result {
             if *n > 0 {
-                *self.activity.write.lock().unwrap() = Instant::now();
-                self.activity.evidence.lock().unwrap().socket_written_bytes += *n as u64;
+                *self.activity.write.lock() = Instant::now();
+                self.activity.evidence.lock().socket_written_bytes += *n as u64;
             }
         }
         result

@@ -394,8 +394,8 @@ async fn rpm_windows_are_isolated_between_codex_and_claude() {
         )
         .unwrap();
 
-    let codex_providers = codex.0.inner.lock().unwrap().store.providers.clone();
-    let claude_providers = claude.0.inner.lock().unwrap().store.providers.clone();
+    let codex_providers = codex.0.inner.lock().store.providers.clone();
+    let claude_providers = claude.0.inner.lock().store.providers.clone();
     codex.0.admission.configure(&codex_providers, true);
     claude.0.admission.configure(&claude_providers, true);
 
@@ -774,7 +774,7 @@ pub(super) async fn response_ws_server(
                     if frame.opcode().is_control() { continue; }
                     let value: serde_json::Value = serde_json::from_slice(frame.payload()).unwrap();
                     if value["type"] == "response.create" {
-                        observed.lock().unwrap().push(frame.payload().to_vec());
+                        observed.lock().push(frame.payload().to_vec());
                         ws.send(yawc::Frame::text("{\"type\":\"response.output_text.delta\",\"delta\":\"fixture\",\"response\":{\"id\":\"resp-fixture\"}}".to_string())).await.unwrap();
                         permits.acquire().await.unwrap().forget();
                         ws.send(yawc::Frame::binary(frame.into_payload())).await.unwrap();
@@ -791,7 +791,7 @@ pub(super) async fn response_ws_server(
 }
 
 pub(super) async fn responses_client(g: &Gateway) -> yawc::TcpWebSocket {
-    let token = g.0.inner.lock().unwrap().store.local_token.clone();
+    let token = g.0.inner.lock().store.local_token.clone();
     yawc::WebSocket::connect(
         format!(
             "ws://127.0.0.1:{}/v1/responses?future=keep",
@@ -885,10 +885,10 @@ async fn responses_websocket_releases_each_turn_preserves_compressed_payload_and
     assert_eq!(completed["type"], "response.completed");
     until(|| g.view().providers.iter().all(|p| p.active_requests == 0)).await;
     assert_eq!(
-        seen_a.lock().unwrap().as_slice(),
+        seen_a.lock().as_slice(),
         &[payload.as_bytes(), payload.as_bytes()]
     );
-    assert_eq!(seen_b.lock().unwrap().as_slice(), &[payload.as_bytes()]);
+    assert_eq!(seen_b.lock().as_slice(), &[payload.as_bytes()]);
     first.send(yawc::Frame::ping("control-ping")).await.unwrap();
     let pong = ws_next(&mut first).await;
     assert_eq!(pong.opcode(), yawc::OpCode::Pong);
@@ -946,7 +946,7 @@ async fn responses_websocket_fragmented_messages_and_busy_pinned_turn_close_1013
         .unwrap();
     req.headers_mut().insert(
         "authorization",
-        format!("Bearer {}", g.0.inner.lock().unwrap().store.local_token)
+        format!("Bearer {}", g.0.inner.lock().store.local_token)
             .parse()
             .unwrap(),
     );
@@ -971,7 +971,7 @@ async fn responses_websocket_fragmented_messages_and_busy_pinned_turn_close_1013
     ws.next().await.unwrap().unwrap();
     until(|| g.view().providers[0].active_requests == 0).await;
     assert_eq!(
-        seen.lock().unwrap()[0],
+        seen.lock()[0],
         b"{\"type\":\"response.create\",\"unknown\":true}"
     );
     let held = slot(&g, &routes(&g)).await;
@@ -1202,8 +1202,8 @@ async fn websocket_model_rules_recheck_each_turn_and_keep_context_provider() {
     let closed = ws_next(&mut ws).await;
     assert_eq!(closed.opcode(), yawc::OpCode::Close);
     assert_eq!(&closed.payload()[..2], &1008u16.to_be_bytes());
-    assert!(seen_a.lock().unwrap().is_empty());
-    assert_eq!(seen_b.lock().unwrap().len(), 2);
+    assert!(seen_a.lock().is_empty());
+    assert_eq!(seen_b.lock().len(), 2);
     assert_eq!(g.view().providers[1].health.failures, 0);
     drop(ws);
     drop(ra);

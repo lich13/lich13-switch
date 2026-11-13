@@ -12,13 +12,14 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::{
     convert::Infallible,
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -215,7 +216,7 @@ async fn request(gateway: &Gateway, session: &str, body: impl AsRef<[u8]>) -> Re
     let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
         .build(super::connector::Connector::new(Duration::from_secs(3), 0));
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let req = Request::builder()
@@ -231,7 +232,7 @@ async fn request(gateway: &Gateway, session: &str, body: impl AsRef<[u8]>) -> Re
 
 async fn ws_client(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     yawc::WebSocket::connect(
@@ -392,7 +393,7 @@ async fn http_new_thread_temporary_429_changes_provider_but_established_owner_wa
             .unwrap_or("unknown")
             .to_owned();
         let attempt = {
-            let mut counts = primary_seen.lock().unwrap();
+            let mut counts = primary_seen.lock();
             let count = counts.entry(session.clone()).or_default();
             *count += 1;
             *count
@@ -477,7 +478,7 @@ async fn http_new_thread_temporary_429_changes_provider_but_established_owner_wa
         "owner waited only {waited:?}"
     );
     assert_eq!(backup_hits.load(Ordering::SeqCst), 1);
-    let counts = primary_hits.lock().unwrap().clone();
+    let counts = primary_hits.lock().clone();
     assert_eq!(counts.get("fixture-temporary-new-thread"), Some(&1));
     assert_eq!(counts.get("fixture-temporary-established-owner"), Some(&3));
     gateway.stop().await.unwrap();

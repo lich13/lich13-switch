@@ -140,7 +140,7 @@ async fn v022_request(gateway: &Gateway, thread: &str, body: Vec<u8>) -> Respons
     let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
         .build(super::connector::Connector::new(Duration::from_secs(3), 0));
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let request = Request::builder()

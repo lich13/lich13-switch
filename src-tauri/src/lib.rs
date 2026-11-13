@@ -37,11 +37,12 @@ mod tray_macos;
 mod update;
 mod usage;
 use core::{Core, Preferences, ViewState};
+use parking_lot::Mutex;
 use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 use storage::{AppError, Result};
@@ -120,7 +121,8 @@ impl PendingMainEvents {
         }
     }
     fn record_app_event(&self, change: &events::Change) {
-        if let Ok(mut slot) = self.app_event.lock() {
+        {
+            let mut slot = self.app_event.lock();
             let previous_record = slot.as_ref().and_then(|old| old.record.clone());
             *slot = Some(events::Change {
                 record: change.record.clone().or(previous_record),
@@ -130,31 +132,26 @@ impl PendingMainEvents {
         }
     }
     fn record_notification_state(&self, state: notifications::State) {
-        if let Ok(mut slot) = self.notification_state.lock() {
+        {
+            let mut slot = self.notification_state.lock();
             *slot = Some(state);
         }
     }
     fn record_config_state(&self, key: &str, payload: serde_json::Value) {
-        if let Ok(mut map) = self.config_states.lock() {
+        {
+            let mut map = self.config_states.lock();
             map.insert(key.to_owned(), payload);
         }
     }
     fn drain(&self) -> DrainedMainEvents {
-        let app_event = self.app_event.lock().ok().and_then(|mut s| s.take());
-        let notification_state = self
-            .notification_state
-            .lock()
-            .ok()
-            .and_then(|mut s| s.take());
+        let app_event = self.app_event.lock().take();
+        let notification_state = self.notification_state.lock().take();
         let provider_tests = self.provider_tests.swap(false, Ordering::Relaxed);
         let pricing_state = self.pricing_state.swap(false, Ordering::Relaxed);
         let usage_state = self.usage_state.swap(false, Ordering::Relaxed);
-        let config_states = self
-            .config_states
-            .lock()
-            .ok()
-            .map(|mut map| std::mem::take(&mut *map).into_values().collect())
-            .unwrap_or_default();
+        let config_states = std::mem::take(&mut *self.config_states.lock())
+            .into_values()
+            .collect();
         DrainedMainEvents {
             app_event,
             notification_state,
@@ -186,16 +183,11 @@ impl Runtime {
         [&self.gateway, &self.claude, &self.grok, &self.dsh]
             .into_iter()
             .any(gateway::Gateway::is_running)
-            || self
-                .login
-                .lock()
-                .map(|s| login_active(&s.state))
-                .unwrap_or(false)
-            || self
-                .claude_login
-                .lock()
-                .map(|s| matches!(s.state.phase.as_str(), "waiting" | "cancelling"))
-                .unwrap_or(false)
+            || login_active(&self.login.lock().state)
+            || matches!(
+                self.claude_login.lock().state.phase.as_str(),
+                "waiting" | "cancelling"
+            )
     }
 
     fn config_failure(&self, client: gateway::ClientId, error: AppError) -> AppError {
@@ -214,7 +206,7 @@ impl Runtime {
         }
     }
     fn home(&self, client: gateway::ClientId) -> Result<PathBuf> {
-        let core = self.core.lock().unwrap();
+        let core = self.core.lock();
         Ok(match client {
             gateway::ClientId::Codex => core.home(),
             gateway::ClientId::Claude => PathBuf::from(core.preferences().claude_home),
@@ -511,7 +503,7 @@ fn poll_account_state_step(
     last: &mut Option<ViewState>,
 ) -> PollStateUpdate {
     let result = {
-        let mut c = core.lock().unwrap();
+        let mut c = core.lock();
         c.state().map(|s| (s, c.home()))
     };
     match result {
@@ -548,7 +540,7 @@ fn publish(app: &tauri::AppHandle, state: ViewState) {
 }
 fn refresh(app: &tauri::AppHandle, r: &Runtime) -> Result<ViewState> {
     let state = state_for(r)?;
-    let home = r.core.lock().unwrap().home();
+    let home = r.core.lock().home();
     r.gateway.observe_home(&home);
     publish(app, state.clone());
     Ok(state)
@@ -608,7 +600,7 @@ fn publish_gateway(app: &tauri::AppHandle, gateway: &gateway::Gateway) {
     }
 }
 fn state_for(r: &Runtime) -> Result<ViewState> {
-    r.core.lock().unwrap().state()
+    r.core.lock().state()
 }
 #[tauri::command]
 async fn list_provider_models(
@@ -631,7 +623,7 @@ async fn switch_account(
     expected_revision: String,
 ) -> Result<ViewState> {
     let _connection_guard = r.official_tx.lock().await;
-    let mut core = r.core.lock().unwrap();
+    let mut core = r.core.lock();
     let official_view = core.official_view();
     if official::blocks_gateway(&r.data) && official_view.account_id.as_deref() != Some(id.as_str())
     {
@@ -709,7 +701,6 @@ async fn use_official_account(
     official::enable_with_switch(&r.data, &home, &account_id, &config_revision, || {
         r.core
             .lock()
-            .unwrap()
             .switch_account(&account_id, &auth_revision)
             .map(|_| ())
     })?;
@@ -732,7 +723,7 @@ async fn disable_official_account(
 }
 #[tauri::command]
 fn import_current(app: tauri::AppHandle, r: tauri::State<'_, Arc<Runtime>>) -> Result<ViewState> {
-    let mut c = r.core.lock().unwrap();
+    let mut c = r.core.lock();
     let path = c.home().join("auth.json");
     c.import_file(&path, None)?;
     drop(c);
@@ -745,7 +736,7 @@ fn rename_account(
     id: String,
     name: String,
 ) -> Result<ViewState> {
-    r.core.lock().unwrap().rename(&id, &name)?;
+    r.core.lock().rename(&id, &name)?;
     refresh(&app, &r)
 }
 #[tauri::command]
@@ -754,7 +745,8 @@ fn delete_account(
     r: tauri::State<'_, Arc<Runtime>>,
     id: String,
 ) -> Result<ViewState> {
-    if let Ok(session) = r.login.lock() {
+    {
+        let session = r.login.lock();
         if login_active(&session.state)
             && session.state.target_account_id.as_deref() == Some(id.as_str())
         {
@@ -764,7 +756,7 @@ fn delete_account(
             ));
         }
     }
-    r.core.lock().unwrap().delete(&id)?;
+    r.core.lock().delete(&id)?;
     refresh(&app, &r)
 }
 #[tauri::command]
@@ -820,11 +812,7 @@ fn set_quota_refresh(
     seconds: u64,
     expected_seconds: u64,
 ) -> Result<ViewState> {
-    let state = r
-        .core
-        .lock()
-        .unwrap()
-        .set_quota_refresh(seconds, expected_seconds)?;
+    let state = r.core.lock().set_quota_refresh(seconds, expected_seconds)?;
     r.gateway.set_quota_interval(seconds);
     r.claude.set_quota_interval(seconds);
     r.grok.set_quota_interval(seconds);
@@ -840,20 +828,20 @@ async fn set_preferences(
 ) -> Result<ViewState> {
     let _official_guard = r.official_tx.lock().await;
     if matches!(
-        r.claude_login.lock().unwrap().state.phase.as_str(),
+        r.claude_login.lock().state.phase.as_str(),
         "waiting" | "cancelling"
-    ) && r.core.lock().unwrap().preferences().claude_home != preferences.claude_home
+    ) && r.core.lock().preferences().claude_home != preferences.claude_home
     {
         return Err(AppError::new(
             code::LOGIN_BUSY,
             "请先完成或取消 Claude 登录",
         ));
     }
-    if login_active(&r.login.lock().unwrap().state) {
+    if login_active(&r.login.lock().state) {
         return Err(AppError::new(code::LOGIN_BUSY, "请先完成或取消登录"));
     }
     if (r.gateway.guarded_home() || official::blocks_gateway(&r.data))
-        && r.core.lock().unwrap().preferences().codex_home != preferences.codex_home
+        && r.core.lock().preferences().codex_home != preferences.codex_home
     {
         return Err(AppError::new(
             code::GATEWAY_ACTIVE,
@@ -861,30 +849,27 @@ async fn set_preferences(
         ));
     }
     if (r.claude.guarded_home() || claude_profile::blocks(&r.data))
-        && r.core.lock().unwrap().preferences().claude_home != preferences.claude_home
+        && r.core.lock().preferences().claude_home != preferences.claude_home
     {
         return Err(AppError::new(
             code::GATEWAY,
             "请先停止 Claude Code 网关并处理恢复事务",
         ));
     }
-    if r.dsh.guarded_home() && r.core.lock().unwrap().preferences().dsh_home != preferences.dsh_home
-    {
+    if r.dsh.guarded_home() && r.core.lock().preferences().dsh_home != preferences.dsh_home {
         return Err(AppError::new(
             code::GATEWAY,
             "请先停止 DSH 网关并处理恢复事务",
         ));
     }
-    if r.grok.guarded_home()
-        && r.core.lock().unwrap().preferences().grok_home != preferences.grok_home
-    {
+    if r.grok.guarded_home() && r.core.lock().preferences().grok_home != preferences.grok_home {
         return Err(AppError::new(
             code::GATEWAY,
             "请先停止 Grok Build 网关并处理恢复事务",
         ));
     }
     let s = {
-        let mut core = r.core.lock().unwrap();
+        let mut core = r.core.lock();
         preferences.quota_refresh_seconds = core.preferences().quota_refresh_seconds;
         core.set_preferences(preferences)?
     };
@@ -922,7 +907,7 @@ async fn set_startup(r: tauri::State<'_, Arc<Runtime>>, enabled: bool) -> Result
 }
 #[tauri::command]
 fn get_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<login::LoginState> {
-    Ok(r.login.lock().unwrap().state.clone())
+    Ok(r.login.lock().state.clone())
 }
 #[tauri::command]
 fn start_login(
@@ -935,10 +920,10 @@ fn start_login(
     if !["browser", "device"].contains(&mode.as_str()) {
         return Err(AppError::new(code::LOGIN_MODE, "登录方式无效"));
     }
-    let prefs = r.core.lock().unwrap().preferences();
+    let prefs = r.core.lock().preferences();
     let cli = login::resolve_cli(&prefs.cli_path)?;
     let target = match target_account_id.as_deref() {
-        Some(id) if mode == "device" => Some(r.core.lock().unwrap().login_target(
+        Some(id) if mode == "device" => Some(r.core.lock().login_target(
             id,
             expected_credential_revision.as_deref().unwrap_or_default(),
         )?),
@@ -950,7 +935,7 @@ fn start_login(
         }
         None => None,
     };
-    let mut session = r.login.lock().unwrap();
+    let mut session = r.login.lock();
     if login_active(&session.state) {
         return Err(AppError::new(code::LOGIN_BUSY, "已有登录正在进行"));
     }
@@ -973,27 +958,28 @@ fn start_login(
         tokio::pin!(task);
         let result = loop {
             tokio::select! {
-                Some(mut state) = events.recv() => {
-                    if let Ok(mut s) = runtime.login.lock() {
-                        // Buffered CLI prompts must not revive a cancelled session.
-                        if s.cancel.is_some() {
-                            state.target_account_id = target_account_id.clone();
-                            s.state = state.clone();
-                            let _ = app.emit("login-state", state);
-                        }
-                    }
-                },
-                result = &mut task => break result,
-            }
+                           Some(mut state) = events.recv() => {
+                               {
+            let mut s = runtime.login.lock();
+                                   // Buffered CLI prompts must not revive a cancelled session.
+                                   if s.cancel.is_some() {
+                                       state.target_account_id = target_account_id.clone();
+                                       s.state = state.clone();
+                                       let _ = app.emit("login-state", state);
+                                   }
+                               }
+                           },
+                           result = &mut task => break result,
+                       }
         };
         let _connection_guard = runtime.official_tx.lock().await;
         let mut final_state = match result {
             Ok(Some(raw)) => match (|| -> Result<bool> {
-                let s = runtime.login.lock().unwrap();
+                let s = runtime.login.lock();
                 if s.cancel.is_none() {
                     return Err(AppError::new(code::LOGIN_CANCELLED, "登录已取消"));
                 }
-                let mut c = runtime.core.lock().unwrap();
+                let mut c = runtime.core.lock();
                 match target.as_ref() {
                     Some(target) => c.complete_target_login(&raw, target),
                     None => c.complete_login(&raw),
@@ -1033,7 +1019,8 @@ fn start_login(
             },
         };
         final_state.target_account_id = target_account_id;
-        if let Ok(mut s) = runtime.login.lock() {
+        {
+            let mut s = runtime.login.lock();
             s.state = final_state.clone();
             s.cancel = None;
         }
@@ -1047,7 +1034,7 @@ fn start_login(
 }
 #[tauri::command]
 fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
-    let mut s = r.login.lock().unwrap();
+    let mut s = r.login.lock();
     if let Some(tx) = s.cancel.take() {
         let _ = tx.send(());
         s.state.phase = "cancelling".into();
@@ -1056,7 +1043,7 @@ fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
 }
 #[tauri::command]
 fn open_login_url(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
-    let s = r.login.lock().unwrap();
+    let s = r.login.lock();
     let url = s
         .state
         .auth_url
@@ -1074,7 +1061,6 @@ fn copy_login_value(
     use tauri_plugin_clipboard_manager::ClipboardExt;
     r.login
         .lock()
-        .unwrap()
         .copy_value(kind, |value| app.clipboard().write_text(value))
 }
 fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
@@ -1092,7 +1078,8 @@ fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
         }
         runtime.quitting.store(true, Ordering::Relaxed);
         runtime.window_wake.notify_one();
-        if let Ok(mut s) = runtime.login.lock() {
+        {
+            let mut s = runtime.login.lock();
             if let Some(tx) = s.cancel.take() {
                 let _ = tx.send(());
                 return;
@@ -1444,7 +1431,7 @@ async fn frontend_ready(
             if let Some(record) = events::Record::configuration_failure(client, &e, true) {
                 r.diagnostics.emit(record);
             }
-            *r.startup_error.lock().unwrap() = Some(e.clone());
+            *r.startup_error.lock() = Some(e.clone());
             let _ = app.emit("switch-error", e);
         }
         publish_gateway(&app, r.gateway(client));
@@ -1554,7 +1541,7 @@ pub fn run() {
             });
             runtime
                 .gateway
-                .observe_home(&runtime.core.lock().unwrap().home());
+                .observe_home(&runtime.core.lock().home());
             runtime
                 .claude
                 .observe_home(&runtime.home(gateway::ClientId::Claude)?);
@@ -1581,7 +1568,7 @@ pub fn run() {
                 let r = runtime.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = links::ensure_association(&handle).await {
-                        r.startup_error.lock().unwrap().get_or_insert(error.clone());
+                        r.startup_error.lock().get_or_insert(error.clone());
                         let _ = handle.emit("switch-error", error);
                     }
                 });
@@ -2117,7 +2104,8 @@ mod page_whitelist_tests {
         MainSignal, PendingMainEvents, PollStateUpdate, HIDDEN_POLL_INTERVAL,
         VISIBLE_POLL_INTERVAL,
     };
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]

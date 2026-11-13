@@ -49,8 +49,7 @@ impl Gateway {
             })
             .and_then(|route| {
                 self.query_input(&route.provider.id).ok().filter(|q| {
-                    q.version
-                        == Self::quota_version(&self.0.inner.lock().unwrap().store, &route.provider)
+                    q.version == Self::quota_version(&self.0.inner.lock().store, &route.provider)
                 })
             });
         // Keep one cancellable waiter while the query is pending, even when
@@ -124,7 +123,7 @@ impl Gateway {
                 record.details.error_basis = Some(ErrorBasis::QuotaExhausted);
                 record.details.wait_seconds = None;
             }
-            if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
+            if let Some(service) = self.0.diagnostics.lock().as_ref() {
                 service.emit(record);
             }
         }

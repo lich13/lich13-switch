@@ -95,7 +95,7 @@ async fn endpoint(name: &'static str, reject_window: bool) -> (u16, Arc<Mutex<Ve
         async move {
             let compact = req.uri().path().ends_with("/compact");
             let bytes = req.into_body().collect().await.unwrap().to_bytes().to_vec();
-            captured.lock().unwrap().push(bytes.clone());
+            captured.lock().push(bytes.clone());
             let value: Value = serde_json::from_slice(&bytes).unwrap();
             if reject_window && value["input"].is_array() {
                 return Response::builder().status(400).header("content-type", "application/json")
@@ -157,9 +157,9 @@ async fn old_thread_does_not_revive_consumed_compaction_boundary() {
         call(&g, "fixture-existing", "/v1/responses", bytes.clone()).await["provider"],
         "old"
     );
-    assert_eq!(old.lock().unwrap().last().unwrap(), &bytes);
-    assert_eq!(old.lock().unwrap().len(), 5);
-    assert_eq!(new.lock().unwrap().len(), 1);
+    assert_eq!(old.lock().last().unwrap(), &bytes);
+    assert_eq!(old.lock().len(), 5);
+    assert_eq!(new.lock().len(), 1);
 
     // A subsequent compaction response with a different encrypted window is
     // new evidence; only that fresh boundary permits the next handoff.
@@ -179,9 +179,9 @@ async fn old_thread_does_not_revive_consumed_compaction_boundary() {
         call(&g, "fixture-existing", "/v1/responses", next.clone()).await["provider"],
         "new"
     );
-    assert_eq!(new.lock().unwrap().last().unwrap(), &next);
-    assert_eq!(old.lock().unwrap().len(), 6);
-    assert_eq!(new.lock().unwrap().len(), 2);
+    assert_eq!(new.lock().last().unwrap(), &next);
+    assert_eq!(old.lock().len(), 6);
+    assert_eq!(new.lock().len(), 2);
     assert_eq!(std::fs::read(t.path().join("config.toml")).unwrap(), config);
     assert_eq!(std::fs::read(t.path().join("auth.json")).unwrap(), auth);
     g.stop().await.unwrap();
@@ -223,8 +223,8 @@ async fn incompatible_compaction_context_falls_back_without_circuit_failure_or_b
         call(&g, "fixture-fallback", "/v1/responses", bytes.clone()).await["provider"],
         "old"
     );
-    assert_eq!(old.lock().unwrap().last().unwrap(), &bytes);
-    assert_eq!(new.lock().unwrap().last().unwrap(), &bytes);
+    assert_eq!(old.lock().last().unwrap(), &bytes);
+    assert_eq!(new.lock().last().unwrap(), &bytes);
     assert_eq!(g.view().providers[0].health.failures, 0);
     assert_eq!(
         call(&g, "fixture-fallback", "/v1/responses", ordinary).await["provider"],
@@ -257,7 +257,7 @@ async fn unobserved_compaction_never_authorizes_handoff() {
         call(&g, "fixture-unconfirmed", "/v1/responses", input()).await["provider"],
         "old"
     );
-    assert!(new.lock().unwrap().is_empty());
+    assert!(new.lock().is_empty());
     g.stop().await.unwrap();
 }
 
@@ -307,7 +307,7 @@ async fn failed_compaction_with_an_output_item_does_not_authorize_handoff() {
         call(&g, "fixture-failed-compact", "/v1/responses", input()).await["provider"],
         "old"
     );
-    assert!(seen.lock().unwrap().is_empty());
+    assert!(seen.lock().is_empty());
     g.stop().await.unwrap();
 }
 
@@ -322,7 +322,7 @@ async fn native_endpoint(name: &'static str) -> (u16, Arc<Mutex<Vec<Vec<u8>>>>) 
                 let mut peer=upgrade.await.unwrap();
                 while let Some(frame)=peer.next().await {
                     if frame.opcode().is_control() { if frame.opcode()==yawc::OpCode::Close {break;} continue; }
-                    captured.lock().unwrap().push(frame.payload().to_vec());
+                    captured.lock().push(frame.payload().to_vec());
                     let request:Value=serde_json::from_slice(frame.payload()).unwrap();
                     let compact=request["input"].as_array().is_some_and(|items|items.iter().any(|i|i["type"]=="compaction_trigger"));
                     let event=json!({"type":"response.completed","response":{"id":format!("fixture-native-{name}"),"model":"fixture-model","status":"completed","provider":name,"output":if compact {json!([{"type":"compaction","encrypted_content":WINDOW}])}else{json!([])},"usage":{"input_tokens":25,"output_tokens":3}}}).to_string();
@@ -355,7 +355,7 @@ async fn websocket_handoff_changes_only_upstream_between_completed_turns() {
     automatic(&g, &t);
     takeover_eligible(&g, &t);
     start(&g, &t).await;
-    let token = g.0.inner.lock().unwrap().store.local_token.clone();
+    let token = g.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!("ws://127.0.0.1:{}/v1/responses", g.view().settings.port)
             .parse()
@@ -398,10 +398,10 @@ async fn websocket_handoff_changes_only_upstream_between_completed_turns() {
         ws_turn(&mut peer, serialized.clone()).await["response"]["provider"],
         "new"
     );
-    assert_eq!(old.lock().unwrap().len(), 3);
-    assert_eq!(old.lock().unwrap()[2], compaction_trigger.as_bytes());
-    assert_eq!(new.lock().unwrap().len(), 1);
-    assert_eq!(new.lock().unwrap()[0], serialized.as_bytes());
+    assert_eq!(old.lock().len(), 3);
+    assert_eq!(old.lock()[2], compaction_trigger.as_bytes());
+    assert_eq!(new.lock().len(), 1);
+    assert_eq!(new.lock()[0], serialized.as_bytes());
     drop(peer);
     g.stop().await.unwrap();
 }
@@ -660,7 +660,7 @@ async fn websocket_existing_connection_reselects_before_sending_when_owner_is_fu
     automatic(&g, &t);
     one_slot(&g, &t);
     start(&g, &t).await;
-    let token = g.0.inner.lock().unwrap().store.local_token.clone();
+    let token = g.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!("ws://127.0.0.1:{}/v1/responses", g.view().settings.port)
             .parse()
@@ -689,8 +689,8 @@ async fn websocket_existing_connection_reselects_before_sending_when_owner_is_fu
         ws_turn(&mut peer, payload.to_string()).await["response"]["provider"],
         "new"
     );
-    assert_eq!(old_seen.lock().unwrap().len(), 1);
-    assert_eq!(new_seen.lock().unwrap().len(), 1);
+    assert_eq!(old_seen.lock().len(), 1);
+    assert_eq!(new_seen.lock().len(), 1);
     let key = crate::storage::digest(b"fixture-native-capacity");
     tokio::time::timeout(Duration::from_secs(3), async {
         while g.0.compaction.owner(&key) != Some(ids[1].clone()) {

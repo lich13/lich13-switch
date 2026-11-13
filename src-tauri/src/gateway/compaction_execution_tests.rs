@@ -138,7 +138,7 @@ async fn compaction_cancel_disconnect_and_stop_release_pending_and_concurrency()
         .await;
         let (_t, g) = configured(port).await;
         use tokio::io::AsyncWriteExt;
-        let token = g.0.inner.lock().unwrap().store.local_token.clone();
+        let token = g.0.inner.lock().store.local_token.clone();
         let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", g.view().settings.port))
             .await
             .unwrap();
@@ -182,7 +182,7 @@ async fn websocket_compaction_each_round_survives_silence_but_ordinary_round_sti
         }
     }).await;
     let (_t, g) = configured(port).await;
-    let token = g.0.inner.lock().unwrap().store.local_token.clone();
+    let token = g.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!("ws://127.0.0.1:{}/v1/responses", g.view().settings.port)
             .parse()

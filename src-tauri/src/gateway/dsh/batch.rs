@@ -76,7 +76,6 @@ impl Gateway {
             .0
             .inner
             .lock()
-            .unwrap()
             .store
             .dsh
             .as_ref()
@@ -84,7 +83,7 @@ impl Gateway {
             .ok_or_else(|| error("请先在 DSH 接入面板选择 profile"))?;
         for profile in profiles.values().filter(|p| p.active) {
             let input = Input::read(home, &profile.options.profile)?;
-            let snapshot = self.0.inner.lock().unwrap().store.dsh.clone().unwrap();
+            let snapshot = self.0.inner.lock().store.dsh.clone().unwrap();
             check_owned(
                 &snapshot.for_profile(&profile.options.profile).unwrap(),
                 &input,
@@ -126,7 +125,7 @@ impl Gateway {
         }
         // Validate every existing profile before changing the first participant.
         let port = self.0.registry.listener.view()?.port;
-        let mut store = self.0.inner.lock().unwrap().store.clone();
+        let mut store = self.0.inner.lock().store.clone();
         import_selection(home, &options, &mut store, port)?;
         store.settings.port = port;
         let models = models::for_store(&store);
@@ -233,7 +232,7 @@ impl Gateway {
                     if let Some(record) =
                         crate::events::Record::configuration_failure(ClientId::Dsh, &error, false)
                     {
-                        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
+                        if let Some(events) = self.0.diagnostics.lock().as_ref() {
                             events.emit(record);
                         }
                     }

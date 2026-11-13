@@ -44,7 +44,7 @@ fn gateway(home: &Path) -> Gateway {
     gateway
         .set_listener_port(port, &gateway.try_listener_view().unwrap().revision)
         .unwrap();
-    let mut state = gateway.0.inner.lock().unwrap();
+    let mut state = gateway.0.inner.lock();
     state
         .editable_mut()
         .store
@@ -402,7 +402,7 @@ async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
         .await
         .unwrap();
     assert!(result.results.iter().all(|r| r.status == "success"));
-    let snapshot = gateway.0.inner.lock().unwrap().store.dsh.clone().unwrap();
+    let snapshot = gateway.0.inner.lock().store.dsh.clone().unwrap();
     assert_eq!(snapshot.active_profiles().len(), 3);
     assert_eq!(
         snapshot.environment.before.as_deref(),
@@ -424,7 +424,7 @@ async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
         .unwrap()
         .is_none());
     let listener_port = gateway.try_listener_view().unwrap().port;
-    let store = gateway.0.inner.lock().unwrap().store.clone();
+    let store = gateway.0.inner.lock().store.clone();
     assert_eq!(
         super::current(home.path(), &store, &[listener_port], &|_| None).state,
         Kind::Gateway
@@ -450,7 +450,6 @@ async fn batch_preflights_all_profiles_and_restores_shared_credentials_last() {
             .0
             .inner
             .lock()
-            .unwrap()
             .store
             .dsh
             .as_ref()

@@ -244,7 +244,7 @@ impl Gateway {
         }
         let mut failure = None;
         if refresh {
-            let token = official_token(home, &self.0.inner.lock().unwrap().store);
+            let token = official_token(home, &self.0.inner.lock().store);
             let result = match &token {
                 Ok(token) => fetch_catalog(home, token).await,
                 Err(e) => Err(e.clone()),
@@ -259,7 +259,7 @@ impl Gateway {
             failure = result.err().map(|e| e.message);
         }
         Ok(CatalogView {
-            models: models::for_store(&self.0.inner.lock().unwrap().store),
+            models: models::for_store(&self.0.inner.lock().store),
             error: failure,
         })
     }
@@ -270,12 +270,12 @@ impl Gateway {
         models: Vec<Value>,
     ) -> Result<()> {
         let _lifecycle = self.0.lifecycle.lock().await;
-        let _mutation = self.0.registry.mutation.lock().unwrap();
-        let current_token = official_token(home, &self.0.inner.lock().unwrap().store);
+        let _mutation = self.0.registry.mutation.lock();
+        let current_token = official_token(home, &self.0.inner.lock().store);
         if current_token.as_deref().ok() != Some(token) {
             return Err(error("DSH 官方登录已变化，请重新刷新模型"));
         }
-        let mut state = self.0.inner.lock().unwrap();
+        let mut state = self.0.inner.lock();
         let mut next = state.store.clone();
         next.dsh_catalog = models;
         state.revision = commit_mapping(&self.0.data, home, &mut next, &state.revision)?;
@@ -361,14 +361,8 @@ mod tests {
     #[tokio::test]
     async fn failed_refresh_retains_saved_catalog_and_does_not_change_credentials() {
         let (home, _parent, gateway) = tests_v02516::fixture();
-        gateway
-            .0
-            .inner
-            .lock()
-            .unwrap()
-            .editable_mut()
-            .store
-            .dsh_catalog = vec![json!({"id":"deepseek-future","name":"Future"})];
+        gateway.0.inner.lock().editable_mut().store.dsh_catalog =
+            vec![json!({"id":"deepseek-future","name":"Future"})];
         let before = std::fs::read(home.path().join(".credentials.yaml")).unwrap();
         let result = gateway
             .dsh_official_models(home.path(), true)

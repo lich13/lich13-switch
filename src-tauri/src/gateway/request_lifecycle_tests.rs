@@ -305,7 +305,7 @@ async fn http_client_disconnect_preserves_forwarded_bytes_without_usage_tail() {
     super::start(&gateway, &dir).await;
 
     let (token, gateway_port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let socket = tokio::net::TcpStream::connect(("127.0.0.1", gateway_port))

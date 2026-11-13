@@ -16,13 +16,14 @@ use hyper::{
     Request, Response, StatusCode,
 };
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::{
     convert::Infallible,
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -266,7 +267,7 @@ async fn v024_request(
     let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
         .build(super::connector::Connector::new(Duration::from_secs(3), 0));
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let request = Request::builder()
@@ -366,10 +367,7 @@ async fn v024_seeded_http(
                 .to_bytes()
                 .to_vec();
             if method == hyper::Method::POST {
-                owner_capture
-                    .lock()
-                    .unwrap()
-                    .push((path.clone(), body.clone()));
+                owner_capture.lock().push((path.clone(), body.clone()));
             }
             if path.ends_with("/responses/compact") {
                 v024_completed_response(
@@ -432,7 +430,7 @@ async fn v024_seeded_http(
                     .unwrap()
                     .to_bytes()
                     .to_vec();
-                capture.lock().unwrap().push(body);
+                capture.lock().push(body);
                 v024_completed_response(
                     &provider,
                     "fixture-v024-seeded-receiver-response",
@@ -586,7 +584,7 @@ async fn v024_ws_endpoint_with_recovery(
                     let Ok(value) = serde_json::from_slice::<Value>(&payload) else {
                         break;
                     };
-                    seen.lock().unwrap().push(payload);
+                    seen.lock().push(payload);
                     let input = value["input"].as_array();
                     let compact_trigger = input.is_some_and(|items| {
                         items
@@ -689,7 +687,7 @@ async fn v024_compacted_websocket_fails_over(
 
     let thread = "fixture-v024-ws-compacted-thread";
     let session = crate::storage::digest(thread.as_bytes());
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!(
             "ws://127.0.0.1:{}/v1/responses",
@@ -750,8 +748,8 @@ async fn v024_compacted_websocket_fails_over(
         .0
         .compaction
         .boundary_matches(&session, Some(&boundary));
-    let owner_frames = owner_seen.lock().unwrap().len();
-    let receiver_frames = receiver_seen.lock().unwrap().clone();
+    let owner_frames = owner_seen.lock().len();
+    let receiver_frames = receiver_seen.lock().clone();
     peer.send(yawc::Frame::close(1000.into(), "fixture done"))
         .await
         .unwrap();
@@ -812,7 +810,7 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
 
     let thread = "fixture-v024-ws-temporary-owner-thread";
     let session = crate::storage::digest(thread.as_bytes());
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let mut peer = yawc::WebSocket::connect(
         format!(
             "ws://127.0.0.1:{}/v1/responses",
@@ -875,8 +873,8 @@ async fn v024_compacted_websocket_temporary_waits_on_owner(
         .0
         .compaction
         .boundary_matches(&session, Some(&boundary));
-    let owner_frames = owner_seen.lock().unwrap().len();
-    let receiver_frames = receiver_seen.lock().unwrap().clone();
+    let owner_frames = owner_seen.lock().len();
+    let receiver_frames = receiver_seen.lock().clone();
     peer.send(yawc::Frame::close(1000.into(), "fixture done"))
         .await
         .unwrap();
@@ -924,10 +922,7 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
                 .to_bytes()
                 .to_vec();
             if method == hyper::Method::POST {
-                old_capture
-                    .lock()
-                    .unwrap()
-                    .push((path.clone(), body.clone()));
+                old_capture.lock().push((path.clone(), body.clone()));
             }
             if path.ends_with("/responses/compact") {
                 v024_completed_response(
@@ -965,7 +960,7 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
                 .unwrap()
                 .to_bytes()
                 .to_vec();
-            ordinary_capture.lock().unwrap().push(body);
+            ordinary_capture.lock().push(body);
             v024_completed_response("ordinary", "fixture-v024-failover-response", json!([]))
         }
     })
@@ -1035,8 +1030,8 @@ async fn v024_compacted_http_account_rejection_fails_over_to_lower_priority_ordi
     let final_status = final_response.status();
     let final_body = v024_body(final_response).await.to_vec();
     let failover_record = v024_wait_failover_record(&usage, &owner_id, &ordinary_id).await;
-    let ordinary_requests = ordinary_seen.lock().unwrap().clone();
-    let old_requests = old_seen.lock().unwrap().clone();
+    let ordinary_requests = ordinary_seen.lock().clone();
+    let old_requests = old_seen.lock().clone();
     let final_owner = gateway.0.compaction.owner(&session);
     let boundary_still_fresh = gateway
         .0
@@ -1227,8 +1222,8 @@ async fn v024_compacted_http_insufficient_balance_429_fails_over_to_ordinary_pro
     .await;
     let (status, body) = v024_send_compacted_http(&fixture).await;
     v024_wait_settled(&fixture.gateway).await;
-    let receiver_requests = fixture.receivers_seen[0].lock().unwrap().clone();
-    let old_requests = fixture.owner_seen.lock().unwrap().clone();
+    let receiver_requests = fixture.receivers_seen[0].lock().clone();
+    let old_requests = fixture.owner_seen.lock().clone();
     let owner = fixture.gateway.0.compaction.owner(&fixture.session);
     let boundary_fresh = fixture
         .gateway
@@ -1261,7 +1256,7 @@ async fn v024_compacted_http_can_use_a_lower_priority_compaction_receiver() {
 
     let (status, body) = v024_send_compacted_http(&fixture).await;
     v024_wait_settled(&fixture.gateway).await;
-    let receiver_requests = fixture.receivers_seen[0].lock().unwrap().clone();
+    let receiver_requests = fixture.receivers_seen[0].lock().clone();
     let owner = fixture.gateway.0.compaction.owner(&fixture.session);
     let boundary_fresh = fixture
         .gateway
@@ -1296,8 +1291,8 @@ async fn v024_compacted_http_temporary_usage_limit_waits_on_owner_and_recovers_w
     let (status, body) = v024_send_compacted_http(&fixture).await;
     let waited = started.elapsed();
     v024_wait_settled(&fixture.gateway).await;
-    let owner_requests = fixture.owner_seen.lock().unwrap().clone();
-    let backup_requests = fixture.receivers_seen[0].lock().unwrap().clone();
+    let owner_requests = fixture.owner_seen.lock().clone();
+    let backup_requests = fixture.receivers_seen[0].lock().clone();
     let owner = fixture.gateway.0.compaction.owner(&fixture.session);
     let boundary_fresh = fixture
         .gateway
@@ -1348,8 +1343,8 @@ async fn v024_compacted_http_account_rejection_never_fails_over_to_a_new_thread_
 
     let (status, body) = v024_send_compacted_http(&fixture).await;
     v024_wait_settled(&fixture.gateway).await;
-    let new_only_requests = fixture.receivers_seen[0].lock().unwrap().clone();
-    let ordinary_requests = fixture.receivers_seen[1].lock().unwrap().clone();
+    let new_only_requests = fixture.receivers_seen[0].lock().clone();
+    let ordinary_requests = fixture.receivers_seen[1].lock().clone();
     let owner = fixture.gateway.0.compaction.owner(&fixture.session);
     let boundary_fresh = fixture
         .gateway
@@ -1404,7 +1399,7 @@ async fn v024_compacted_http_idle_failure_after_output_does_not_replay_to_backup
         .expect("post-output idle failure did not reach the downstream body");
     let second_is_error = second.is_err();
     v024_wait_settled(&fixture.gateway).await;
-    let receiver_requests = fixture.receivers_seen[0].lock().unwrap().clone();
+    let receiver_requests = fixture.receivers_seen[0].lock().clone();
     let owner = fixture.gateway.0.compaction.owner(&fixture.session);
     let boundary_fresh = fixture
         .gateway

@@ -41,11 +41,12 @@ mod token_dimensions_tests;
 mod usage_recovery_tests;
 use crate::storage::{self, Result};
 use model::*;
+use parking_lot::{Mutex, RwLock};
 use pricing::{Pricing, Quote};
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex, RwLock},
+    sync::{mpsc, Arc},
     time::Instant,
 };
 use tokio::sync::broadcast;
@@ -91,7 +92,7 @@ pub struct State {
 }
 impl Inner {
     fn persist_pending(&self, record: &Record) -> Result<()> {
-        let _guard = self.spool_lock.lock().unwrap();
+        let _guard = self.spool_lock.lock();
         if record.id.is_empty()
             || record.id.len() > 64
             || !record
@@ -134,8 +135,8 @@ impl Inner {
         Ok(())
     }
     fn pending_records(&self, limit: usize) -> Vec<(PathBuf, Record)> {
-        let _guard = self.spool_lock.lock().unwrap();
-        *self.pending_error.lock().unwrap() = None;
+        let _guard = self.spool_lock.lock();
+        *self.pending_error.lock() = None;
         let entries = match std::fs::read_dir(self.directory.join("pending")) {
             Ok(entries) => entries,
             Err(error) => {
@@ -143,7 +144,7 @@ impl Inner {
                     self.has_pending
                         .store(false, std::sync::atomic::Ordering::Release);
                 } else {
-                    *self.pending_error.lock().unwrap() = Some("用量待写目录无法读取".into());
+                    *self.pending_error.lock() = Some("用量待写目录无法读取".into());
                 }
                 return vec![];
             }
@@ -176,12 +177,11 @@ impl Inner {
                 Ok(Some(record)) => records.push(record),
                 Ok(None) => {}
                 Err(_) => {
-                    *self.pending_error.lock().unwrap() =
-                        Some("用量待写记录无法读取，已保留现场".into())
+                    *self.pending_error.lock() = Some("用量待写记录无法读取，已保留现场".into())
                 }
             }
         }
-        if records.is_empty() && self.pending_error.lock().unwrap().is_none() {
+        if records.is_empty() && self.pending_error.lock().is_none() {
             self.has_pending
                 .store(false, std::sync::atomic::Ordering::Release);
             let _ = std::fs::remove_dir(self.directory.join("pending"));
@@ -286,9 +286,9 @@ impl Service {
                 // stream of new requests cannot starve the disk spool.
                 batch.extend(receiver.try_iter().take(63).flatten());
                 let pending = if inner.has_pending.load(Ordering::Acquire) {
-                    let old_pending_error = inner.pending_error.lock().unwrap().clone();
+                    let old_pending_error = inner.pending_error.lock().clone();
                     let loaded = inner.pending_records(128usize.saturating_sub(batch.len()));
-                    if old_pending_error != *inner.pending_error.lock().unwrap() {
+                    if old_pending_error != *inner.pending_error.lock() {
                         let _ = inner.events.send(());
                     }
                     batch.extend(loaded.iter().map(|(_, r)| r.clone()));
@@ -301,7 +301,6 @@ impl Service {
                     let repair = inner
                         .store
                         .lock()
-                        .unwrap()
                         .as_mut()
                         .map(|store| store.compact_storage_batch());
                     if matches!(repair, Some(Ok(false))) {
@@ -311,8 +310,8 @@ impl Service {
                         .as_ref()
                         .and_then(|v| v.as_ref().err())
                         .map(|e| e.message.clone());
-                    let repair_changed = *inner.repair_error.lock().unwrap() != repair_failed;
-                    *inner.repair_error.lock().unwrap() = repair_failed;
+                    let repair_changed = *inner.repair_error.lock() != repair_failed;
+                    *inner.repair_error.lock() = repair_failed;
                     if repair_changed || matches!(repair, Some(Ok(true))) {
                         let _ = inner.events.send(());
                     }
@@ -321,7 +320,7 @@ impl Service {
                     continue;
                 }
                 let result = (|| {
-                    let mut store = inner.store.lock().unwrap();
+                    let mut store = inner.store.lock();
                     if store.is_none() {
                         *store = Some(store::Store::open(&inner.directory)?);
                         inner.repairs_active.store(true, Ordering::Release);
@@ -330,14 +329,14 @@ impl Service {
                         .as_mut()
                         .ok_or_else(|| failure("用量数据库不可用"))?
                         .write_batch(&batch, None)?;
-                    *inner.write_error.lock().unwrap() = None;
+                    *inner.write_error.lock() = None;
                     let _ = inner.events.send(());
                     Ok::<_, storage::AppError>(())
                 })();
                 match result {
                     Ok(()) => {
                         if !pending.is_empty() {
-                            let _guard = inner.spool_lock.lock().unwrap();
+                            let _guard = inner.spool_lock.lock();
                             for (path, _) in pending {
                                 let _ = std::fs::remove_file(path);
                             }
@@ -351,17 +350,17 @@ impl Service {
                                         })
                                     })
                                 });
-                            if !any_left && inner.pending_error.lock().unwrap().is_none() {
+                            if !any_left && inner.pending_error.lock().is_none() {
                                 inner.has_pending.store(false, Ordering::Release);
                                 let _ = std::fs::remove_dir(inner.directory.join("pending"));
                             }
                         }
                     }
                     Err(e) => {
-                        *inner.write_error.lock().unwrap() = Some(e.message);
+                        *inner.write_error.lock() = Some(e.message);
                         for record in &batch {
                             if let Err(e) = inner.persist_pending(record) {
-                                *inner.write_error.lock().unwrap() = Some(e.message);
+                                *inner.write_error.lock() = Some(e.message);
                             }
                         }
                         let _ = inner.events.send(());
@@ -373,7 +372,7 @@ impl Service {
         Self(inner)
     }
     pub fn backfill_prices(&self) -> Result<()> {
-        let _guard = self.0.backfill_lock.lock().unwrap();
+        let _guard = self.0.backfill_lock.lock();
         let result = (|| -> Result<()> {
             let prices = self.prices()?.frozen();
             let mut cursor = store::BackfillCursor::default();
@@ -382,8 +381,7 @@ impl Service {
             }
             Ok(())
         })();
-        *self.0.backfill_error.lock().unwrap() =
-            result.as_ref().err().map(|error| error.message.clone());
+        *self.0.backfill_error.lock() = result.as_ref().err().map(|error| error.message.clone());
         let _ = self.0.events.send(());
         result
     }
@@ -413,7 +411,7 @@ impl Service {
         self.0.events.subscribe()
     }
     pub fn settings(&self) -> Settings {
-        self.0.settings.read().unwrap().clone()
+        self.0.settings.read().clone()
     }
     pub fn state(&self) -> State {
         let dropped = self
@@ -422,21 +420,20 @@ impl Service {
             .load(std::sync::atomic::Ordering::Relaxed);
         State {
             settings: self.settings(),
-            maintenance: self.0.store.try_lock().ok().and_then(|store| store.as_ref().and_then(store::Store::maintenance_status)),
-            syncing: *self.0.syncing.lock().unwrap(),
-            reports: self.0.report.lock().unwrap().clone(),
+            maintenance: self.0.store.try_lock().and_then(|store| store.as_ref().and_then(store::Store::maintenance_status)),
+            syncing: *self.0.syncing.lock(),
+            reports: self.0.report.lock().clone(),
             error: (dropped != 0).then(|| format!("{dropped} 条用量因写入拥塞未保存；请检查磁盘与数据库，并同步本机会话补齐可恢复记录"))
                 .or_else(|| self
                 .0
                 .write_error
                 .lock()
-                .unwrap()
                 .clone())
-                .or_else(|| self.0.pending_error.lock().unwrap().clone())
-                .or_else(|| self.0.repair_error.lock().unwrap().clone())
-                .or_else(|| self.0.backfill_error.lock().unwrap().clone())
-                .or_else(|| self.0.settings_error.lock().unwrap().clone())
-                .or_else(|| self.0.error.lock().unwrap().clone()),
+                .or_else(|| self.0.pending_error.lock().clone())
+                .or_else(|| self.0.repair_error.lock().clone())
+                .or_else(|| self.0.backfill_error.lock().clone())
+                .or_else(|| self.0.settings_error.lock().clone())
+                .or_else(|| self.0.error.lock().clone()),
         }
     }
     pub fn configure(&self, settings: Settings) -> Result<State> {
@@ -446,8 +443,8 @@ impl Service {
             &serde_json::to_vec_pretty(&settings).map_err(|_| failure("设置无法保存"))?,
             None,
         )?;
-        *self.0.settings.write().unwrap() = settings;
-        *self.0.settings_error.lock().unwrap() = None;
+        *self.0.settings.write() = settings;
+        *self.0.settings_error.lock() = None;
         let _ = self.0.events.send(());
         Ok(self.state())
     }
@@ -458,7 +455,7 @@ impl Service {
             .ok_or_else(|| failure("价格库不可用"))
     }
     pub fn query<T>(&self, f: impl FnOnce(&mut store::Store) -> Result<T>) -> Result<T> {
-        let mut guard = self.0.store.lock().unwrap();
+        let mut guard = self.0.store.lock();
         f(guard.as_mut().ok_or_else(|| failure("用量数据库不可用"))?)
     }
     /// Queries never hold the writer mutex. WAL provides a consistent snapshot
@@ -487,7 +484,7 @@ impl Service {
             store.reclaim_space()
         });
         if let Err(error) = &result {
-            *self.0.error.lock().unwrap() = Some(error.message.clone());
+            *self.0.error.lock() = Some(error.message.clone());
             let _ = self.0.events.send(());
         }
         result
@@ -498,7 +495,7 @@ impl Service {
         rebuild: Option<&str>,
     ) -> Result<State> {
         {
-            let mut busy = self.0.syncing.lock().unwrap();
+            let mut busy = self.0.syncing.lock();
             if *busy {
                 drop(busy);
                 return Ok(self.state());
@@ -506,7 +503,7 @@ impl Service {
             *busy = true;
         }
         {
-            let mut reports = self.0.report.lock().unwrap();
+            let mut reports = self.0.report.lock();
             for (client, _) in &roots {
                 if rebuild.is_none_or(|s| s == client) {
                     reports.insert(
@@ -550,10 +547,10 @@ impl Service {
                 })();
                 match outcome {
                     Ok(report) => {
-                        self.0.report.lock().unwrap().insert(client.clone(), report);
+                        self.0.report.lock().insert(client.clone(), report);
                     }
                     Err(error) => {
-                        let mut reports = self.0.report.lock().unwrap();
+                        let mut reports = self.0.report.lock();
                         let report = reports.entry(client.clone()).or_default();
                         report.phase = "failed".into();
                         report.completed_at = None;
@@ -565,15 +562,15 @@ impl Service {
             first_error.map_or(Ok(()), Err)
         })();
         if result.is_err() {
-            for report in self.0.report.lock().unwrap().values_mut() {
+            for report in self.0.report.lock().values_mut() {
                 if report.phase == "syncing" {
                     report.phase = "failed".into();
                     report.errors += 1;
                 }
             }
         }
-        *self.0.syncing.lock().unwrap() = false;
-        *self.0.error.lock().unwrap() = result
+        *self.0.syncing.lock() = false;
+        *self.0.error.lock() = result
             .as_ref()
             .err()
             .map(|e: &crate::storage::AppError| e.message.clone());
@@ -671,7 +668,6 @@ impl sessions::Repository for SessionStore {
             .0
             .report
             .lock()
-            .unwrap()
             .insert(self.client.clone(), report.clone());
         let _ = self.service.0.events.send(());
     }
@@ -697,7 +693,7 @@ impl Drop for TraceInner {
         if !self.recording {
             return;
         }
-        let attempts = self.attempts.get_mut().unwrap();
+        let attempts = self.attempts.get_mut();
         if attempts.is_empty() {
             return;
         }
@@ -712,7 +708,7 @@ impl Drop for TraceInner {
         }
         let record = Record {
             id: self.id.clone(),
-            failover_evidence: self.failover.get_mut().unwrap().take(),
+            failover_evidence: self.failover.get_mut().take(),
             client: self.client.clone(),
             source: "proxy".into(),
             started_at: self.at,
@@ -729,7 +725,7 @@ impl Drop for TraceInner {
             // The writer is inside a long transaction: spool the record to disk,
             // where the same writer picks it up afterwards.
             if let Err(error) = self.service.0.persist_pending(&record) {
-                *self.service.0.pending_error.lock().unwrap() = Some(error.message);
+                *self.service.0.pending_error.lock() = Some(error.message);
                 self.service
                     .0
                     .dropped_records
@@ -768,21 +764,21 @@ impl RoutingCompletion {
         &self.0.id
     }
     pub(crate) fn begin_save(&self) -> u64 {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.state.lock();
         state.generation = state.generation.saturating_add(1);
         state.generation
     }
     pub(crate) fn saved(&self, generation: u64, outcome: crate::events::RoutingOutcome) {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.state.lock();
         if generation == state.generation || outcome == crate::events::RoutingOutcome::SaveFailed {
             self.update(&mut state, outcome);
         }
     }
     pub(crate) fn outcome(&self, outcome: crate::events::RoutingOutcome) {
-        self.update(&mut self.0.state.lock().unwrap(), outcome);
+        self.update(&mut self.0.state.lock(), outcome);
     }
     pub(crate) fn finish(&self, outcome: crate::events::RoutingOutcome) {
-        let mut state = self.0.state.lock().unwrap();
+        let mut state = self.0.state.lock();
         if state.outcome.is_none() && state.generation == 0 {
             self.update(&mut state, outcome);
         }
@@ -793,7 +789,7 @@ impl RoutingCompletion {
             return;
         }
         state.outcome = Some(outcome);
-        let mut attempts = self.0.trace.0.attempts.lock().unwrap();
+        let mut attempts = self.0.trace.0.attempts.lock();
         if let Some(attempt) = attempts.iter_mut().find(|a| a.id == self.0.id) {
             // A bounded retry summary no longer describes one routing action.
             attempt.routing_outcome = Some(if attempt.repeat_count == 1 {
@@ -806,7 +802,7 @@ impl RoutingCompletion {
 }
 impl Trace {
     pub fn failover(&self, evidence: crate::gateway::failover::Evidence) {
-        *self.0.failover.lock().unwrap() = Some(evidence);
+        *self.0.failover.lock() = Some(evidence);
     }
     pub fn attempt(&self, provider: &str, stream: bool, transport: &str) -> AttemptTrace {
         let settings = self.0.service.settings();
@@ -1035,11 +1031,11 @@ impl Drop for AttemptTrace {
         self.attempt.annotate_availability("proxy");
         // Use the same lock order as save receipts. A receipt may arrive on
         // either side of this insertion without losing its outcome.
-        let routing = self.routing.as_ref().map(|r| r.0.state.lock().unwrap());
+        let routing = self.routing.as_ref().map(|r| r.0.state.lock());
         if let Some(routing) = &routing {
             self.attempt.routing_outcome = routing.outcome;
         }
-        let mut attempts = self.trace.0.attempts.lock().unwrap();
+        let mut attempts = self.trace.0.attempts.lock();
         if self.trace.0.client != "claude" && attempts.len() >= 128 {
             let pair = (1..attempts.len())
                 .find_map(|j| {

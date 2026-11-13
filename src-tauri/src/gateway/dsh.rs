@@ -1150,7 +1150,7 @@ impl Gateway {
             .filter(|p| profiles.iter().any(|item| item == p))
             .or_else(|| profiles.first().map(String::as_str));
         let input = profile.map(|p| Input::read(home, p)).transpose()?;
-        let store = self.0.inner.lock().unwrap().store.clone();
+        let store = self.0.inner.lock().store.clone();
         let snapshot = store
             .dsh
             .as_ref()
@@ -1225,7 +1225,7 @@ impl Gateway {
     ) -> Result<View> {
         models::require_chat(options.protocol)?;
         let (old, token) = {
-            let s = self.0.inner.lock().unwrap();
+            let s = self.0.inner.lock();
             if self.view_revision(&s)? != expected {
                 return Err(conflict());
             }
@@ -1244,15 +1244,8 @@ impl Gateway {
             return Err(conflict());
         }
         models::require_chat(options.protocol)?;
-        let mut models = models::for_store(&self.0.inner.lock().unwrap().store);
-        if let Some(prices) = self
-            .0
-            .usage
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|u| u.prices().ok())
-        {
+        let mut models = models::for_store(&self.0.inner.lock().store);
+        if let Some(prices) = self.0.usage.lock().as_ref().and_then(|u| u.prices().ok()) {
             let (choices, _) = self.0.model_list.snapshot();
             for model in &mut models {
                 let id = model["id"].as_str().unwrap_or_default();
@@ -1314,7 +1307,7 @@ impl Gateway {
         }
         let token = self.0.registry.unique_local_token(self.0.client, &token);
         let previous = old.as_ref().and_then(|s| s.for_profile(&options.profile));
-        let mut route_settings = self.0.inner.lock().unwrap().store.settings.clone();
+        let mut route_settings = self.0.inner.lock().store.settings.clone();
         route_settings.port = listener.port;
         let snapshot = prepare_shared(
             &mut input,
@@ -1325,11 +1318,11 @@ impl Gateway {
             previous.as_ref(),
             old.as_ref(),
         )?;
-        let mut imported = self.0.inner.lock().unwrap().store.clone();
+        let mut imported = self.0.inner.lock().store.clone();
         if import {
             import_selection(home, &options, &mut imported, listener.port)?;
         }
-        let mut s = self.0.inner.lock().unwrap();
+        let mut s = self.0.inner.lock();
         if self.view_revision_with_listener(&s, &listener.revision) != expected {
             return Err(conflict());
         }
@@ -1375,7 +1368,7 @@ impl Gateway {
         let _listener = self.0.registry.lifecycle.lock().await;
         let _lifecycle = self.0.lifecycle.lock().await;
         {
-            let mut s = self.0.inner.lock().unwrap();
+            let mut s = self.0.inner.lock();
             let snapshots = s
                 .store
                 .dsh
@@ -1429,7 +1422,7 @@ impl Gateway {
             self.wake_endpoint_prober();
         }
         self.0.registry.listener.deactivate(self.0.client).await?;
-        self.0.clients.lock().unwrap().clear();
+        self.0.clients.lock().clear();
         self.0.registry.changed();
         self.try_view()
     }
@@ -1761,7 +1754,7 @@ mod tests {
         drop(socket);
         gateway.set_listener_port(port, &listener.revision).unwrap();
         {
-            let mut state = gateway.0.inner.lock().unwrap();
+            let mut state = gateway.0.inner.lock();
             let mut store = state.store.clone();
             {
                 let protocol = Protocol::ChatCompletions;

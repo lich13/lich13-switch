@@ -6,11 +6,12 @@ use futures_util::{stream, StreamExt};
 use http_body_util::BodyExt;
 use hyper::{header, Request};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -113,7 +114,7 @@ impl Service {
     }
     pub fn measurements(&self, provider: &Provider, urls: &[String]) -> Vec<Measurement> {
         Self::fresh(
-            &self.samples.lock().unwrap(),
+            &self.samples.lock(),
             &provider.id,
             &Self::config(provider, urls),
         )
@@ -141,7 +142,7 @@ impl Service {
             return None;
         }
         let interval = Duration::from_secs(seconds);
-        let samples = self.samples.lock().unwrap();
+        let samples = self.samples.lock();
         Some(
             match Self::fresh(&samples, &provider.id, &Self::config(provider, urls)) {
                 Some(batch) => interval.saturating_sub(batch.checked.elapsed()),
@@ -151,15 +152,15 @@ impl Service {
     }
     pub fn retain(&self, providers: &[Provider]) {
         let contains = |id: &String| providers.iter().any(|p| &p.id == id);
-        self.samples.lock().unwrap().retain(|id, _| contains(id));
-        self.flights.lock().unwrap().retain(|id, _| contains(id));
+        self.samples.lock().retain(|id, _| contains(id));
+        self.flights.lock().retain(|id, _| contains(id));
     }
     pub fn diagnostics(&self, client: super::ClientId, events: crate::events::Service) {
-        *self.diagnostics.lock().unwrap() = Some((client, events));
+        *self.diagnostics.lock() = Some((client, events));
     }
     fn refresh_failed(&self, provider: &Provider) {
         use crate::events::{Action, Details, ErrorCode, Level, Phase, Reason, Record};
-        if let Some((client, events)) = self.diagnostics.lock().unwrap().as_ref() {
+        if let Some((client, events)) = self.diagnostics.lock().as_ref() {
             let mut event = Record::new(
                 Some(*client),
                 Some(&provider.id),
@@ -202,7 +203,7 @@ impl Service {
                 })
         };
         if let Some(previous) = previous {
-            let responses = self.responses.lock().unwrap();
+            let responses = self.responses.lock();
             if let Some(pin) = responses
                 .get(&pin_key(provider, "response", previous))
                 .filter(|pin| now().saturating_sub(pin.updated) < 60 * 60 * 1000)
@@ -212,7 +213,7 @@ impl Service {
         }
         if let Some(thread) = thread {
             let key = pin_key(provider, "thread", thread);
-            let mut pins = self.pins.lock().unwrap();
+            let mut pins = self.pins.lock();
             if let Some(pin) = pins.get_mut(&key) {
                 let url = resolve(&pin.endpoint)?;
                 let time = now();
@@ -281,7 +282,7 @@ impl Service {
         if response.is_empty() || response.len() > 1024 {
             return;
         }
-        let mut pins = self.responses.lock().unwrap();
+        let mut pins = self.responses.lock();
         trim_pins(&mut pins, 60 * 60 * 1000);
         pins.insert(
             pin_key(provider, "response", response),
@@ -416,7 +417,6 @@ impl Gateway {
             .endpoints
             .flights
             .lock()
-            .unwrap()
             .entry(id.to_owned())
             .or_default()
             .clone();
@@ -440,7 +440,7 @@ impl Gateway {
             )
         };
         let config = Service::config(&provider, &urls);
-        let recent = Service::fresh(&self.0.endpoints.samples.lock().unwrap(), id, &config)
+        let recent = Service::fresh(&self.0.endpoints.samples.lock(), id, &config)
             .is_some_and(|b| b.checked >= requested);
         if recent || (!force && !self.0.endpoints.due(&provider, &urls, seconds)) {
             return self.try_view();
@@ -483,7 +483,7 @@ impl Gateway {
         let s = self.request_state();
         if let Some(current) = s.store.providers.iter().find(|p| p.id == id) {
             if Service::config(current, &Self::endpoint_urls(&s.store, current)) == config {
-                self.0.endpoints.samples.lock().unwrap().insert(
+                self.0.endpoints.samples.lock().insert(
                     id.to_owned(),
                     Batch {
                         config,

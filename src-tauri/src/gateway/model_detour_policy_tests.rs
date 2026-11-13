@@ -28,7 +28,7 @@ fn hints(model: &str, compacted: bool) -> RequestHints {
     .unwrap()
 }
 fn snapshot(registry: &Registry, key: &str) -> (Value, u64) {
-    let state = registry.state.lock().unwrap();
+    let state = registry.state.lock();
     (
         serde_json::to_value(&state.entries[key]).unwrap(),
         state.sequence,
@@ -97,7 +97,7 @@ fn detour_never_edits_history_epoch_window_or_activity() {
         assert_eq!(snapshot(&registry, &key), before);
         assert!(registry.boundary_matches(&key, Some(&boundary)));
     }
-    assert!(registry.state.lock().unwrap().notifications.is_empty());
+    assert!(registry.state.lock().notifications.is_empty());
     registry.flush();
     let restarted = Registry::new(dir.path().join("owners.json"));
     assert_eq!(restarted.owner(&key).as_deref(), Some("fixture-a"));
@@ -215,14 +215,7 @@ fn admission_rechecks_changed_models_queue_and_receiver_flags() {
         provider("fixture-a", Some("fixture-main"), true),
         provider("fixture-b", None, false),
     ];
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers = providers.to_vec();
+    gateway.0.inner.lock().editable_mut().store.providers = providers.to_vec();
     establish(registry, &key, &providers);
     let main = Requirement::model(Some("fixture-main"));
     let pending = registry
@@ -235,15 +228,8 @@ fn admission_rechecks_changed_models_queue_and_receiver_flags() {
             None,
         )
         .unwrap();
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers[0]
-        .allowed_models = Some(vec!["fixture-other".into()]);
+    gateway.0.inner.lock().editable_mut().store.providers[0].allowed_models =
+        Some(vec!["fixture-other".into()]);
     assert_eq!(
         pending
             .admit_request(&gateway, &providers[1], &main, false)
@@ -269,7 +255,7 @@ fn admission_rechecks_changed_models_queue_and_receiver_flags() {
     // Expanding the owner's whitelist cannot upgrade the already-prepared
     // detour, and a newly special-only receiver no longer accepts it.
     {
-        let mut state = gateway.0.inner.lock().unwrap();
+        let mut state = gateway.0.inner.lock();
         let store = &mut state.editable_mut().store;
         store.providers[0].allowed_models = None;
         store.providers[1].take_new_threads = true;
@@ -277,29 +263,13 @@ fn admission_rechecks_changed_models_queue_and_receiver_flags() {
     assert!(readonly
         .admit_request(&gateway, &providers[1], &side, false)
         .is_err());
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers[1]
-        .take_new_threads = false;
+    gateway.0.inner.lock().editable_mut().store.providers[1].take_new_threads = false;
     assert!(readonly
         .admit_request(&gateway, &providers[1], &side, false)
         .unwrap());
     readonly.complete("fixture-b", None);
     assert_eq!(snapshot(registry, &key), before);
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers[1]
-        .queued = false;
+    gateway.0.inner.lock().editable_mut().store.providers[1].queued = false;
     assert!(readonly
         .admit_request(&gateway, &providers[1], &side, false)
         .is_err());
@@ -343,7 +313,7 @@ fn owner_removal_allows_new_fallback_but_never_upgrades_an_existing_detour() {
     readonly.complete("fixture-a", Some(&storage::digest(b"fixture-window")));
     assert_eq!(snapshot(&registry, &key), after);
     assert_eq!(registry.owner(&key).as_deref(), Some("fixture-b"));
-    registry.state.lock().unwrap().entries.remove(&key);
+    registry.state.lock().entries.remove(&key);
     assert!(readonly.admitted("fixture-b"));
     readonly.output_started("fixture-b");
     readonly.complete("fixture-b", None);

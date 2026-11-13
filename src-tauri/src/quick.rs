@@ -1,8 +1,9 @@
 //! Tray panel lifecycle, following Sub2Ops 4d0eafc1 interaction behavior.
 use crate::errors::code;
 use crate::storage::{self, AppError, Result};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Mutex, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const QUICK_DEFAULT_HEIGHT: f64 = 720.;
@@ -79,7 +80,7 @@ impl Panel {
             .ok_or_else(|| AppError::new(code::PANEL, "无法定位托盘图标"))?;
         let panel = app.state::<Panel>();
         {
-            let mut life = panel.lifecycle.lock().unwrap();
+            let mut life = panel.lifecycle.lock();
             life.generation += 1;
             life.showing = true;
         }
@@ -98,7 +99,7 @@ impl Panel {
             crate::sync_window_on_show(app, "quick");
             Ok(())
         })();
-        let mut life = panel.lifecycle.lock().unwrap();
+        let mut life = panel.lifecycle.lock();
         life.showing = false;
         life.focused = window.is_focused().unwrap_or(false);
         result
@@ -106,7 +107,7 @@ impl Panel {
     pub fn focus(app: &tauri::AppHandle, focused: bool) {
         let panel = app.state::<Panel>();
         let generation = {
-            let mut life = panel.lifecycle.lock().unwrap();
+            let mut life = panel.lifecycle.lock();
             if !focused && (!life.focused || life.showing) {
                 return;
             }
@@ -123,10 +124,10 @@ impl Panel {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || {
                 let panel = handle.state::<Panel>();
-                if panel.preferences.lock().unwrap().pinned {
+                if panel.preferences.lock().pinned {
                     return;
                 }
-                let life = panel.lifecycle.lock().unwrap();
+                let life = panel.lifecycle.lock();
                 if life.generation != generation || life.focused || life.showing {
                     return;
                 }
@@ -196,7 +197,7 @@ fn position(window: &tauri::WebviewWindow, anchor: tauri::Rect, height: f64) -> 
 }
 #[tauri::command]
 pub fn get_quick(app: tauri::AppHandle, panel: tauri::State<'_, Panel>) -> serde_json::Value {
-    let prefs = panel.preferences.lock().unwrap().clone();
+    let prefs = panel.preferences.lock().clone();
     serde_json::json!({"pinned": prefs.pinned, "hiddenClients": prefs.hidden_clients, "visible": app.get_webview_window("quick").is_some_and(|w| w.is_visible().unwrap_or(false))})
 }
 #[tauri::command]
@@ -206,7 +207,7 @@ pub fn set_quick(
     pinned: Option<bool>,
     hidden_clients: Option<Vec<crate::gateway::ClientId>>,
 ) -> Result<Preferences> {
-    let mut prefs = panel.preferences.lock().unwrap();
+    let mut prefs = panel.preferences.lock();
     let mut next = prefs.clone();
     if let Some(pinned) = pinned {
         next.pinned = pinned;
@@ -232,7 +233,7 @@ pub fn set_quick(
 pub fn hide_quick(app: tauri::AppHandle) -> Result<()> {
     {
         let panel = app.state::<Panel>();
-        let mut life = panel.lifecycle.lock().unwrap();
+        let mut life = panel.lifecycle.lock();
         life.generation += 1;
         life.focused = false;
         life.showing = false;
@@ -292,7 +293,7 @@ mod preference_tests {
         )
         .unwrap();
         let panel = Panel::new(dir.path()).unwrap();
-        let prefs = panel.preferences.lock().unwrap();
+        let prefs = panel.preferences.lock();
         assert!(prefs.pinned);
         assert_eq!(prefs.hidden_clients, [crate::gateway::ClientId::Claude]);
     }
@@ -305,7 +306,7 @@ mod preference_tests {
         )
         .unwrap();
         let panel = Panel::new(dir.path()).unwrap();
-        let mut prefs = panel.preferences.lock().unwrap().clone();
+        let mut prefs = panel.preferences.lock().clone();
         assert!(prefs.hidden_clients.is_empty());
         prefs.hidden_clients = vec![crate::gateway::ClientId::Codex];
         std::fs::write(
@@ -314,7 +315,7 @@ mod preference_tests {
         )
         .unwrap();
         let reopened = Panel::new(dir.path()).unwrap();
-        let loaded = reopened.preferences.lock().unwrap();
+        let loaded = reopened.preferences.lock();
         assert!(loaded.pinned);
         assert_eq!(loaded.hidden_clients, prefs.hidden_clients);
     }

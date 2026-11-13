@@ -90,7 +90,7 @@ fn edit(gateway: &Gateway, dir: &tempfile::TempDir, edit: Edit) {
 
 fn local_auth(gateway: &Gateway) -> (u16, String) {
     let port = gateway.view().settings.port;
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     (port, token)
 }
 

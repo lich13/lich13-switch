@@ -135,7 +135,7 @@ fn grok_import_does_not_adopt_local_credentials_from_loopback_address() {
 }
 
 fn save_local(gateway: &Gateway, token: &str) {
-    let mut state = gateway.0.inner.lock().unwrap();
+    let mut state = gateway.0.inner.lock();
     state.editable_mut().store.local_token = token.to_owned();
     state.revision = state
         .store
@@ -184,7 +184,7 @@ async fn collision_rotates_only_the_starting_client_in_the_config_transaction() 
         .start(&codex.view().revision, &codex_home)
         .await
         .unwrap();
-    let token = codex.0.inner.lock().unwrap().store.local_token.clone();
+    let token = codex.0.inner.lock().store.local_token.clone();
     let codex_config = fs::read(ClientId::Codex.config(&codex_home)).unwrap();
     save_local(&claude, &token);
     let store_before = fs::read(data.join("claude/gateway.json")).unwrap();
@@ -209,9 +209,9 @@ async fn collision_rotates_only_the_starting_client_in_the_config_transaction() 
         .start(&claude.view().revision, &claude_home)
         .await
         .unwrap();
-    let new_token = claude.0.inner.lock().unwrap().store.local_token.clone();
+    let new_token = claude.0.inner.lock().store.local_token.clone();
     assert_ne!(new_token, token);
-    assert_eq!(codex.0.inner.lock().unwrap().store.local_token, token);
+    assert_eq!(codex.0.inner.lock().store.local_token, token);
     assert_eq!(
         fs::read(ClientId::Codex.config(&codex_home)).unwrap(),
         codex_config

@@ -1,13 +1,14 @@
 //! Independent adapter for Sub2API's public price source (no provider credentials).
 use super::{builtin_pricing, model::*};
 use crate::storage::{self, Result};
+use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 const SOURCE:&str="https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json";
 const HASH:&str="https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256";
@@ -347,23 +348,23 @@ impl Pricing {
             models_dev: self.models_dev.frozen(),
             path: self.path.clone(),
             cache_path: self.cache_path.clone(),
-            state: Arc::new(RwLock::new(self.state.read().unwrap().clone())),
+            state: Arc::new(RwLock::new(self.state.read().clone())),
             sync: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
     pub fn view(&self) -> View {
-        self.view_unlocked(&self.state.read().unwrap())
+        self.view_unlocked(&self.state.read())
     }
     pub(super) fn content_version(&self) -> String {
-        self.state.read().unwrap().cache.catalog_hash.clone()
+        self.state.read().cache.catalog_hash.clone()
     }
     pub(super) fn sync_stamp(&self) -> (String, Option<i64>) {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         (s.cache.hash.clone(), s.cache.checked_at)
     }
     pub fn configure(&self, c: Config, expected: &str) -> Result<View> {
         valid_config(&c)?;
-        let mut guard = self.state.write().unwrap();
+        let mut guard = self.state.write();
         let s = Arc::make_mut(&mut guard);
         if s.revision != expected {
             return Err(failure("定价已变化，请重新读取后重试"));
@@ -378,7 +379,7 @@ impl Pricing {
     }
     pub fn search(&self, query: &str, offset: usize, limit: usize) -> SearchPage {
         let frozen = self.frozen();
-        let s = frozen.state.read().unwrap();
+        let s = frozen.state.read();
         let mut names = frozen.models_dev.pricing_names();
         for model in builtin_pricing::catalog()
             .keys()
@@ -462,7 +463,7 @@ impl Pricing {
     }
     pub fn reload(&self) -> Result<View> {
         let bytes = storage::read_bounded(&self.path, LIMIT)?;
-        let mut guard = self.state.write().unwrap();
+        let mut guard = self.state.write();
         let s = Arc::make_mut(&mut guard);
         let config = match bytes.as_deref() {
             Some(bytes) => serde_json::from_slice::<Config>(bytes)
@@ -486,7 +487,7 @@ impl Pricing {
         self.quote_at(model, multiplier, now())
     }
     pub fn quote_at(&self, model: Option<&str>, multiplier: &str, at: i64) -> Quote {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         let original = model.unwrap_or("");
         let exact = s.config.fixed.contains_key(original) || s.cache.catalog.contains_key(original);
         let requested = if exact {
@@ -589,7 +590,7 @@ impl Pricing {
     pub fn reference(&self, model: &str, source: Option<&str>) -> Option<Reference> {
         let quote = self.quote(Some(model), "1");
         if quote.data.is_none() {
-            let state = self.state.read().unwrap();
+            let state = self.state.read();
             if state.config.excluded.contains(model)
                 || state.config.excluded.contains(&quote.model)
                 || state
@@ -706,7 +707,7 @@ impl Pricing {
         response: Option<&str>,
         preference: &str,
     ) -> (Option<String>, String, Option<String>) {
-        let s = self.state.read().unwrap();
+        let s = self.state.read();
         // Response-specific rules take precedence over request rules. A rule is
         // explicit user knowledge, never an inference about hidden upstream models.
         for match_on in ["response", "request"] {
@@ -749,16 +750,16 @@ impl Pricing {
         source: &str,
         hash_url: &str,
     ) -> Result<View> {
-        let generation = self.state.read().unwrap().generation;
+        let generation = self.state.read().generation;
         let _guard = self.sync.lock().await;
         {
-            let state = self.state.read().unwrap();
+            let state = self.state.read();
             if state.generation != generation {
                 return Ok(self.view_unlocked(&state));
             }
         }
         {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             if !force
                 && (!s.config.auto_update
                     || s.cache.checked_at.is_some_and(|t| now() - t < 600_000))
@@ -766,10 +767,10 @@ impl Pricing {
                 return Ok(self.view_unlocked(&s));
             }
         }
-        Arc::make_mut(&mut self.state.write().unwrap()).syncing = true;
+        Arc::make_mut(&mut self.state.write()).syncing = true;
         let result = self.download(source, hash_url, force).await;
         {
-            let mut guard = self.state.write().unwrap();
+            let mut guard = self.state.write();
             let s = Arc::make_mut(&mut guard);
             s.syncing = false;
             s.generation = s.generation.wrapping_add(1);
@@ -805,7 +806,7 @@ impl Pricing {
             .build()
             .map_err(|_| failure("价格连接初始化失败"))?;
         let (oldhash, old_catalog_hash) = {
-            let s = self.state.read().unwrap();
+            let s = self.state.read();
             (s.cache.hash.clone(), s.cache.catalog_hash.clone())
         };
         let hash_body = fetch(&client, hash_url, 1024).await?;
@@ -817,13 +818,11 @@ impl Pricing {
             .ok_or_else(|| failure("价格校验码无效"))?
             .to_ascii_lowercase();
         if !force && hash == oldhash {
-            Arc::make_mut(&mut self.state.write().unwrap())
-                .cache
-                .checked_at = Some(now());
+            Arc::make_mut(&mut self.state.write()).cache.checked_at = Some(now());
             return Ok(());
         }
         let mut body = fetch(&client, source, LIMIT).await?;
-        let mut cache = self.state.read().unwrap().cache.clone();
+        let mut cache = self.state.read().cache.clone();
         if storage::digest(&body) != hash {
             // The two public objects may be published at slightly different times.
             // Retry the pair once; never install unverified data.
@@ -854,7 +853,7 @@ impl Pricing {
             let bytes = serde_json::to_vec(&cache).map_err(|_| failure("价格缓存保存失败"))?;
             storage::atomic_write_bounded(&self.cache_path, &bytes, None, LIMIT)?;
         }
-        Arc::make_mut(&mut self.state.write().unwrap()).cache = cache;
+        Arc::make_mut(&mut self.state.write()).cache = cache;
         Ok(())
     }
 }
@@ -1189,7 +1188,7 @@ mod v02514_tests {
             )
             .is_none());
         {
-            let mut state = p.state.write().unwrap();
+            let mut state = p.state.write();
             let s = Arc::make_mut(&mut state);
             s.config.excluded.insert("model".into());
             s.cache

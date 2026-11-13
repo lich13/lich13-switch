@@ -4,10 +4,11 @@ use crate::{
     storage::{AppError, Result},
     Runtime,
 };
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use tauri::Manager;
 pub(crate) mod delivery;
@@ -30,17 +31,17 @@ pub struct State {
 fn state(app: &tauri::AppHandle, request: bool) -> State {
     match permission(request, &app.config().identifier) {
         Ok(permission) => {
-            *LAST_PERMISSION.lock().unwrap() = Some(permission.clone());
+            *LAST_PERMISSION.lock() = Some(permission.clone());
             State {
                 permission,
-                error: LAST_ERROR.lock().unwrap().clone(),
-                delivery: *DELIVERY.lock().unwrap(),
+                error: LAST_ERROR.lock().clone(),
+                delivery: *DELIVERY.lock(),
             }
         }
         Err(e) => State {
             permission: "unknown".into(),
             error: Some(e.message),
-            delivery: *DELIVERY.lock().unwrap(),
+            delivery: *DELIVERY.lock(),
         },
     }
 }
@@ -50,8 +51,7 @@ pub async fn notification_permission(
     request: Option<bool>,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<State> {
-    let request =
-        request.unwrap_or(false) && r.core.lock().unwrap().preferences().system_notifications;
+    let request = request.unwrap_or(false) && r.core.lock().preferences().system_notifications;
     tauri::async_runtime::spawn_blocking(move || state(&app, request))
         .await
         .map_err(|_| AppError::new(code::NOTIFICATION, "通知状态读取失败"))
@@ -60,9 +60,7 @@ pub fn on_manual_open(app: &tauri::AppHandle) {
     let Some(r) = app.try_state::<Arc<Runtime>>() else {
         return;
     };
-    if !r.core.lock().unwrap().preferences().system_notifications
-        || ASKING.swap(true, Ordering::AcqRel)
-    {
+    if !r.core.lock().preferences().system_notifications || ASKING.swap(true, Ordering::AcqRel) {
         return;
     }
     let app = app.clone();
@@ -73,14 +71,13 @@ pub fn on_manual_open(app: &tauri::AppHandle) {
     });
 }
 fn publish_delivery(app: &tauri::AppHandle, status: delivery::Status, error: Option<String>) {
-    *DELIVERY.lock().unwrap() = status;
-    *LAST_ERROR.lock().unwrap() = error.clone();
+    *DELIVERY.lock() = status;
+    *LAST_ERROR.lock() = error.clone();
     crate::emit_main_notification_state(
         app,
         State {
             permission: LAST_PERMISSION
                 .lock()
-                .unwrap()
                 .clone()
                 .unwrap_or_else(|| "unknown".into()),
             error,
@@ -91,7 +88,7 @@ fn publish_delivery(app: &tauri::AppHandle, status: delivery::Status, error: Opt
 async fn submit(app: tauri::AppHandle, body: String) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let current = permission(false, &app.config().identifier)?;
-        *LAST_PERMISSION.lock().unwrap() = Some(current.clone());
+        *LAST_PERMISSION.lock() = Some(current.clone());
         if current != "granted" {
             return Err(AppError::new(code::NOTIFICATION_DENIED, "系统未允许通知"));
         }
@@ -132,7 +129,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
                 Ok(event) => {
                     crate::emit_main_app_event(&app, &event);
                     let r = app.state::<Arc<Runtime>>();
-                    if !event.notify || !r.core.lock().unwrap().preferences().system_notifications {
+                    if !event.notify || !r.core.lock().preferences().system_notifications {
                         continue;
                     }
                     let Some(record) = event.record else { continue };
@@ -144,7 +141,7 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
                         continue;
                     }
                     let key = delivery::key(&record);
-                    if !gate.lock().unwrap().begin(&key, std::time::Instant::now()) {
+                    if !gate.lock().begin(&key, std::time::Instant::now()) {
                         continue;
                     }
                     let app = app.clone();
@@ -158,7 +155,6 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
                                 .state::<Arc<Runtime>>()
                                 .core
                                 .lock()
-                                .unwrap()
                                 .preferences()
                                 .system_notifications
                             {
@@ -180,11 +176,8 @@ pub fn connect(app: &tauri::AppHandle, service: &events::Service) {
                                 .await;
                             }
                         }
-                        gate.lock().unwrap().finish(
-                            &key,
-                            result.is_ok(),
-                            std::time::Instant::now(),
-                        );
+                        gate.lock()
+                            .finish(&key, result.is_ok(), std::time::Instant::now());
                         match result {
                             Ok(()) => {
                                 journal.notification_accepted(record.id);

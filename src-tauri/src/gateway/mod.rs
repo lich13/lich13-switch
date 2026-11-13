@@ -117,6 +117,7 @@ use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use model::Provider;
 pub(crate) use model::Store;
 pub use model::{Edit, Settings};
+use parking_lot::Mutex;
 use replay::WireBody;
 use serde::Serialize;
 use std::{
@@ -124,7 +125,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -436,14 +437,14 @@ impl Gateway {
     }
 
     pub fn set_usage(&self, service: crate::usage::Service) {
-        *self.0.usage.lock().unwrap() = Some(service);
+        *self.0.usage.lock() = Some(service);
     }
     fn usage_operation(
         &self,
         model: Option<&str>,
         operation: crate::usage::model::Operation,
     ) -> Option<crate::usage::Trace> {
-        self.0.usage.lock().unwrap().as_ref().map(|s| {
+        self.0.usage.lock().as_ref().map(|s| {
             s.begin_operation(
                 match self.0.client {
                     ClientId::Codex => "codex",
@@ -482,7 +483,7 @@ impl Gateway {
             return;
         }
         {
-            let state = self.0.inner.lock().unwrap();
+            let state = self.0.inner.lock();
             for event in &mut pending {
                 event.notification_provider = state
                     .store
@@ -492,7 +493,7 @@ impl Gateway {
                     .and_then(|p| crate::events::safe_message(&p.name));
             }
         }
-        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(events) = self.0.diagnostics.lock().as_ref() {
             for event in pending {
                 events.emit(event);
             }
@@ -505,8 +506,8 @@ impl Gateway {
             .notifications(self.0.client, events.clone());
         self.0
             .compaction
-            .provider_names(&self.0.inner.lock().unwrap().store.providers);
-        *self.0.diagnostics.lock().unwrap() = Some(events);
+            .provider_names(&self.0.inner.lock().store.providers);
+        *self.0.diagnostics.lock() = Some(events);
     }
     fn record(
         &self,
@@ -517,7 +518,7 @@ impl Gateway {
         status: Option<u16>,
         attempt: Option<u32>,
     ) {
-        if let Some(events) = self.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(events) = self.0.diagnostics.lock().as_ref() {
             events.emit(crate::events::Record::new(
                 Some(self.0.client),
                 provider,
@@ -560,7 +561,7 @@ impl Gateway {
             event.details.local_code = Some(code::NO_ELIGIBLE_PROVIDER.into());
             event.details.message = Some("没有符合当前路由条件的可用供应商".into());
         }
-        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(service) = self.0.diagnostics.lock().as_ref() {
             service.emit(event);
         }
     }
@@ -582,7 +583,7 @@ impl Gateway {
             counted_failure: Some(false),
             ..Default::default()
         };
-        if let Some(service) = self.0.diagnostics.lock().unwrap().as_ref() {
+        if let Some(service) = self.0.diagnostics.lock().as_ref() {
             service.emit(event);
         }
     }
@@ -684,7 +685,7 @@ impl Gateway {
             let gateway = self.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = gateway.backfill_models().await {
-                    gateway.0.inner.lock().unwrap().error = Some(e.message);
+                    gateway.0.inner.lock().error = Some(e.message);
                     gateway.changed();
                 }
             });
@@ -692,8 +693,8 @@ impl Gateway {
     }
 
     pub fn import_initial(&self, home: &Path) -> Result<()> {
-        let _guard = self.0.registry.mutation.lock().unwrap();
-        let mut s = self.0.inner.lock().unwrap();
+        let _guard = self.0.registry.mutation.lock();
+        let mut s = self.0.inner.lock();
         s.editable_mut().home = Some(home.to_owned());
         // Grok discovery is read-only. Its explicit import preview owns migration.
         if matches!(self.0.client, ClientId::Grok | ClientId::Dsh) {
@@ -791,7 +792,7 @@ impl Gateway {
         if window_label != "main" {
             return Err(AppError::new(code::FORBIDDEN, "仅主窗口可查看供应商凭据"));
         }
-        let state = self.0.inner.lock().unwrap();
+        let state = self.0.inner.lock();
         if expected_revision != self.view_revision(&state)?
             || storage::revision(
                 storage::read_optional(&self.0.data.join("gateway.json"))?.as_deref(),
@@ -828,7 +829,7 @@ impl Gateway {
         self.0.events.subscribe()
     }
     pub fn has_health_wait(&self) -> bool {
-        let state = self.0.inner.lock().unwrap();
+        let state = self.0.inner.lock();
         state.circuits.values().any(|c| c.health().retry_in > 0)
             || state
                 .model_circuits
@@ -849,9 +850,9 @@ impl Gateway {
             .lifecycle
             .try_lock()
             .map_err(|_| AppError::new(code::GATEWAY_ACTIVE, "网关正在启停，请稍后再试"))?;
-        let _mutation = self.0.registry.mutation.lock().unwrap();
+        let _mutation = self.0.registry.mutation.lock();
         for peer in self.0.registry.gateways() {
-            let state = peer.inner.lock().unwrap();
+            let state = peer.inner.lock();
             for provider in &state.store.providers {
                 for url in Self::endpoint_urls(&state.store, provider) {
                     model::base_url(&url, port)?;
@@ -1015,7 +1016,7 @@ impl Gateway {
     fn read_view_config(&self, view: &mut View, home: Option<&Path>, store: &Store) {
         let resolve = |name: &str| std::env::var(name).ok();
         let (grok_raw, config, claude_warning) = {
-            let mut cache_guard = self.0.view_config_cache.lock().unwrap();
+            let mut cache_guard = self.0.view_config_cache.lock();
             let cache = &mut *cache_guard;
             match (self.0.client, home) {
                 (ClientId::Claude, Some(home)) => {
@@ -1125,7 +1126,7 @@ impl Gateway {
         ))
     }
     pub fn observe_home(&self, home: &Path) {
-        let mut state = self.0.inner.lock().unwrap();
+        let mut state = self.0.inner.lock();
         if state
             .store
             .successful_codex_identity
@@ -1147,7 +1148,7 @@ impl Gateway {
         state.editable_mut().home = Some(home.to_owned());
     }
     pub fn is_running(&self) -> bool {
-        self.0.inner.lock().map(|s| s.running).unwrap_or(false)
+        self.0.inner.lock().running
     }
     pub fn read_config(&self, home: &Path) -> Result<crate::configuration::Document> {
         if self.0.client == ClientId::Dsh {
@@ -1156,7 +1157,7 @@ impl Gateway {
         crate::configuration::read(self.0.client, home, &self.0.data, self.config_guarded())
     }
     fn config_guarded(&self) -> bool {
-        let running = self.0.inner.lock().unwrap().running;
+        let running = self.0.inner.lock().running;
         running || self.0.data.join("gateway-recovery.json").exists() || self.claude_official()
     }
     pub(crate) fn config_stamp(
@@ -1190,7 +1191,7 @@ impl Gateway {
         text: &str,
         expected: &str,
     ) -> Result<crate::configuration::Document> {
-        let s = self.0.inner.lock().unwrap();
+        let s = self.0.inner.lock();
         if self.0.client == ClientId::Dsh {
             return Err(AppError::new(code::CONFIG, "请使用 DSH 接入面板"));
         }
@@ -1286,8 +1287,8 @@ impl Gateway {
             } else {
                 None
             };
-        let _network_guard = self.0.registry.mutation.lock().unwrap();
-        let mut s = self.0.inner.lock().unwrap();
+        let _network_guard = self.0.registry.mutation.lock();
+        let mut s = self.0.inner.lock();
         if expected != self.view_revision(&s)? {
             return Err(AppError::new(
                 code::CONFLICT,
@@ -1535,7 +1536,7 @@ impl Gateway {
         );
         drop(s);
         self.0.registry.update_ports()?;
-        self.0.clients.lock().unwrap().clear();
+        self.0.clients.lock().clear();
         self.0.registry.changed();
         self.try_view()
     }
@@ -1566,7 +1567,7 @@ impl Gateway {
         let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
         let token = {
-            let s = self.0.inner.lock().unwrap();
+            let s = self.0.inner.lock();
             if expected != self.view_revision(&s)? {
                 return Err(AppError::new(code::CONFLICT, "网关设置已变化，请重试"));
             }
@@ -1587,7 +1588,7 @@ impl Gateway {
         self.0.registry.listener.check_revision()?;
         let token = self.0.registry.unique_local_token(self.0.client, &token);
         {
-            let s = self.0.inner.lock().unwrap();
+            let s = self.0.inner.lock();
             if self.view_revision_with_listener(&s, &listener.revision) != expected {
                 return Err(AppError::new(
                     code::CONFLICT,
@@ -1597,7 +1598,7 @@ impl Gateway {
         }
         let (tx, _rx) = watch::channel(false);
         {
-            let mut s = self.0.inner.lock().unwrap();
+            let mut s = self.0.inner.lock();
             if self.view_revision_with_listener(&s, &listener.revision) != expected {
                 return Err(AppError::new(code::CONFLICT, "设置已变化，请重试"));
             }
@@ -1688,11 +1689,11 @@ impl Gateway {
         if self.claude_official() {
             return Ok(());
         }
-        if self.0.inner.lock().unwrap().running {
+        if self.0.inner.lock().running {
             return Ok(());
         }
         let (revision, intent, connection) = {
-            let s = self.0.inner.lock().unwrap();
+            let s = self.0.inner.lock();
             if let Some(error) = &s.recovery_error {
                 return Err(error.clone());
             }
@@ -1724,7 +1725,7 @@ impl Gateway {
             let (config_revision, pair) =
                 takeover::read_connection(self.0.client, home, &connection)?;
             if self.0.client == ClientId::Grok {
-                let expected = self.0.inner.lock().unwrap().store.grok_resume.clone();
+                let expected = self.0.inner.lock().store.grok_resume.clone();
                 if expected.as_deref()
                     != Some(&grok_config::fingerprint(&grok_config::read(home)?.1)?)
                 {
@@ -1735,7 +1736,7 @@ impl Gateway {
                 }
             }
             let gateway_after_unclean_exit = {
-                let state = self.0.inner.lock().unwrap();
+                let state = self.0.inner.lock();
                 self.0.client != ClientId::Grok
                     && pair.is_gateway(
                         self.0.client,
@@ -1759,7 +1760,7 @@ impl Gateway {
         }
         .await;
         if let Err(error) = &result {
-            self.0.inner.lock().unwrap().error = Some(error.message.clone());
+            self.0.inner.lock().error = Some(error.message.clone());
             self.changed();
         }
         result
@@ -1775,7 +1776,7 @@ impl Gateway {
         let _listener_guard = self.0.registry.lifecycle.lock().await;
         let _guard = self.0.lifecycle.lock().await;
         {
-            let mut s = self.0.inner.lock().unwrap();
+            let mut s = self.0.inner.lock();
             let was_running = s.running;
             if let (Some(expected), Some(home)) = (expected_config, &s.home) {
                 if takeover::read_connection(self.0.client, home, &s.store.connection)?.0
@@ -1879,7 +1880,7 @@ impl Gateway {
             s.error = None;
         };
         let stopped = self.0.registry.listener.deactivate(self.0.client).await;
-        self.0.clients.lock().unwrap().clear();
+        self.0.clients.lock().clear();
         self.0.registry.changed();
         stopped?;
         self.try_view()
@@ -1977,7 +1978,7 @@ impl Gateway {
         let input = self.query_input(id)?;
         let version = input.version.clone();
         let result = self.0.quota.query(input, force).await?;
-        let s = self.0.inner.lock().unwrap();
+        let s = self.0.inner.lock();
         if !s
             .store
             .providers
@@ -2000,7 +2001,7 @@ impl Gateway {
         quota: bool,
     ) -> Result<(quota::Query, Option<grok_config::Connection>)> {
         Ok({
-            let s = self.0.inner.lock().unwrap();
+            let s = self.0.inner.lock();
             let p = s
                 .store
                 .providers
@@ -2051,7 +2052,7 @@ impl Gateway {
             .catalog
             .query_with_connection(input, force, connection.as_ref())
             .await?;
-        let s = self.0.inner.lock().unwrap();
+        let s = self.0.inner.lock();
         if !s
             .store
             .providers
@@ -2067,7 +2068,7 @@ impl Gateway {
         if force {
             self.0.catalog.commit(&result)?;
         }
-        if let Some(usage) = self.0.usage.lock().unwrap().as_ref() {
+        if let Some(usage) = self.0.usage.lock().as_ref() {
             if let Ok(prices) = usage.prices() {
                 let (choices, _) = self.0.model_list.snapshot();
                 result.metadata = result
@@ -2089,7 +2090,7 @@ impl Gateway {
         protocol: Option<grok_config::Protocol>,
     ) -> Result<Vec<String>> {
         if self.client_id() == ClientId::Dsh {
-            return Ok(dsh::models::for_store(&self.0.inner.lock().unwrap().store)
+            return Ok(dsh::models::for_store(&self.0.inner.lock().store)
                 .iter()
                 .filter_map(|m| m["id"].as_str().map(str::to_owned))
                 .collect());
@@ -2135,11 +2136,11 @@ impl Gateway {
             }
         }
     }
-    fn request_state(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.0.inner.lock().unwrap()
+    fn request_state(&self) -> parking_lot::MutexGuard<'_, Inner> {
+        self.0.inner.lock()
     }
     fn routing_ids(&self, pinned: Option<&str>) -> Vec<String> {
-        let s = self.0.inner.lock().unwrap();
+        let s = self.0.inner.lock();
         s.store
             .providers
             .iter()
@@ -2158,7 +2159,7 @@ impl Gateway {
         if self.client_id() != ClientId::Codex {
             return vec![];
         }
-        let s = self.0.inner.lock().unwrap();
+        let s = self.0.inner.lock();
         s.store
             .providers
             .iter()
@@ -2224,7 +2225,7 @@ impl Gateway {
         let model_circuits = s.model_circuits.entry(pkey(&provider)).or_default().clone();
         self.sync_single_protection(&s);
         let key = format!("{}:{}", pkey(&provider), s.store.settings.connect_seconds);
-        let mut clients = self.0.clients.lock().unwrap();
+        let mut clients = self.0.clients.lock();
         let port = self.0.registry.listener.request_port().ok()?;
         let client = clients
             .entry(key)

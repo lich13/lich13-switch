@@ -84,7 +84,7 @@ pub async fn force_quit_agent_clients(
 }
 #[tauri::command]
 pub fn get_startup_error(r: R<'_>) -> Option<AppError> {
-    r.startup_error.lock().unwrap().clone()
+    r.startup_error.lock().clone()
 }
 
 #[tauri::command]
@@ -152,14 +152,14 @@ pub async fn preview_account_import(
                     .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))
             })
             .collect::<Result<Vec<_>>>()?;
-        r.core.lock().unwrap().exchange_preview(&paths).map(Some)
+        r.core.lock().exchange_preview(&paths).map(Some)
     })
     .await
     .map_err(|_| AppError::new(code::IMPORT, "账号文件读取失败"))?
 }
 #[tauri::command]
 pub fn cancel_account_exchange(r: R<'_>, token: String) {
-    r.core.lock().unwrap().exchange_cancel(&token);
+    r.core.lock().exchange_cancel(&token);
 }
 #[tauri::command]
 pub async fn commit_account_import(
@@ -172,13 +172,12 @@ pub async fn commit_account_import(
     let _guard = r.official_tx.lock().await;
     r.core
         .lock()
-        .unwrap()
         .exchange_commit(&token, &selected, &expected_revision)?;
     crate::refresh(&app, &r)
 }
 #[tauri::command]
 pub fn preview_account_export(r: R<'_>) -> crate::core::exchange::ExportPreview {
-    let mut core = r.core.lock().unwrap();
+    let mut core = r.core.lock();
     core.exchange_prune();
     core.exchange_export_preview()
 }
@@ -190,7 +189,7 @@ pub async fn prepare_account_template(
     replace_template: Option<bool>,
 ) -> Result<Option<crate::exchange_template::Prepared>> {
     use tauri_plugin_dialog::DialogExt;
-    if !replace_template.unwrap_or(false) && r.core.lock().unwrap().exchange_template_ready(&ids) {
+    if !replace_template.unwrap_or(false) && r.core.lock().exchange_template_ready(&ids) {
         return Ok(Some(crate::exchange_template::Prepared::ready()));
     }
     let r = r.inner().clone();
@@ -207,18 +206,14 @@ pub async fn prepare_account_template(
         let path = file
             .into_path()
             .map_err(|_| AppError::new(code::PATH, "请选择本地 JSON 文件"))?;
-        r.core
-            .lock()
-            .unwrap()
-            .exchange_prepare_template(&path)
-            .map(Some)
+        r.core.lock().exchange_prepare_template(&path).map(Some)
     })
     .await
     .map_err(|_| AppError::new(code::EXPORT, "OAuth 模板读取失败"))?
 }
 #[tauri::command]
 pub fn select_account_template(r: R<'_>, token: String, id: usize) -> Result<()> {
-    r.core.lock().unwrap().exchange_select_template(&token, id)
+    r.core.lock().exchange_select_template(&token, id)
 }
 #[tauri::command]
 pub async fn export_accounts(
@@ -253,7 +248,6 @@ pub async fn export_accounts(
             .map_err(|_| AppError::new(code::PATH, "请选择本地路径"))?;
         r.core
             .lock()
-            .unwrap()
             .exchange_export(&ids, &expected_revision, &format, &path)?;
         Ok(true)
     })

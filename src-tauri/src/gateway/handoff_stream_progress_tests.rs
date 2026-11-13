@@ -1043,7 +1043,7 @@ async fn v0212_ws_reconnect_allows_slow_handshake_before_first_event_deadline() 
     );
     super::start(&gateway, &dir).await;
 
-    let token = gateway.0.inner.lock().unwrap().store.local_token.clone();
+    let token = gateway.0.inner.lock().store.local_token.clone();
     let mut client = yawc::WebSocket::connect(
         format!(
             "ws://127.0.0.1:{}/v1/responses",

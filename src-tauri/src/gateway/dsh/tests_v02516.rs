@@ -120,7 +120,7 @@ async fn shared_overrides_restore_only_owned_fields_and_refuse_external_changes(
     let credential_path = home.path().join(".credentials.yaml");
     let credential = fs::read_to_string(&credential_path).unwrap();
     let changed = credential.replace(
-        &gateway.0.inner.lock().unwrap().store.local_token,
+        &gateway.0.inner.lock().store.local_token,
         "external-fixture-key",
     );
     fs::write(&credential_path, &changed).unwrap();

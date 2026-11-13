@@ -437,7 +437,7 @@ async fn probe_uses_fresh_credentials_after_cache_changes_and_drops_old_versions
         today: None,
         total_usage: None,
     };
-    service.0.entries.lock().unwrap().insert(
+    service.0.entries.lock().insert(
         "cached".into(),
         Entry {
             view: old_view,

@@ -12,13 +12,14 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::{
     convert::Infallible,
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -343,7 +344,7 @@ async fn request(gateway: &Gateway, session: &str, body: impl AsRef<[u8]>) -> Re
     let client: Client<_, WireBody> = Client::builder(TokioExecutor::new())
         .build(super::connector::Connector::new(Duration::from_secs(3), 0));
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let req = Request::builder()
@@ -359,7 +360,7 @@ async fn request(gateway: &Gateway, session: &str, body: impl AsRef<[u8]>) -> Re
 
 async fn ws_client(gateway: &Gateway, session: &str) -> yawc::TcpWebSocket {
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     yawc::WebSocket::connect(
@@ -526,7 +527,7 @@ async fn established_owner_second_request_probes_during_cooldown_before_long_wai
                 return json_response(StatusCode::OK, br#"{}"#.as_slice(), None);
             }
             let number = {
-                let mut attempts = attempts_seen.lock().unwrap();
+                let mut attempts = attempts_seen.lock();
                 let count = attempts.entry(session).or_default();
                 *count += 1;
                 *count

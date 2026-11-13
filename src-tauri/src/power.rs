@@ -1,8 +1,9 @@
 //! Battery clamshell control through the narrowly scoped, authorized power helper.
 use crate::errors::code;
 use crate::storage::{self, AppError, Result};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,12 +65,12 @@ impl Service {
         self.system.read()
     }
     pub fn install(&self) -> Result<State> {
-        let _lock = self.lock.lock().unwrap();
+        let _lock = self.lock.lock();
         self.system.prepare()?;
         self.state()
     }
     pub fn remove(&self) -> Result<State> {
-        let _lock = self.lock.lock().unwrap();
+        let _lock = self.lock.lock();
         // The helper puts back the state it remembered before removing itself.
         self.system.remove()?;
         self.state()
@@ -79,14 +80,14 @@ impl Service {
         let _lock = self
             .lock
             .try_lock()
-            .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
+            .ok_or_else(|| AppError::new(code::BUSY, "电源操作正在进行"))?;
         self.set_locked(enabled, expected)
     }
     pub fn disable_if_enabled(&self, still_frozen: impl Fn() -> bool) -> Result<Option<State>> {
         let _lock = self
             .lock
             .try_lock()
-            .map_err(|_| AppError::new(code::BUSY, "电源操作正在进行"))?;
+            .ok_or_else(|| AppError::new(code::BUSY, "电源操作正在进行"))?;
         let before = self.state()?;
         if !before.supported || !before.enabled {
             return Ok(None);
@@ -284,15 +285,12 @@ mod tests {
     }
     impl MockHelper {
         fn reply(&self, state: State, error: Option<&'static str>) {
-            self.replies
-                .lock()
-                .unwrap()
-                .push_back(Reply { state, error });
+            self.replies.lock().push_back(Reply { state, error });
         }
     }
     impl System for MockHelper {
         fn read(&self) -> Result<State> {
-            let mut state = self.current.lock().unwrap().clone();
+            let mut state = self.current.lock().clone();
             if !self.ready.load(Ordering::SeqCst) && state.supported {
                 state.helper = "missing".into();
             }
@@ -305,22 +303,17 @@ mod tests {
                 return Err(AppError::new(code::POWER_AUTH, "已取消系统授权"));
             }
             self.ready.store(true, Ordering::SeqCst);
-            if let Some(state) = self.after_prepare.lock().unwrap().take() {
-                *self.current.lock().unwrap() = state;
+            if let Some(state) = self.after_prepare.lock().take() {
+                *self.current.lock() = state;
             }
             Ok(())
         }
         fn apply(&self, enabled: bool) -> Result<State> {
-            let mut state = self.current.lock().unwrap();
-            self.calls.lock().unwrap().push(enabled);
+            let mut state = self.current.lock();
+            self.calls.lock().push(enabled);
             // The native tests own restoration semantics. These explicit replies
             // verify that Service accepts only the helper's authoritative result.
-            let reply = self
-                .replies
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("helper reply");
+            let reply = self.replies.lock().pop_front().expect("helper reply");
             *state = reply.state;
             reply.error.map_or_else(
                 || Ok(state.clone()),
@@ -329,13 +322,8 @@ mod tests {
         }
         fn remove(&self) -> Result<()> {
             self.removals.fetch_add(1, Ordering::SeqCst);
-            let reply = self
-                .remove_reply
-                .lock()
-                .unwrap()
-                .take()
-                .expect("remove reply");
-            *self.current.lock().unwrap() = reply.state;
+            let reply = self.remove_reply.lock().take().expect("remove reply");
+            *self.current.lock() = reply.state;
             if let Some(code) = reply.error {
                 return Err(AppError::new(code, "助手移除失败"));
             }
@@ -376,7 +364,7 @@ mod tests {
             helper.reply(original.clone(), None);
             assert_eq!(service.set(true, &original.revision).unwrap(), owned);
             assert_eq!(service.set(false, &owned.revision).unwrap(), original);
-            assert_eq!(helper.calls.lock().unwrap().as_slice(), &[true, false]);
+            assert_eq!(helper.calls.lock().as_slice(), &[true, false]);
         }
     }
 
@@ -392,7 +380,7 @@ mod tests {
             code::POWER_AUTH
         );
         assert_eq!(service.state().unwrap(), original);
-        assert!(helper.calls.lock().unwrap().is_empty());
+        assert!(helper.calls.lock().is_empty());
         assert_eq!(helper.approvals.load(Ordering::SeqCst), 1);
     }
 
@@ -413,10 +401,10 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(helper.approvals.load(Ordering::SeqCst), 1);
-        assert_eq!(helper.calls.lock().unwrap().len(), 6);
+        assert_eq!(helper.calls.lock().len(), 6);
         assert_eq!(service.install().unwrap(), original);
         assert_eq!(helper.approvals.load(Ordering::SeqCst), 2);
-        assert_eq!(helper.calls.lock().unwrap().len(), 6);
+        assert_eq!(helper.calls.lock().len(), 6);
         helper.ready.store(false, Ordering::SeqCst);
         helper.reply(owned, None);
         service.set(true, &original.revision).unwrap();
@@ -432,14 +420,14 @@ mod tests {
             let prepared = State::new(supported, enabled, minutes);
             let (_dir, service, helper) = fixture(original.clone());
             helper.ready.store(false, Ordering::SeqCst);
-            *helper.after_prepare.lock().unwrap() = Some(prepared.clone());
+            *helper.after_prepare.lock() = Some(prepared.clone());
 
             assert_eq!(
                 service.set(true, &original.revision).unwrap_err().code,
                 code::CONFLICT
             );
             assert_eq!(service.state().unwrap(), prepared);
-            assert!(helper.calls.lock().unwrap().is_empty());
+            assert!(helper.calls.lock().is_empty());
             assert_eq!(helper.prepares.load(Ordering::SeqCst), 1);
         }
     }
@@ -450,7 +438,7 @@ mod tests {
         let (_dir, service, helper) = fixture(original);
         assert_eq!(service.set(true, "stale").unwrap_err().code, code::CONFLICT);
         assert_eq!(helper.prepares.load(Ordering::SeqCst), 0);
-        assert!(helper.calls.lock().unwrap().is_empty());
+        assert!(helper.calls.lock().is_empty());
     }
 
     #[test]
@@ -464,21 +452,21 @@ mod tests {
             code::POWER
         );
         assert_eq!(service.state().unwrap(), actual);
-        assert_eq!(helper.calls.lock().unwrap().len(), 1);
+        assert_eq!(helper.calls.lock().len(), 1);
     }
 
     #[test]
     fn removal_delegates_restoration_to_the_helper() {
         let (_dir, service, helper) = fixture(state(true, 0));
         let mut removed = state(false, 7);
-        *helper.remove_reply.lock().unwrap() = Some(Reply {
+        *helper.remove_reply.lock() = Some(Reply {
             state: removed.clone(),
             error: None,
         });
         removed.helper = "missing".into();
         assert_eq!(service.remove().unwrap(), removed);
         assert_eq!(helper.removals.load(Ordering::SeqCst), 1);
-        assert!(helper.calls.lock().unwrap().is_empty());
+        assert!(helper.calls.lock().is_empty());
         assert!(!helper.ready.load(Ordering::SeqCst));
     }
 
@@ -486,13 +474,13 @@ mod tests {
     fn failed_removal_returns_helper_error() {
         let original = state(true, 0);
         let (_dir, service, helper) = fixture(original.clone());
-        *helper.remove_reply.lock().unwrap() = Some(Reply {
+        *helper.remove_reply.lock() = Some(Reply {
             state: original.clone(),
             error: Some(code::POWER),
         });
         assert_eq!(service.remove().unwrap_err().code, code::POWER);
         assert_eq!(service.state().unwrap(), original);
-        assert!(helper.calls.lock().unwrap().is_empty());
+        assert!(helper.calls.lock().is_empty());
     }
 
     #[test]
@@ -520,7 +508,7 @@ mod tests {
             .filter(|v| *v)
             .count();
         assert_eq!(count, 1);
-        assert_eq!(helper.calls.lock().unwrap().len(), 1);
+        assert_eq!(helper.calls.lock().len(), 1);
         assert_eq!(helper.approvals.load(Ordering::SeqCst), 0);
     }
 

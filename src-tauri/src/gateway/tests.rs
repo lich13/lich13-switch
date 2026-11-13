@@ -71,10 +71,11 @@ use hyper::{
     Request, Response,
 };
 use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
 use std::{
     convert::Infallible,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 pub(super) async fn server<F, Fut>(handler: F) -> u16
@@ -282,7 +283,7 @@ async fn request(
     let client: HttpClient =
         Client::builder(TokioExecutor::new()).build(Connector::new(Duration::from_secs(2), 0));
     let (token, port) = {
-        let s = g.0.inner.lock().unwrap();
+        let s = g.0.inner.lock();
         (s.store.local_token.clone(), s.store.settings.port)
     };
     let mut req = Request::builder()
@@ -306,7 +307,7 @@ pub(super) async fn request_with_reset(
     headers: Vec<(&str, &str)>,
 ) -> (Response<Incoming>, ResetSender, tokio::task::JoinHandle<()>) {
     let (token, port) = {
-        let state = g.0.inner.lock().unwrap();
+        let state = g.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -365,7 +366,7 @@ async fn unknown_paths_query_duplicate_headers_and_original_payloads() {
                 "Bearer upstream-fixture-token"
             );
             assert!(!parts.headers.contains_key("proxy-authorization"));
-            copy.lock().unwrap().push((
+            copy.lock().push((
                 parts.uri.to_string(),
                 parts.headers.get_all("x-repeat").iter().count(),
                 bytes.clone(),
@@ -409,7 +410,6 @@ async fn unknown_paths_query_duplicate_headers_and_original_payloads() {
     }
     assert!(seen
         .lock()
-        .unwrap()
         .iter()
         .all(|(path, headers, _)| path == "/sub/v1/future/path?x=1&x=2&raw=%2F" && *headers == 2));
     assert_eq!(std::fs::read_dir(g.0.spool.path()).unwrap().count(), 0);
@@ -430,7 +430,7 @@ async fn queue_four_attempt_limit_terminal_errors_and_original_last_error() {
             async move {
                 let path = req.uri().path().to_owned();
                 let _ = req.into_body().collect().await;
-                hits.lock().unwrap().push(i);
+                hits.lock().push(i);
                 Response::builder()
                     .status(if path.ends_with("terminal") { 422 } else { 503 })
                     .header("x-source", i.to_string())
@@ -456,12 +456,12 @@ async fn queue_four_attempt_limit_terminal_errors_and_original_last_error() {
         response.into_body().collect().await.unwrap().to_bytes(),
         "upstream-3"
     );
-    assert_eq!(*hits.lock().unwrap(), vec![0, 1, 2, 3]);
-    hits.lock().unwrap().clear();
+    assert_eq!(*hits.lock(), vec![0, 1, 2, 3]);
+    hits.lock().clear();
     let response = request(&g, "/v1/terminal", vec![], vec![]).await;
     assert_eq!(response.status(), 422);
     response.into_body().collect().await.unwrap();
-    assert_eq!(*hits.lock().unwrap(), vec![0]);
+    assert_eq!(*hits.lock(), vec![0]);
     assert_eq!(g.view().providers[0].health.failures, 0);
     g.stop().await.unwrap();
 }
@@ -891,7 +891,7 @@ async fn compressed_and_spooled_json_replay_exactly_across_failover() {
             async move {
                 let encoding = r.headers().get("content-encoding").cloned();
                 let bytes = r.into_body().collect().await.unwrap().to_bytes();
-                seen.lock().unwrap().push(storage::digest(&bytes));
+                seen.lock().push(storage::digest(&bytes));
                 let mut response = Response::builder().status(status);
                 if let Some(encoding) = encoding {
                     response = response.header("content-encoding", encoding);
@@ -935,7 +935,7 @@ async fn compressed_and_spooled_json_replay_exactly_across_failover() {
             body
         );
         assert_eq!(
-            seen.lock().unwrap().drain(..).collect::<Vec<_>>(),
+            seen.lock().drain(..).collect::<Vec<_>>(),
             vec![digest.clone(), digest]
         );
     }
@@ -1083,7 +1083,7 @@ async fn quota_newapi_fallback_and_public_unit_request_has_no_key() {
     let paths = Arc::new(Mutex::new(vec![]));
     let seen = paths.clone();
     let port=server(move|r|{let seen=seen.clone();async move{
-        let path=r.uri().path().to_owned();seen.lock().unwrap().push(path.clone());
+        let path=r.uri().path().to_owned();seen.lock().push(path.clone());
         match path.as_str(){
             "/site/v1/usage"=>Response::builder().status(404).body(full("missing")).unwrap(),
             "/site/api/usage/token/"=>{assert!(r.headers().contains_key("authorization"));Response::new(full(r#"{"code":true,"data":{"object":"token_usage","total_available":400,"total_granted":1000,"total_used":600,"unlimited_quota":false,"expires_at":0}}"#))},
@@ -1099,7 +1099,7 @@ async fn quota_newapi_fallback_and_public_unit_request_has_no_key() {
     assert_eq!(result.source.as_deref(), Some("newapi"));
     assert_eq!(result.plans[0].remaining, Some(28.));
     assert_eq!(result.plans[0].unit, "CNY");
-    assert_eq!(paths.lock().unwrap().len(), 3);
+    assert_eq!(paths.lock().len(), 3);
 }
 #[tokio::test]
 async fn quota_retry_after_keeps_last_success_and_does_not_fallback() {

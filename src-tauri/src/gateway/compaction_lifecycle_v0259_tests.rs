@@ -77,7 +77,7 @@ fn seeded_boundary(registry: &Arc<Registry>, session: &str, boundary: &str) {
 }
 
 fn state_snapshot(registry: &Registry, session: &str) -> (Value, u64) {
-    let state = registry.state.lock().expect("fixture ledger lock");
+    let state = registry.state.lock();
     (
         serde_json::to_value(state.entries.get(session).expect("fixture entry")).unwrap(),
         state.sequence,
@@ -85,7 +85,7 @@ fn state_snapshot(registry: &Registry, session: &str) -> (Value, u64) {
 }
 
 fn live_boundary(registry: &Registry, session: &str) -> (Option<String>, bool, Option<u64>) {
-    let state = registry.state.lock().expect("fixture ledger lock");
+    let state = registry.state.lock();
     let entry = state.entries.get(session).expect("fixture entry");
     (entry.boundary.clone(), entry.boundary_fresh, entry.claim)
 }
@@ -159,14 +159,7 @@ fn live_receiver_policy_rejects_disabled_or_reordered_handoff_admission() {
         provider(NEW, None, true),
         provider(OLD, Some("fixture-main"), true),
     ];
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers = queued.clone();
+    gateway.0.inner.lock().editable_mut().store.providers = queued.clone();
     let mut compacted = compacted_hints(&boundary);
     compacted.compacted_window = Some(boundary.clone());
     let lease = registry
@@ -181,15 +174,7 @@ fn live_receiver_policy_rejects_disabled_or_reordered_handoff_admission() {
         .unwrap();
     assert!(lease.handoff);
 
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers[0]
-        .handoff_after_compaction = false;
+    gateway.0.inner.lock().editable_mut().store.providers[0].handoff_after_compaction = false;
     let disabled = lease
         .admit_request(&gateway, &queued[0], &Requirement::Resource, false)
         .unwrap_err();
@@ -197,14 +182,7 @@ fn live_receiver_policy_rejects_disabled_or_reordered_handoff_admission() {
 
     let mut reordered = queued.clone();
     reordered.swap(0, 1);
-    gateway
-        .0
-        .inner
-        .lock()
-        .unwrap()
-        .editable_mut()
-        .store
-        .providers = reordered;
+    gateway.0.inner.lock().editable_mut().store.providers = reordered;
     let after_owner = lease
         .admit_request(&gateway, &queued[0], &Requirement::Resource, false)
         .unwrap_err();
@@ -226,7 +204,7 @@ fn stale_cancelled_drop_cannot_clear_a_later_claim_in_same_generation() {
     // Cancel the old claim while retaining its Lease object.  The next
     // request claims the same epoch and boundary generation.
     {
-        let mut state = registry.state.lock().unwrap();
+        let mut state = registry.state.lock();
         state.entries.get_mut(&session).unwrap().claim = None;
     }
     let current = registry
@@ -234,7 +212,7 @@ fn stale_cancelled_drop_cannot_clear_a_later_claim_in_same_generation() {
         .unwrap();
     assert!(current.handoff);
     drop(stale);
-    let state = registry.state.lock().unwrap();
+    let state = registry.state.lock();
     assert_eq!(
         state.entries.get(&session).unwrap().claim,
         Some(current.sequence)

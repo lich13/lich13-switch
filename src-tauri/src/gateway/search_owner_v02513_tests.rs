@@ -13,11 +13,12 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Request, Response, StatusCode};
 use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+use parking_lot::Mutex;
 use serde_json::json;
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -45,7 +46,7 @@ async fn search_request(
             0,
         ));
     let (token, port) = {
-        let state = gateway.0.inner.lock().unwrap();
+        let state = gateway.0.inner.lock();
         (state.store.local_token.clone(), state.store.settings.port)
     };
     let mut request = Request::builder()
@@ -192,7 +193,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
             let path = request.uri().path().to_owned();
             let body = request.into_body().collect().await.unwrap().to_bytes();
             owner_hit_count.fetch_add(1, Ordering::SeqCst);
-            owner_seen.lock().unwrap().push(body.to_vec());
+            owner_seen.lock().push(body.to_vec());
             if path.ends_with("/alpha/search") {
                 super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
             } else {
@@ -277,7 +278,7 @@ async fn v02513_search_paths_follow_handoff_owner_and_charge_once() {
     assert_eq!(ordinary_hits.load(Ordering::SeqCst), 0);
     assert_eq!(owner_hits.load(Ordering::SeqCst), 3);
     assert_eq!(
-        *owner_bodies.lock().unwrap(),
+        *owner_bodies.lock(),
         vec![
             super::v022_initial_body(),
             SEARCH_REQUEST.to_vec(),
@@ -311,7 +312,7 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
             if path.ends_with("/alpha/search") {
                 let current = owner_active.fetch_add(1, Ordering::AcqRel) + 1;
                 update_max(&owner_max, current);
-                owner_events.lock().unwrap().push(("owner", body.to_vec()));
+                owner_events.lock().push(("owner", body.to_vec()));
                 owner_entered.send("owner").unwrap();
                 owner_release.acquire().await.unwrap().forget();
                 owner_active.fetch_sub(1, Ordering::AcqRel);
@@ -333,10 +334,7 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
         async move {
             let body = request.into_body().collect().await.unwrap().to_bytes();
             ordinary_hit_count.fetch_add(1, Ordering::SeqCst);
-            ordinary_events
-                .lock()
-                .unwrap()
-                .push(("ordinary", body.to_vec()));
+            ordinary_events.lock().push(("ordinary", body.to_vec()));
             ordinary_entered.send("ordinary").unwrap();
             super::v022_json_response(StatusCode::OK, Bytes::from_static(ORDINARY_RESPONSE))
         }
@@ -407,13 +405,12 @@ async fn v02513_search_owner_requests_never_exceed_max_concurrency() {
         .unwrap();
     assert_eq!(first_response.status(), StatusCode::OK);
     assert_eq!(second_response.status(), StatusCode::OK);
-    assert_eq!(events.lock().unwrap().len(), 2);
+    assert_eq!(events.lock().len(), 2);
     assert_eq!(ordinary, ids[0]);
     assert_eq!(ordinary_hits.load(Ordering::SeqCst), 0);
     assert!(max_active.load(Ordering::Acquire) <= 1);
     assert!(events
         .lock()
-        .unwrap()
         .iter()
         .all(|(provider, body)| *provider == "owner" && body.as_slice() == SEARCH_REQUEST));
     gateway.stop().await.unwrap();
@@ -609,7 +606,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
                 .collect::<Vec<_>>();
             let body = request.into_body().collect().await.unwrap().to_bytes();
             owner_hit_count.fetch_add(1, Ordering::SeqCst);
-            owner_seen.lock().unwrap().push((body.to_vec(), metadata));
+            owner_seen.lock().push((body.to_vec(), metadata));
             if path.ends_with("/alpha/search") {
                 super::v022_json_response(StatusCode::OK, Bytes::from_static(SEARCH_RESPONSE))
             } else {
@@ -662,7 +659,7 @@ async fn v02513_metadata_only_search_follows_owner_and_preserves_wire_metadata()
     assert_eq!(ordinary_hits.load(Ordering::SeqCst), 0);
     assert_eq!(owner_hits.load(Ordering::SeqCst), 2);
     assert_eq!(
-        *owner_bodies.lock().unwrap(),
+        *owner_bodies.lock(),
         vec![
             (super::v022_initial_body(), Vec::new()),
             (
@@ -1005,7 +1002,7 @@ async fn v02523_search_only_uses_first_error_and_preserves_owner_on_every_reques
     .await;
     let ids = super::v022_ids(&gateway);
     super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[0].clone()));
-    let mut settings = gateway.0.inner.lock().unwrap().store.settings.clone();
+    let mut settings = gateway.0.inner.lock().store.settings.clone();
     settings.max_retries = 0;
     super::v022_update(&gateway, &dir, Edit::Settings { settings });
     configure_search_owner(&gateway, &dir, &ids[1]);
@@ -1109,7 +1106,7 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
             let port = super::v022_server(move |request| {
                 let hits = hits.clone();
                 async move {
-                    hits.lock().unwrap()[index] += 1;
+                    hits.lock()[index] += 1;
                     let search = request.uri().path().ends_with("/alpha/search");
                     let _ = request.into_body().collect().await.unwrap();
                     assert!(
@@ -1145,7 +1142,7 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
             }
         );
         let _ = response_bytes(response).await;
-        assert_eq!(*hits.lock().unwrap(), [1, 1, 1]);
+        assert_eq!(*hits.lock(), [1, 1, 1]);
         let response = search_request(
             &gateway,
             "/v1/responses",
@@ -1154,7 +1151,7 @@ async fn v02523_search_visits_multiple_backups_once_and_generation_excludes_them
         )
         .await;
         let _ = response_bytes(response).await;
-        assert_eq!(hits.lock().unwrap()[1..], [1, 1]);
+        assert_eq!(hits.lock()[1..], [1, 1]);
         gateway.stop().await.unwrap();
     }
 }
@@ -1323,7 +1320,7 @@ async fn v02523_search_total_budget_and_cancel_stop_before_backup() {
         .await;
         let ids = super::v022_ids(&gateway);
         super::v022_update(&gateway, &dir, search_only_edit(&gateway, &ids[1].clone()));
-        let mut settings = gateway.0.inner.lock().unwrap().store.settings.clone();
+        let mut settings = gateway.0.inner.lock().store.settings.clone();
         settings.retry_budget_seconds = 5;
         super::v022_update(&gateway, &dir, Edit::Settings { settings });
         super::v022_start(&gateway, &dir).await;

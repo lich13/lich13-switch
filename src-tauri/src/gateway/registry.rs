@@ -1,8 +1,9 @@
 //! Shared gateway ports prevent self-routing and cross-client loops.
 use super::{listener::Listener, ClientId, Gateway, Shared};
 use crate::storage::Result;
+use parking_lot::{Mutex, RwLock};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Weak};
 
 #[derive(Clone)]
 pub(super) struct TokenEntry {
@@ -48,10 +49,10 @@ impl Registry {
             .collect()
     }
     pub(super) fn tokens_snapshot(&self) -> Arc<Vec<TokenEntry>> {
-        self.tokens.read().unwrap().clone()
+        self.tokens.read().clone()
     }
     fn update_tokens(&self, edit: impl FnOnce(&mut Vec<TokenEntry>)) {
-        let mut current = self.tokens.write().unwrap();
+        let mut current = self.tokens.write();
         let mut next = current.as_ref().clone();
         // Do not upgrade and drop a final Shared while holding this write lock:
         // Shared::drop unregisters itself. A weak entry never keeps it alive.

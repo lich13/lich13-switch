@@ -185,7 +185,7 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
     let dir = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(dir.path().join("data")).unwrap();
     {
-        let mut state = gateway.0.inner.lock().unwrap();
+        let mut state = gateway.0.inner.lock();
         let store = &mut state.editable_mut().store;
         for (name, search_only) in [("search", true), ("ordinary", false)] {
             store
@@ -218,6 +218,6 @@ fn v02523_search_only_is_excluded_from_model_union_exit_and_generation_routes() 
     assert_eq!(routes.len(), 1);
     assert_eq!(gateway.model_union(None).unwrap(), vec!["fixture-ordinary"]);
     assert_eq!(gateway.gateway_models().unwrap().providers.len(), 1);
-    let store = &gateway.0.inner.lock().unwrap().store;
+    let store = &gateway.0.inner.lock().store;
     assert_eq!(routes[0], store.providers[1].id);
 }
