@@ -157,16 +157,7 @@ export function AddAccount({
       .finally(() => setBusy(false));
   }, []);
   const [copied, setCopied] = useState<"url" | "code" | null>(null);
-  const [callbackDraft, setCallbackDraft] = useState("");
   useEffect(() => setCopied(null), [login.phase, login.url, login.code]);
-  useEffect(() => {
-    if (
-      login.mode !== "browser" ||
-      !["starting", "waiting"].includes(login.phase) ||
-      !login.callbackReady
-    )
-      setCallbackDraft("");
-  }, [login.mode, login.phase, login.callbackReady]);
   const canCopy =
     login.mode === "device" && ["starting", "waiting"].includes(login.phase);
   const perform = async (fn: () => Promise<void>) => {
@@ -218,42 +209,6 @@ export function AddAccount({
               )}
               <span>{login.message}</span>
             </div>
-          )}
-          {login.mode === "browser" && running && login.callbackReady && (
-            <form
-              className="login-callback"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (!callbackDraft.trim()) return;
-                void perform(async () => {
-                  const next = await command("complete_login_callback", {
-                    callbackUrl: callbackDraft.trim(),
-                  });
-                  setLogin(next);
-                  setCallbackDraft("");
-                });
-              }}
-            >
-              <label className="field">
-                回调地址
-                <input
-                  name="callbackUrl"
-                  type="password"
-                  autoComplete="off"
-                  aria-label="回调地址"
-                  placeholder="粘贴浏览器回调地址"
-                  value={callbackDraft}
-                  onChange={(event) => setCallbackDraft(event.target.value)}
-                  disabled={busy}
-                />
-              </label>
-              <button
-                className="secondary"
-                disabled={busy || !callbackDraft.trim()}
-              >
-                完成登录
-              </button>
-            </form>
           )}
           {login.code && running && (
             <div className="device-code">

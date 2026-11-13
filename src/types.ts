@@ -59,7 +59,6 @@ export type LoginState = {
   url: string | null;
   code: string | null;
   message: string;
-  callbackReady: boolean;
   targetAccountId?: string | null;
 };
 export type AppError = {

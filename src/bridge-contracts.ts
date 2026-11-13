@@ -589,7 +589,6 @@ export type CommandMap = {
   cancel_login: Call<None, void>;
   open_login_url: Call<None, void>;
   copy_login_value: Call<{ kind: "url" | "code" }, void>;
-  complete_login_callback: Call<{ callbackUrl: string }, LoginState>;
   check_for_updates: Call<None, UpdateInfo>;
   open_github: Call<None, void>;
   open_update_release: Call<None, void>;

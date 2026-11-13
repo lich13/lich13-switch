@@ -38,7 +38,7 @@ Grok 导入预览按系统 managed、用户 managed、用户配置、用户 requ
 
 选择账号后仅替换认证文件，配置保持不变。现有 Codex 进程可能缓存凭据，需要自行重新打开。
 
-ChatGPT 登录需要本机已安装 [官方 Codex CLI](https://developers.openai.com/codex/cli)。应用自动查找 PATH、常见安装目录和 macOS nvm；旧安装中的 CLI 路径偏好继续兼容。Windows npm 安装使用同目录 Codex JavaScript 入口和 Node.js。登录使用独立临时目录；成功后若与当前账号相同，更新账号库和当前 `auth.json`，其他账号仅加入列表；10 分钟未完成会取消。浏览器授权需本人完成，也支持设备码登录。浏览器登录完成后，可把当前 CLI 提供的 `http://127.0.0.1:<port>/success?...` 地址粘贴回应用；应用只向当前本机 CLI 回调服务提交一次，并要求该临时 CLI 已生成与回调匹配的完整 `auth.json`，不从裸 `id_token` 拼接凭据。回调地址只在当前登录会话内有效。
+ChatGPT 登录需要本机已安装 [官方 Codex CLI](https://developers.openai.com/codex/cli)。应用自动查找 PATH、常见安装目录和 macOS nvm；旧安装中的 CLI 路径偏好继续兼容。Windows npm 安装使用同目录 Codex JavaScript 入口和 Node.js。登录使用独立临时目录；成功后若与当前账号相同，更新账号库和当前 `auth.json`，其他账号仅加入列表；10 分钟未完成会取消。浏览器授权需本人完成，也支持设备码登录。浏览器回调无法到达本机 CLI 时（例如浏览器在另一台设备上），请改用设备码登录。
 
 账号页的 ChatGPT 账号可启用“官方账号”。启用会先正常停用 Codex 网关，再注释现有 custom 的 `base_url`、`experimental_bearer_token` 和 `supports_websockets` 三个独立字段，并切换该账号；关闭时按事务记录精确恢复原行文本。官方连接期间不能启动 Codex 网关或编辑这三个字段，其他配置仍可编辑；外部修改受管行会显示冲突。关闭后不会自动启动网关。
 

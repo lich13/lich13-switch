@@ -67,7 +67,6 @@ const emptyLogin: LoginState = {
   url: null,
   code: null,
   message: "",
-  callbackReady: false,
 };
 export default function App() {
   const [exchangeMode, setExchangeMode] = useState<"import" | "export" | null>(

@@ -87,7 +87,6 @@ local_codes! {
     LocalAuth => LOCAL_AUTH = "LOCAL_AUTH",
     LoginAuth => LOGIN_AUTH = "LOGIN_AUTH",
     LoginBusy => LOGIN_BUSY = "LOGIN_BUSY",
-    LoginCallback => LOGIN_CALLBACK = "LOGIN_CALLBACK",
     LoginCancelled => LOGIN_CANCELLED = "LOGIN_CANCELLED",
     LoginCleanup => LOGIN_CLEANUP = "LOGIN_CLEANUP",
     LoginDuplicate => LOGIN_DUPLICATE = "LOGIN_DUPLICATE",

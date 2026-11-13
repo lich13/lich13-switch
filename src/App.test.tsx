@@ -665,48 +665,6 @@ describe("user workflows", () => {
     await u.click(await screen.findByRole("button", { name: "取消登录" }));
     expect(mocks.command).toHaveBeenCalledWith("cancel_login");
   });
-  it("submits only a masked callback draft for the active browser session", async () => {
-    const u = userEvent.setup();
-    render(<App />);
-    await u.click(await screen.findByRole("button", { name: "添加账号" }));
-    await u.click(screen.getByRole("button", { name: "使用浏览器登录" }));
-    act(() =>
-      mocks.listeners.get("login-state")?.({
-        phase: "waiting",
-        mode: "browser",
-        url: "https://auth.openai.com/codex",
-        code: null,
-        message: "等待授权",
-        callbackReady: true,
-      }),
-    );
-    const input = await screen.findByLabelText("回调地址");
-    expect(input).toHaveAttribute("type", "password");
-    mocks.command.mockResolvedValueOnce({
-      phase: "waiting",
-      mode: "browser",
-      url: "https://auth.openai.com/codex",
-      code: null,
-      message: "已提交，等待登录完成",
-      callbackReady: true,
-    });
-    await u.type(input, "http://127.0.0.1:1455/success?id_token=redacted");
-    await u.click(screen.getByRole("button", { name: "完成登录" }));
-    expect(mocks.command).toHaveBeenCalledWith("complete_login_callback", {
-      callbackUrl: "http://127.0.0.1:1455/success?id_token=redacted",
-    });
-    act(() =>
-      mocks.listeners.get("login-state")?.({
-        phase: "cancelling",
-        mode: "browser",
-        url: null,
-        code: null,
-        message: "正在取消",
-        callbackReady: false,
-      }),
-    );
-    expect(screen.queryByLabelText("回调地址")).not.toBeInTheDocument();
-  });
   it("receives tray changes and refreshes the selected account", async () => {
     render(<App />);
     await screen.findByRole("heading", { name: "账号", level: 1 });

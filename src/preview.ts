@@ -150,7 +150,6 @@ let login: LoginState = {
   url: null,
   code: null,
   message: "",
-  callbackReady: false,
 };
 let startup = {
   launchOnBoot: false,
@@ -658,12 +657,7 @@ export async function run(
         url: "https://auth.openai.com/codex/device",
         code: args.mode === "device" ? "DEMO-CODE" : null,
         message: "预览模式：在桌面客户端中完成真实登录",
-        callbackReady: args.mode === "browser",
       };
-      emit("login-state", login);
-      return login;
-    case "complete_login_callback":
-      login = { ...login, message: "已提交，等待登录完成" };
       emit("login-state", login);
       return login;
     case "copy_login_value": {
@@ -688,7 +682,6 @@ export async function run(
         phase: "cancelled",
         url: null,
         code: null,
-        callbackReady: false,
         message: "登录已取消",
       };
       emit("login-state", login);

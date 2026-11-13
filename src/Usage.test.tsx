@@ -203,7 +203,6 @@ beforeEach(() => {
             url: null,
             code: null,
             message: "",
-            callbackReady: false,
           };
         case "get_provider_imports":
           return [];

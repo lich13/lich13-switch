@@ -646,16 +646,6 @@ button.exchange-button:active:not(:disabled) {
   flex: 1;
 }
 
-.login-callback {
-  display: grid;
-  gap: 8px;
-  margin-top: 16px;
-}
-
-.login-callback .field {
-  margin-bottom: 0;
-}
-
 .import-area {
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-md);

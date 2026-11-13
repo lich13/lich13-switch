@@ -955,15 +955,11 @@ fn start_login(
         return Err(AppError::new(code::LOGIN_BUSY, "已有登录正在进行"));
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let (callback_tx, callback_rx) = tokio::sync::mpsc::channel(2);
     session.cancel = Some(tx);
-    session.callback = Some(callback_tx);
     session.state = login::LoginState {
         phase: "starting".into(),
         mode: mode.clone(),
         message: "正在启动官方登录…".into(),
-        callback_ready: false,
-        callback_port: None,
         target_account_id: target_account_id.clone(),
         ..Default::default()
     };
@@ -973,7 +969,7 @@ fn start_login(
     let runtime = r.inner().clone();
     tauri::async_runtime::spawn(async move {
         let (sender, mut events) = tokio::sync::mpsc::channel(8);
-        let task = login::run_with_callbacks(&cli, &mode, rx, sender, callback_rx);
+        let task = login::run(&cli, &mode, rx, sender);
         tokio::pin!(task);
         let result = loop {
             tokio::select! {
@@ -1040,7 +1036,6 @@ fn start_login(
         if let Ok(mut s) = runtime.login.lock() {
             s.state = final_state.clone();
             s.cancel = None;
-            s.callback = None;
         }
         let _ = app.emit("login-state", final_state);
         let _ = refresh(&app, &runtime);
@@ -1056,7 +1051,6 @@ fn cancel_login(r: tauri::State<'_, Arc<Runtime>>) -> Result<()> {
     if let Some(tx) = s.cancel.take() {
         let _ = tx.send(());
         s.state.phase = "cancelling".into();
-        s.callback = None;
     }
     Ok(())
 }
@@ -1082,50 +1076,6 @@ fn copy_login_value(
         .lock()
         .unwrap()
         .copy_value(kind, |value| app.clipboard().write_text(value))
-}
-#[tauri::command]
-async fn complete_login_callback(
-    app: tauri::AppHandle,
-    r: tauri::State<'_, Arc<Runtime>>,
-    callback_url: String,
-) -> Result<login::LoginState> {
-    let callback = {
-        let session = r.login.lock().unwrap();
-        if session.cancel.is_none()
-            || session.state.mode != "browser"
-            || !["starting", "waiting"].contains(&session.state.phase.as_str())
-            || !session.state.callback_ready
-        {
-            return Err(AppError::new(code::LOGIN_STATE, "当前浏览器登录会话不可用"));
-        }
-        session
-            .callback
-            .clone()
-            .ok_or_else(|| AppError::new(code::LOGIN_STATE, "当前登录会话尚未准备回调"))?
-    };
-    let (reply, result) = tokio::sync::oneshot::channel();
-    callback
-        .send(login::CallbackRequest {
-            url: callback_url,
-            reply,
-        })
-        .await
-        .map_err(|_| AppError::new(code::LOGIN_STATE, "登录会话已结束，请重新开始"))?;
-    result
-        .await
-        .map_err(|_| AppError::new(code::LOGIN_STATE, "登录会话已结束，请重新开始"))??;
-    let mut session = r.login.lock().unwrap();
-    if session.cancel.is_none() || !login_active(&session.state) {
-        return Err(AppError::new(
-            code::LOGIN_STATE,
-            "登录会话已结束，请重新开始",
-        ));
-    }
-    session.state.message = "已提交，等待登录完成".into();
-    let state = session.state.clone();
-    drop(session);
-    let _ = app.emit("login-state", state.clone());
-    Ok(state)
 }
 fn quit(app: &tauri::AppHandle, r: &Arc<Runtime>) {
     if r.quit_pending.swap(true, Ordering::Relaxed) {
@@ -2125,7 +2075,6 @@ pub fn run() {
             cancel_login,
             open_login_url,
             copy_login_value,
-            complete_login_callback,
             check_for_updates,
             open_github,
             open_update_release,

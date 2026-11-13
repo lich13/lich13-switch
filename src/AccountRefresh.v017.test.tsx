@@ -31,7 +31,6 @@ beforeEach(() => {
     url: null,
     code: null,
     message: "",
-    callbackReady: false,
     targetAccountId: null,
   };
   state = {
@@ -90,7 +89,6 @@ beforeEach(() => {
             url: "https://example.invalid/device",
             code: "ABCD-EFGH",
             message: "等待授权",
-            callbackReady: false,
             targetAccountId: String(args.targetAccountId),
           };
           return structuredClone(login);
