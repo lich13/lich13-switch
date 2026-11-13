@@ -660,13 +660,59 @@ pub struct Observer {
     encoded: Option<crate::event_raw::Capture>,
 }
 
+/// Why delivery to the client ended. `Delivery::error` stores the discriminant;
+/// zero means delivery has not failed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DownstreamError {
+    BodyDropped = 1,
+    ConnectionError = 2,
+    WriteTimeout = 3,
+    Cancelled = 4,
+    Closed = 5,
+    PeerReset = 6,
+    WriteFailed = 7,
+    ProtocolError = 8,
+}
+impl DownstreamError {
+    pub fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            1 => Self::BodyDropped,
+            2 => Self::ConnectionError,
+            3 => Self::WriteTimeout,
+            4 => Self::Cancelled,
+            5 => Self::Closed,
+            6 => Self::PeerReset,
+            7 => Self::WriteFailed,
+            8 => Self::ProtocolError,
+            _ => return None,
+        })
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BodyDropped => "RESPONSE_BODY_DROPPED",
+            Self::ConnectionError => "DOWNSTREAM_CONNECTION_ERROR",
+            Self::WriteTimeout => "DOWNSTREAM_WRITE_TIMEOUT",
+            Self::Cancelled => "DOWNSTREAM_CANCELLED",
+            Self::Closed => "DOWNSTREAM_CLOSED",
+            Self::PeerReset => "DOWNSTREAM_PEER_RESET",
+            Self::WriteFailed => "DOWNSTREAM_WRITE_FAILED",
+            Self::ProtocolError => "DOWNSTREAM_PROTOCOL_ERROR",
+        }
+    }
+}
+impl From<DownstreamError> for u8 {
+    fn from(error: DownstreamError) -> u8 {
+        error as u8
+    }
+}
 /// Health observation and bounded usage metadata share decoding, never terminal policy.
 #[derive(Default)]
 pub struct Delivery {
     pub bytes: std::sync::atomic::AtomicU64,
     pub terminal: std::sync::atomic::AtomicBool,
     pub finished: std::sync::atomic::AtomicBool,
-    // 1: body dropped; 2: HTTP connection error; 3: downstream stall.
+    /// A `DownstreamError` discriminant, or zero.
     pub error: std::sync::atomic::AtomicU8,
     activity: parking_lot::Mutex<Option<std::sync::Arc<super::wire_progress::Activity>>>,
     request_sequence: std::sync::atomic::AtomicU64,
@@ -693,11 +739,11 @@ impl Delivery {
             .store(true, std::sync::atomic::Ordering::Release);
         self.settled_notify.notify_one();
     }
-    pub fn failed(&self, code: u8) {
+    pub fn failed(&self, code: impl Into<u8>) {
         if !self.is_settled() {
             let _ = self.error.compare_exchange(
                 0,
-                code,
+                code.into(),
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
             );
@@ -736,7 +782,11 @@ impl Delivery {
         }
         let _ = self.error.compare_exchange(
             0,
-            if code == 0 { 1 } else { code },
+            if code == 0 {
+                DownstreamError::BodyDropped.into()
+            } else {
+                code
+            },
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Relaxed,
         );
@@ -1471,14 +1521,19 @@ impl Protocol {
                 Some(Terminal::Unknown) => EndCause::UpstreamIncomplete,
                 _ => EndCause::ApplicationError,
             },
-            code::CLIENT_DISCONNECTED => match self
-                .delivery
-                .error
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                1 => EndCause::Unsettled,
-                3 => EndCause::DownstreamWriteTimeout,
-                2 | 4 | 7 | 8 => EndCause::DownstreamTransportError,
+            code::CLIENT_DISCONNECTED => match DownstreamError::from_code(
+                self.delivery
+                    .error
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ) {
+                Some(DownstreamError::BodyDropped) => EndCause::Unsettled,
+                Some(DownstreamError::WriteTimeout) => EndCause::DownstreamWriteTimeout,
+                Some(
+                    DownstreamError::ConnectionError
+                    | DownstreamError::Cancelled
+                    | DownstreamError::WriteFailed
+                    | DownstreamError::ProtocolError,
+                ) => EndCause::DownstreamTransportError,
                 _ => EndCause::ClientDisconnected,
             },
             code::GATEWAY_STOPPED => EndCause::GatewayStopped,
@@ -1534,17 +1589,9 @@ impl Protocol {
             .response_id
             .as_ref()
             .map(|v| crate::storage::digest(v.as_bytes()));
-        self.transfer.downstream_error = match self.delivery.error.load(Relaxed) {
-            2 => Some("DOWNSTREAM_CONNECTION_ERROR".into()),
-            4 => Some("DOWNSTREAM_CANCELLED".into()),
-            5 => Some("DOWNSTREAM_CLOSED".into()),
-            6 => Some("DOWNSTREAM_PEER_RESET".into()),
-            7 => Some("DOWNSTREAM_WRITE_FAILED".into()),
-            8 => Some("DOWNSTREAM_PROTOCOL_ERROR".into()),
-            3 => Some("DOWNSTREAM_WRITE_TIMEOUT".into()),
-            1 => Some("RESPONSE_BODY_DROPPED".into()),
-            _ => self.transfer.downstream_error.clone(),
-        };
+        if let Some(error) = DownstreamError::from_code(self.delivery.error.load(Relaxed)) {
+            self.transfer.downstream_error = Some(error.label().into());
+        }
     }
     fn emit_interruption(&self) -> bool {
         use crate::events::{Action, Details, HealthScope, Level, Phase, Reason, Record};

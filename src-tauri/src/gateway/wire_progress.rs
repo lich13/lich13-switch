@@ -1,4 +1,5 @@
 //! Observe socket progress without changing bytes or treating control heartbeats as generation data.
+use super::protocol::DownstreamError;
 use parking_lot::Mutex;
 use std::{
     pin::Pin,
@@ -191,7 +192,8 @@ impl Activity {
             true
         });
     }
-    pub fn connection_failed(&self, code: u8) {
+    pub fn connection_failed(&self, code: impl Into<u8>) {
+        let code = code.into();
         for delivery in self.deliveries.lock().drain(..).filter_map(|d| d.upgrade()) {
             delivery.failed(code);
         }
@@ -229,15 +231,15 @@ impl Activity {
             error.kind(),
             std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
         ) {
-            6
+            DownstreamError::PeerReset
         } else if write && error.kind() == std::io::ErrorKind::BrokenPipe {
-            7
+            DownstreamError::WriteFailed
         } else {
-            2
+            DownstreamError::ConnectionError
         };
         self.io_error
-            .store(code, std::sync::atomic::Ordering::Release);
-        self.event(if code == 6 {
+            .store(code.into(), std::sync::atomic::Ordering::Release);
+        self.event(if code == DownstreamError::PeerReset {
             "peer_reset"
         } else if write {
             "socket_write_failed"

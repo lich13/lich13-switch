@@ -80,7 +80,7 @@ pub async fn serve(
                     };
                     if let Err(error) = result {
                         connection_activity.event(if error.is_parse() { "http_parse_failed" } else if error.is_canceled() { "http_cancelled" } else { "http_connection_failed" });
-                        connection_activity.connection_failed(if connection_activity.error_code() != 0 { connection_activity.error_code() } else if error.is_canceled() { 4 } else if error.is_closed() || error.is_incomplete_message() { 5 } else if error.is_parse() { 8 } else { 2 });
+                        connection_activity.connection_failed(if connection_activity.error_code() != 0 { connection_activity.error_code() } else if error.is_canceled() { super::protocol::DownstreamError::Cancelled.into() } else if error.is_closed() || error.is_incomplete_message() { super::protocol::DownstreamError::Closed.into() } else if error.is_parse() { super::protocol::DownstreamError::ProtocolError.into() } else { super::protocol::DownstreamError::ConnectionError.into() });
                     }
                 });
             }

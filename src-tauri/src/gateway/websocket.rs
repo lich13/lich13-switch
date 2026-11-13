@@ -23,6 +23,9 @@ use tokio::{
 };
 use yawc::{Frame, OpCode, Options, WebSocket};
 type Failure = (u16, &'static str);
+/// Internal signal, never sent to the client: the turn must restart on the
+/// provider that received the compaction handoff.
+const HANDOFF: Failure = (1999, "compaction handoff");
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 const KEEPALIVE: Duration = Duration::from_secs(20);
 // Only bounds late usage observation after a settled turn. It never closes
@@ -374,7 +377,7 @@ fn creates(frame: &Frame) -> bool {
 }
 fn rejected(reason: Rejected) -> Failure {
     match reason {
-        Rejected::Reconnect => (1999, "compaction handoff"),
+        Rejected::Reconnect => HANDOFF,
         Rejected::Policy => (1008, code::NO_ELIGIBLE_PROVIDER),
         Rejected::Model => (1008, "MODEL_NOT_ALLOWED or MODEL_UNDETERMINED"),
         Rejected::Stopped => (1012, "gateway stopped"),
@@ -825,7 +828,7 @@ async fn session(
             ) => result,
             };
             match outcome {
-                Err((1999, "compaction handoff")) => {
+                Err(HANDOFF) => {
                     current_cfg = g.request_state().store.settings.clone();
                     current_ids = g.routing_ids(None);
                     current_routes = current_ids
@@ -2381,7 +2384,7 @@ async fn session_once(
                             .any(|r| r.provider.handoff_after_compaction)
                     {
                         *next_turn = Some(frame);
-                        return Err((1999, "compaction handoff"));
+                        return Err(HANDOFF);
                     }
                     ownership = if let Some(session) =
                         conversation.clone().filter(|_| !latest.is_empty())
@@ -2415,7 +2418,7 @@ async fn session_once(
                                 .is_some_and(|r| r.provider.id != route.provider.id)
                     }) {
                         *next_turn = Some(frame);
-                        return Err((1999, "compaction handoff"));
+                        return Err(HANDOFF);
                     }
                     // A connection opened for a model detour is not permission
                     // to keep unrelated turns on that provider. Respect a real
@@ -2442,7 +2445,7 @@ async fn session_once(
                                 .is_some_and(|lease| !lease.request_only())
                         {
                             *next_turn = Some(frame);
-                            return Err((1999, "compaction handoff"));
+                            return Err(HANDOFF);
                         }
                         return Err((1013, code::NO_ELIGIBLE_PROVIDER));
                     }
@@ -2608,9 +2611,9 @@ async fn session_once(
                 )
                 .await;
                 match acquired {
-                    Err((1999, "compaction handoff")) => {
+                    Err(HANDOFF) => {
                         *next_turn = Some(frame);
-                        return Err((1999, "compaction handoff"));
+                        return Err(HANDOFF);
                     }
                     Ok(mut admission) => {
                         if !admit_ownership(
@@ -2624,7 +2627,7 @@ async fn session_once(
                         )? {
                             admission.permits.neutral(cfg);
                             *next_turn = Some(frame);
-                            return Err((1999, "compaction handoff"));
+                            return Err(HANDOFF);
                         }
                         admission.commit_rpm();
                         turn = Some(admission)

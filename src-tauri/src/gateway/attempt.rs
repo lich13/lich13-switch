@@ -2,7 +2,7 @@
 //! error frames and native WebSocket close frames keep their own wire encoding.
 //! Protocol::finish remains the single usage/terminal finalizer.
 use super::{
-    protocol::{Delivery, Protocol},
+    protocol::{Delivery, DownstreamError, Protocol},
     replay_policy,
 };
 use crate::errors::code;
@@ -37,7 +37,7 @@ impl DownstreamEnd {
                 delivery.event("downstream_write_timeout");
                 let _ = delivery.error.compare_exchange(
                     0,
-                    3,
+                    DownstreamError::WriteTimeout.into(),
                     std::sync::atomic::Ordering::AcqRel,
                     std::sync::atomic::Ordering::Relaxed,
                 );
@@ -50,9 +50,9 @@ impl DownstreamEnd {
                 delivery.failed(if error != 0 {
                     error
                 } else if writing {
-                    2
+                    DownstreamError::ConnectionError.into()
                 } else {
-                    5
+                    DownstreamError::Closed.into()
                 });
             }
         }
