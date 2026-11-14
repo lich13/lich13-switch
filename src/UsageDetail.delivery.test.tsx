@@ -13,7 +13,6 @@ function record(): UsageRecord {
     startedAt: 1000,
     sessionId: null,
     completed: true,
-    estimatedSpeed: false,
     duplicateOf: null,
     deduplication: "",
     attempts: [

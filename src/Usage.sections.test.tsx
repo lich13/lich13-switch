@@ -104,7 +104,6 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     sessionId: null,
     attempts: [attempt()],
     completed: true,
-    estimatedSpeed: false,
     duplicateOf: null,
     deduplication: "",
     ...overrides,
@@ -759,7 +758,6 @@ describe("request details and sources", () => {
       records = [
         record({
           source,
-          estimatedSpeed: source !== "proxy",
           attempts: [attempt({ stream, operation, firstTokenMs })],
         }),
       ];

@@ -192,7 +192,6 @@ export type UsageRecord = {
   sessionId: string | null;
   attempts: Attempt[];
   completed: boolean;
-  estimatedSpeed: boolean;
   duplicateOf: string | null;
   deduplication: string;
   mergedSources?: string[];

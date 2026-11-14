@@ -105,7 +105,6 @@ export type AntigravityAuthState = {
   oauthAuthMethod: string | null;
   adcStatus: "active" | "disabled" | "backup_only" | "missing";
   adcType: "service_account" | "authorized_user" | null;
-  adcEmail: string | null;
   adcProject: string | null;
   appRestarted?: boolean;
   relaunchFailed?: boolean;
@@ -210,7 +209,6 @@ export type ProviderTestJob = {
   report: FingerprintReport | null;
   groups: ProviderTestGroup[];
   automatic: boolean;
-  batchId: string | null;
   canRetry: boolean;
   completionReason: string | null;
   engine: DetectionEngine;
@@ -396,7 +394,6 @@ export type GatewayModels = {
       inputPerM: string | null;
       outputPerM: string | null;
       cacheReadPerM: string | null;
-      cacheWritePerM: string | null;
       deviation: boolean;
     } | null;
   }[];

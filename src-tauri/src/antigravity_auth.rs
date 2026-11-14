@@ -92,7 +92,6 @@ pub struct AntigravityAuthState {
     pub oauth_auth_method: Option<String>,
     pub adc_status: AdcStatus,
     pub adc_type: Option<AdcType>,
-    pub adc_email: Option<String>,
     pub adc_project: Option<String>,
     #[serde(default)]
     pub app_restarted: bool,
@@ -731,7 +730,7 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
             Err(_) => {}
         }
     }
-    let (mut adc_type, mut adc_email, mut adc_project, mut adc_digest) = (None, None, None, None);
+    let (mut adc_type, mut adc_project, mut adc_digest) = (None, None, None);
     let adc_opt = [
         paths.adc_file(),
         paths.adc_disabled_file(),
@@ -754,7 +753,6 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
                         dirty = true;
                     }
                     adc_type = Some(cred_type);
-                    adc_email = email;
                     adc_project = project_id;
                     adc_digest = Some(digest);
                 }
@@ -833,7 +831,6 @@ fn state_with_health(paths: &Paths) -> Result<(AntigravityAuthState, bool)> {
         oauth_auth_method,
         adc_status,
         adc_type,
-        adc_email,
         adc_project,
         app_restarted: false,
         relaunch_failed: false,

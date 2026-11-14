@@ -746,7 +746,6 @@ export async function run(
         oauthAuthMethod: "google-oauth",
         adcStatus: "disabled",
         adcType: "authorized_user",
-        adcEmail: "dev@example.invalid",
         adcProject: "gcp-alpha-demo",
         appRestarted: false,
         revision: "ag-preview-rev",

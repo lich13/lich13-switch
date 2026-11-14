@@ -33,7 +33,6 @@ const initialState: AntigravityAuthState = {
   oauthAuthMethod: "google-oauth",
   adcStatus: "disabled",
   adcType: "authorized_user",
-  adcEmail: "user1@example.invalid",
   adcProject: "demo-project",
   appRestarted: false,
   accounts: [

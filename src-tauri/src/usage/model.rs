@@ -1190,8 +1190,6 @@ pub struct Record {
     pub attempts: Vec<Attempt>,
     pub completed: bool,
     #[serde(default)]
-    pub estimated_speed: bool,
-    #[serde(default)]
     pub duplicate_of: Option<String>,
     #[serde(default)]
     pub deduplication: String,

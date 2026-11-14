@@ -37,7 +37,6 @@ function record(detailArchived?: boolean): UsageRecord {
     sessionId: null,
     attempts: [attempt()],
     completed: true,
-    estimatedSpeed: false,
     duplicateOf: null,
     deduplication: "",
   };

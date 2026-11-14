@@ -62,7 +62,6 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     sessionId: null,
     attempts: [attempt()],
     completed: true,
-    estimatedSpeed: false,
     duplicateOf: null,
     deduplication: "",
     ...overrides,

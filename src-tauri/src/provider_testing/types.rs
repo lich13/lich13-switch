@@ -143,7 +143,6 @@ pub struct Job {
     pub report: Option<Value>,
     pub groups: Vec<Group>,
     pub automatic: bool,
-    pub batch_id: Option<String>,
     pub can_retry: bool,
     pub completion_reason: Option<String>,
     #[serde(default)]

@@ -67,7 +67,6 @@ const makeJob = (request: ProviderTestRequest): ProviderTestJob => ({
   report: null,
   groups: [],
   automatic: false,
-  batchId: null,
   canRetry: false,
   completionReason: null,
   engine: "modelTrace",

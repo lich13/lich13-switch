@@ -332,7 +332,6 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
               inputPerM: "1",
               outputPerM: "2",
               cacheReadPerM: "0.1",
-              cacheWritePerM: null,
               deviation: false,
             },
           },

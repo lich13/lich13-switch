@@ -60,7 +60,6 @@ const rows: UsageRecord[] = Array.from({ length: 47 }, (_, i) => {
     finishedAt: at + 5200,
     attempts: [{ ...attempt, status: i % 3 ? attempt.status : null }],
     completed: i % 5 !== 0,
-    estimatedSpeed: i % 3 === 0,
     duplicateOf: null,
     deduplication: "独立记录",
   };

@@ -120,7 +120,6 @@ pub struct Reference {
     pub input_per_m: Option<String>,
     pub output_per_m: Option<String>,
     pub cache_read_per_m: Option<String>,
-    pub cache_write_per_m: Option<String>,
     pub deviation: bool,
 }
 fn difference(
@@ -627,7 +626,6 @@ impl Pricing {
             input_per_m: per_m("input_cost_per_token"),
             output_per_m: per_m("output_cost_per_token"),
             cache_read_per_m: per_m("cache_read_input_token_cost"),
-            cache_write_per_m: per_m("cache_creation_input_token_cost"),
             deviation: self
                 .compare_from(model, 0, source)
                 .fields

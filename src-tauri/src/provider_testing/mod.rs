@@ -558,7 +558,6 @@ impl Service {
                 })
                 .collect(),
             automatic,
-            batch_id: None,
             can_retry: false,
             completion_reason: None,
             engine: platform.engine,

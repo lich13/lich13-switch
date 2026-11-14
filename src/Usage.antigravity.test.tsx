@@ -49,7 +49,6 @@ function record(): UsageRecord {
     startedAt: 1767225600000,
     finishedAt: 1767225602000,
     completed: true,
-    estimatedSpeed: false,
     sessionId: null,
     duplicateOf: null,
     deduplication: "",
@@ -373,7 +372,6 @@ describe("Usage Antigravity statistics tab", () => {
       finishedAt: Date.UTC(2026, 9, 30, 8, 29, 4),
       sessionId: null,
       completed: true,
-      estimatedSpeed: false,
       duplicateOf: null,
       deduplication: "独立记录",
       attempts: [

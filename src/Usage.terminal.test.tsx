@@ -83,7 +83,6 @@ function record(overrides: Partial<RecordFixture> = {}): RecordFixture {
     sessionId: null,
     attempts: [attempt()],
     completed: true,
-    estimatedSpeed: false,
     duplicateOf: null,
     deduplication: "",
     ...overrides,

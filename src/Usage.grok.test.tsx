@@ -74,7 +74,6 @@ const record: UsageRecord = {
     attempt("fixture-grok-attempt-two", "fixture-grok-model-two", secondTokens),
   ],
   completed: true,
-  estimatedSpeed: false,
   duplicateOf: null,
   deduplication: "独立记录",
 };

@@ -73,7 +73,6 @@ function record(source?: Source): UsageRecord {
     sessionId: null,
     attempts: [attempt({ responseModel: `fixture-model-${source ?? "all"}` })],
     completed: true,
-    estimatedSpeed: false,
     duplicateOf: null,
     deduplication: "",
   };

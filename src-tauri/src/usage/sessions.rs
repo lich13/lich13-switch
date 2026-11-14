@@ -573,7 +573,6 @@ fn base(
         finished_at: Some(at),
         session_id: session,
         completed: complete,
-        estimated_speed: duration > 0,
         attempts: vec![Attempt {
             id,
             response_model: model.clone(),

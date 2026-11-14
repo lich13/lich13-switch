@@ -108,7 +108,6 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     sessionId: null,
     attempts: [attempt()],
     completed: true,
-    estimatedSpeed: false,
     duplicateOf: null,
     deduplication: "独立记录",
     ...overrides,
@@ -888,7 +887,6 @@ describe("usage records", () => {
       record({
         id: "fixture-session",
         source: "codex",
-        estimatedSpeed: true,
         attempts: [
           attempt({
             provider: null,

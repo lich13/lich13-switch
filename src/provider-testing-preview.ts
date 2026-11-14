@@ -137,7 +137,6 @@ export function providerTestingPreview(
       report: null,
       groups: [],
       automatic: false,
-      batchId: null,
       canRetry: false,
       completionReason: null,
       engine: state.platform.engine,
