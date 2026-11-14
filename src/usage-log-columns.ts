@@ -20,7 +20,6 @@ export type LogColumn = (typeof logColumns)[number]["id"];
 export function columnVisible(
   id: LogColumn,
   settings: UsageSettings | undefined,
-  _narrow: boolean,
 ) {
   if (id === "time") return true;
   return (

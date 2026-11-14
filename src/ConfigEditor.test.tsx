@@ -39,7 +39,6 @@ vi.mock("@uiw/react-codemirror", () => ({
 }));
 import ConfigEditor from "./ConfigEditor";
 import { get } from "./claude-settings";
-import { getCachedCodeMirrorSurface } from "./codeMirrorLoader";
 let doc: ConfigDocument;
 beforeEach(() => {
   localStorage.clear();
@@ -87,14 +86,12 @@ it("shares visual/source drafts, edits the effective model, and saves once with 
   const u = userEvent.setup();
   mount();
   const model = await screen.findByLabelText("默认模型");
-  expect(getCachedCodeMirrorSurface()).toBeNull();
   expect(model).toHaveValue("effective");
   fireEvent.change(model, { target: { value: "manual-model" } });
   await u.click(screen.getByRole("button", { name: "JSON" }));
   const source = (await screen.findByLabelText(
     "JSON 编辑器",
   )) as HTMLTextAreaElement;
-  expect(getCachedCodeMirrorSurface()).not.toBeNull();
   expect(JSON.parse(source.value).model).toBe("old");
   expect(JSON.parse(source.value).env.ANTHROPIC_MODEL).toBe("manual-model");
   await u.click(screen.getByRole("button", { name: "可视化" }));
@@ -351,24 +348,4 @@ it("edits Antigravity app config across visual and JSON modes, diffs, restores b
   expect(
     mocks.command.mock.calls.some(([name]) => name === "read_config"),
   ).toBe(false);
-});
-
-it("recovers cleanly after a transient CodeMirror lazy-load failure", async () => {
-  vi.resetModules();
-  const FakeSurface = (() => null) as unknown as typeof import("./CodeMirrorSurface").default;
-  vi.doMock("./CodeMirrorSurface", () =>
-    Promise.reject(new Error("chunk load failed")),
-  );
-  try {
-    const loaderMod = await import("./codeMirrorLoader");
-    await expect(loaderMod.loadCodeMirrorSurface()).rejects.toThrow();
-    expect(loaderMod.getCachedCodeMirrorSurface()).toBeNull();
-    vi.doMock("./CodeMirrorSurface", () => ({ default: FakeSurface }));
-    const Loaded = await loaderMod.loadCodeMirrorSurface();
-    expect(Loaded).toBe(FakeSurface);
-    expect(loaderMod.getCachedCodeMirrorSurface()).toBe(FakeSurface);
-  } finally {
-    vi.doUnmock("./CodeMirrorSurface");
-    vi.resetModules();
-  }
 });

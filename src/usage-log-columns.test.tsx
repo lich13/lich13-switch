@@ -64,21 +64,19 @@ describe("request log columns", () => {
     expect(logMoney("0")).toBe("$0");
   });
   it("uses explicit choices before the grouped defaults and calculates only reported measures", () => {
-    expect(columnVisible("time", undefined, true)).toBe(true);
-    expect(columnVisible("speed", undefined, true)).toBe(true);
+    expect(columnVisible("time", undefined)).toBe(true);
+    expect(columnVisible("speed", undefined)).toBe(true);
     expect(
-      columnVisible(
-        "speed",
-        { ...defaultSettings, logColumns: { speed: false } },
-        true,
-      ),
+      columnVisible("speed", {
+        ...defaultSettings,
+        logColumns: { speed: false },
+      }),
     ).toBe(false);
     expect(
-      columnVisible(
-        "speed",
-        { ...defaultSettings, logColumns: { speed: true } },
-        true,
-      ),
+      columnVisible("speed", {
+        ...defaultSettings,
+        logColumns: { speed: true },
+      }),
     ).toBe(true);
     expect(logSpeed(attempt)).toBe(24);
     expect(logSpeed({ ...attempt, stream: false })).toBe(24);

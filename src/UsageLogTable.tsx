@@ -108,7 +108,7 @@ export function UsageLogControls({
                 <input
                   type="checkbox"
                   disabled={column.id === "time" || !settings}
-                  checked={columnVisible(column.id, settings, false)}
+                  checked={columnVisible(column.id, settings)}
                   onChange={(e) => visibility(column.id, e.target.checked)}
                 />
                 {column.label}
@@ -140,7 +140,7 @@ export default function UsageLogTable({
   name: (id: string | null) => string;
   open: (r: UsageRecord) => void;
 }) {
-  const visible = (id: LogColumn) => columnVisible(id, settings, false);
+  const visible = (id: LogColumn) => columnVisible(id, settings);
   const tokenFields = [
     "input",
     "output",

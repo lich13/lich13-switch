@@ -127,7 +127,13 @@ it("waits for a slow provider when another provider reschedules polling", async 
   );
   let waiting: Promise<void> | undefined;
   function Pair() {
-    const q = useProviderQuota([provider, second], true);
+    const q = useProviderQuota(
+      [provider, second],
+      true,
+      "app-visibility",
+      "codex",
+      60,
+    );
     return (
       <button
         onClick={() => {

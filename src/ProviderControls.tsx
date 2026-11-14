@@ -6,7 +6,7 @@ import type { ProviderCommit } from "./SortableProviders";
 
 export default function ProviderControls({
   provider,
-  clientId = "codex",
+  clientId,
   revision,
   disabled,
   visible = true,
@@ -14,7 +14,7 @@ export default function ProviderControls({
   report,
 }: {
   provider: Provider;
-  clientId?: ClientId;
+  clientId: ClientId;
   revision: string;
   disabled: boolean;
   visible?: boolean;

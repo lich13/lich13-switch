@@ -17,6 +17,7 @@ it("validates caps, preserves edits through runtime refresh and retries conflict
   const report = vi.fn();
   const { rerender } = render(
     <ProviderControls
+      clientId="codex"
       provider={provider}
       revision="old"
       disabled={false}
@@ -35,6 +36,7 @@ it("validates caps, preserves edits through runtime refresh and retries conflict
   fireEvent.change(input, { target: { value: "8" } });
   rerender(
     <ProviderControls
+      clientId="codex"
       provider={{ ...provider, activeRequests: 3, maxConcurrency: 6 }}
       revision="new"
       disabled={false}
@@ -76,6 +78,7 @@ it("keeps authoritative queue state on failure and prevents duplicate submission
     user = userEvent.setup();
   render(
     <ProviderControls
+      clientId="codex"
       provider={provider}
       revision="r1"
       disabled={false}
@@ -237,6 +240,7 @@ it("edits the provider RPM cap in the shared control", async () => {
   const commit = vi.fn().mockResolvedValue(undefined);
   render(
     <ProviderControls
+      clientId="codex"
       provider={{ ...provider, maxRpm: 60, rpmUsed: 12 }}
       revision="rpm-revision"
       disabled={false}
@@ -262,7 +266,14 @@ it("Escape closes only the editor, returns focus and hidden panels discard draft
   const commit = vi.fn(),
     report = vi.fn(),
     user = userEvent.setup();
-  const props = { provider, revision: "r", disabled: false, commit, report };
+  const props = {
+    clientId: "codex" as const,
+    provider,
+    revision: "r",
+    disabled: false,
+    commit,
+    report,
+  };
   const { rerender } = render(<ProviderControls {...props} />);
   const anchor = screen.getByRole("button", { name: /并发上限/ });
   await user.click(anchor);

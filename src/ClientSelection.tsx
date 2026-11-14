@@ -72,34 +72,30 @@ export default function ClientSelection<C extends ConfigClientId = ClientId>({
   client,
   select,
   disabled = false,
-  includeDsh = true,
   visibleClients = clients as unknown as readonly C[],
   label = clientName,
 }: {
   client: C;
   select: (id: C) => void;
   disabled?: boolean;
-  includeDsh?: boolean;
   visibleClients?: readonly C[];
   label?: (id: C) => string;
 }) {
   return (
     <nav className="segmented client-selection" aria-label="客户端">
-      {visibleClients
-        .filter((id) => includeDsh || id !== "dsh")
-        .map((id) => (
-          <button
-            key={id}
-            type="button"
-            data-client={id}
-            data-client-switch
-            disabled={disabled}
-            aria-pressed={id === client}
-            onClick={() => select(id)}
-          >
-            {label(id)}
-          </button>
-        ))}
+      {visibleClients.map((id) => (
+        <button
+          key={id}
+          type="button"
+          data-client={id}
+          data-client-switch
+          disabled={disabled}
+          aria-pressed={id === client}
+          onClick={() => select(id)}
+        >
+          {label(id)}
+        </button>
+      ))}
     </nav>
   );
 }

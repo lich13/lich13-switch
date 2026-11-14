@@ -15,9 +15,9 @@ import {
 export function useProviderQuota(
   providers: Provider[],
   active: boolean,
-  visibilityEvent: "app-visibility" | "panel-visibility" = "app-visibility",
-  clientId: ClientId = "codex",
-  refreshSeconds = 60,
+  visibilityEvent: "app-visibility" | "panel-visibility",
+  clientId: ClientId,
+  refreshSeconds: number,
   onError?: (message: string) => void,
 ) {
   const failure = useRef(onError);
