@@ -4,6 +4,7 @@ import Sources from "./UsageSources";
 import UsageLogTable, { UsageLogControls } from "./UsageLogTable";
 export { Drawer } from "./UsageDrawer";
 import { subscriptions } from "./subscriptions";
+import { useVisible } from "./visibility";
 import type {
   AntigravityAuthState,
   CommandName,
@@ -174,8 +175,7 @@ export default function Usage({
     }
     setTab(next);
   };
-  const [visible, setVisible] = useState(document.visibilityState !== "hidden"),
-    [nativeVisible, setNativeVisible] = useState(true);
+  const visible = useVisible("app-visibility", (message) => setError(message));
   const sequence = useRef(0),
     rowsSequence = useRef(0),
     agSequence = useRef(0),
@@ -207,8 +207,8 @@ export default function Usage({
     [],
   );
   useEffect(() => {
-    if (!visible || !nativeVisible) pending.current.clear();
-  }, [visible, nativeVisible]);
+    if (!visible) pending.current.clear();
+  }, [visible]);
   const query = useCallback((): UsageFilter => {
     const end = live
       ? Math.floor(Date.now() / 1000) * 1000
@@ -233,12 +233,6 @@ export default function Usage({
     setBusy(true);
     try {
       const filter = query();
-      if (
-        filter.start != null &&
-        (!Number.isFinite(filter.start) ||
-          filter.start > (filter.end ?? Date.now()))
-      )
-        throw new Error("请选择有效时间范围");
       const overview = await request("get_usage_dashboard", {
         filter,
       });
@@ -271,12 +265,6 @@ export default function Usage({
     setAgBusy(true);
     try {
       const filter = query();
-      if (
-        filter.start != null &&
-        (!Number.isFinite(filter.start) ||
-          filter.start > (filter.end ?? Date.now()))
-      )
-        throw new Error("请选择有效时间范围");
       const stats = await request(
         tab === "claude"
           ? "get_claude_usage_stats"
@@ -345,39 +333,39 @@ export default function Usage({
     [loadData, loadState],
   );
   useEffect(() => {
-    if (visible && nativeVisible && !independent) void loadOverview();
+    if (visible && !independent) void loadOverview();
     return () => {
       sequence.current++;
     };
-  }, [loadOverview, visible, nativeVisible, independent]);
+  }, [loadOverview, visible, independent]);
   useEffect(() => {
-    if (visible && nativeVisible && tab === "requests") void loadRows();
+    if (visible && tab === "requests") void loadRows();
     return () => {
       rowsSequence.current++;
     };
-  }, [loadRows, visible, nativeVisible, tab]);
+  }, [loadRows, visible, tab]);
   useEffect(() => {
-    if (!visible || !nativeVisible || !independent) return;
+    if (!visible || !independent) return;
     void loadClientStats();
     return () => {
       agSequence.current++;
     };
-  }, [loadClientStats, visible, nativeVisible, independent]);
+  }, [loadClientStats, visible, independent]);
   useEffect(() => {
-    if (!visible || !nativeVisible || tab !== "claude") return;
+    if (!visible || tab !== "claude") return;
     void loadClaudeQuota();
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("claude-login-state", (value) => {
       if (value.phase === "complete") void loadClaudeQuota(true);
     });
     return () => events.dispose();
-  }, [visible, nativeVisible, tab, loadClaudeQuota]);
+  }, [visible, tab, loadClaudeQuota]);
   const reloadAccountStats = useEffectEvent(() => {
     pending.current.clear();
     if (tab === "antigravity") void loadClientStats();
   });
   useEffect(() => {
-    if (!visible || !nativeVisible) return;
+    if (!visible) return;
     void loadState();
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("usage-state", () => void loadState(true));
@@ -385,15 +373,15 @@ export default function Usage({
       stateSequence.current++;
       events.dispose();
     };
-  }, [loadState, visible, nativeVisible]);
+  }, [loadState, visible]);
   useEffect(() => {
-    if (!visible || !nativeVisible) return;
+    if (!visible) return;
     const events = subscriptions((e) => setError(errorOf(e).message));
     events.watch("pricing-state", () => void loadData(true));
     return () => events.dispose();
-  }, [loadData, visible, nativeVisible]);
+  }, [loadData, visible]);
   useEffect(() => {
-    if (!visible || !nativeVisible) return;
+    if (!visible) return;
     let gone = false;
     const updateAccounts = (ag: AntigravityAuthState | null) => {
       const kind =
@@ -447,25 +435,15 @@ export default function Usage({
       sequence.current++;
       events.dispose();
     };
-  }, [visible, nativeVisible]);
+  }, [visible]);
   useEffect(() => {
-    const changed = () => setVisible(document.visibilityState !== "hidden");
-    document.addEventListener("visibilitychange", changed);
-    const events = subscriptions((e) => setError(errorOf(e).message));
-    events.watch("app-visibility", setNativeVisible);
-    return () => {
-      document.removeEventListener("visibilitychange", changed);
-      events.dispose();
-    };
-  }, []);
-  useEffect(() => {
-    if (!visible || !nativeVisible || !state?.settings.refreshSeconds) return;
+    if (!visible || !state?.settings.refreshSeconds) return;
     const t = setInterval(
       () => void load(),
       state.settings.refreshSeconds * 1000,
     );
     return () => clearInterval(t);
-  }, [visible, nativeVisible, state?.settings.refreshSeconds, load]);
+  }, [visible, state?.settings.refreshSeconds, load]);
   const choose = <T extends string>(setter: (s: T) => void, value: T) => {
     setter(value);
     resetPages();

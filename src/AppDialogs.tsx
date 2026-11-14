@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { command } from "./bridge";
+import { useDialogFocus } from "./Modal";
 import NotificationPermission from "./NotificationPermission";
 import PowerSettings from "./PowerSettings";
 import QuickPlatformSettings from "./QuickPlatformSettings";
@@ -47,52 +48,13 @@ export function AppModal({
   onClose: () => void;
   children: ReactNode;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  const heading = useRef<HTMLHeadingElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const fallback = previous?.closest("details")?.querySelector("summary");
-    const dialog = ref.current;
-    dialog?.showModal();
-    if (dialog && !dialog.contains(document.activeElement)) {
-      heading.current?.focus({ preventScroll: true });
-    }
-    return () => {
-      dialog?.close();
-      if (fallback instanceof HTMLElement && fallback.isConnected)
-        fallback.focus();
-      else if (previous?.isConnected) previous.focus();
-    };
-  }, []);
+  const { ref, heading, onKeyDown } = useDialogFocus(true);
   return (
     <dialog
       ref={ref}
       className="modal"
       aria-label={title}
-      onKeyDown={(e) => {
-        if (e.key !== "Tab") return;
-        const controls = Array.from(
-          ref.current?.querySelectorAll<HTMLElement>(
-            'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]',
-          ) ?? [],
-        ).filter((element) => element.getClientRects().length > 0);
-        const first = controls[0],
-          last = controls.at(-1);
-        if (!first || !last) {
-          e.preventDefault();
-          heading.current?.focus();
-        } else if (
-          e.shiftKey &&
-          (document.activeElement === first ||
-            document.activeElement === heading.current)
-        ) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }}
+      onKeyDown={onKeyDown}
       onCancel={(e) => {
         e.preventDefault();
         onClose();

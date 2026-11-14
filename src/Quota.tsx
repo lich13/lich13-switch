@@ -1,4 +1,5 @@
 import { subscriptions } from "./subscriptions";
+import { useVisible } from "./visibility";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import Modal from "./Modal";
@@ -25,8 +26,9 @@ export function useProviderQuota(
   const latest = useRef(providers);
   latest.current = providers;
   const [values, setValues] = useState<Record<string, ProviderQuota>>({});
-  const [nativeVisible, setNativeVisible] = useState(true);
-  const [visible, setVisible] = useState(document.visibilityState !== "hidden");
+  const visible = useVisible(visibilityEvent, (message) =>
+    failure.current?.(message),
+  );
   const flights = useRef(new Map<string, Promise<void>>());
   const snapshots = useRef<Record<string, ProviderQuota>>({});
   const mounted = useRef(true);
@@ -48,16 +50,11 @@ export function useProviderQuota(
     events.watch("provider-quota", (e) => {
       if (e.clientId === clientId) accept(e.quota);
     });
-    events.watch(visibilityEvent, setNativeVisible);
-    const onVisibility = () =>
-      setVisible(document.visibilityState !== "hidden");
-    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       mounted.current = false;
       events.dispose();
-      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [accept, visibilityEvent, clientId]);
+  }, [accept, clientId]);
   const refresh = useCallback(
     (id: string, force = true): Promise<void> => {
       const provider = latest.current.find((p) => p.id === id);
@@ -120,7 +117,7 @@ export function useProviderQuota(
     })
     .join("|");
   useEffect(() => {
-    if (!active || !nativeVisible || !visible || !identity || refreshSeconds === 0) return;
+    if (!active || !visible || !identity || refreshSeconds === 0) return;
     let cancelled = false;
     let timer: number;
     const delayFor = (q: ProviderQuota | null | undefined) =>
@@ -161,7 +158,7 @@ export function useProviderQuota(
     };
     void tick();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [active, nativeVisible, visible, identity, schedule, refreshSeconds, refresh]);
+  }, [active, visible, identity, schedule, refreshSeconds, refresh]);
   return { quotaFor, refresh };
 }
 function emptyQuota(p: Provider): ProviderQuota {

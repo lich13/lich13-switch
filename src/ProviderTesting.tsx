@@ -4,6 +4,7 @@ import { Copy, RefreshCw } from "lucide-react";
 import { command } from "./bridge";
 import { confirmAction } from "./confirmation";
 import { subscriptions } from "./subscriptions";
+import { useVisible } from "./visibility";
 import Modal from "./Modal";
 import { errorOf, type GatewayState, type Provider } from "./types";
 import type {
@@ -91,22 +92,7 @@ export default function ProviderTesting({
   close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const [documentVisible, setDocumentVisible] = useState(
-    document.visibilityState !== "hidden",
-  );
-  const [nativeVisible, setNativeVisible] = useState(true);
-  const visible = documentVisible && nativeVisible;
-  useEffect(() => {
-    const changed = () =>
-      setDocumentVisible(document.visibilityState !== "hidden");
-    document.addEventListener("visibilitychange", changed);
-    const events = subscriptions((e) => setError(errorOf(e).message));
-    events.watch("app-visibility", setNativeVisible);
-    return () => {
-      document.removeEventListener("visibilitychange", changed);
-      events.dispose();
-    };
-  }, []);
+  const visible = useVisible("app-visibility", (message) => setError(message));
   const tabsId = useId();
   const scope = { clientId: gateway.clientId, providerId: provider.id };
   const [state, setState] = useState<ProviderTestingState | null>(null);

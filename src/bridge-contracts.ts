@@ -856,7 +856,8 @@ export type EventMap = {
   "provider-tests": null;
   "usage-state": null;
   "pricing-state": null;
-  "app-event": EventRecord;
+  /** The journal changed; the log page reloads rather than read the payload. */
+  "app-event": unknown;
   "event-log": { id: string; clientId: ClientId; providerId: string | null };
   "provider-settings": {
     id: string;

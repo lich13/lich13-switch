@@ -18,6 +18,7 @@ import {
   routingFailure,
 } from "./routing-labels";
 import { subscriptions } from "./subscriptions";
+import { useVisible } from "./visibility";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw, Trash2, X } from "lucide-react";
 import { command } from "./bridge";
@@ -356,11 +357,7 @@ export default function EventLog({
     Record<string, { name: string; clientId: ClientId }>
   >({});
   const [selected, setSelected] = useState<EventRecord | null>(null);
-  const [documentVisible, setDocumentVisible] = useState(
-    document.visibilityState !== "hidden",
-  );
-  const [nativeVisible, setNativeVisible] = useState(true);
-  const visible = documentVisible && nativeVisible;
+  const visible = useVisible("app-visibility", (message) => setError(message));
   const sequence = useRef(0);
   const flight = useRef<{ key: string; promise: Promise<EventPage> } | null>(
     null,
@@ -482,15 +479,10 @@ export default function EventLog({
       received.add(s.clientId);
       accept(s);
     });
-    watch("app-visibility", setNativeVisible);
-    const visibility = () =>
-      setDocumentVisible(document.visibilityState !== "hidden");
-    document.addEventListener("visibilitychange", visibility);
 
     return () => {
       disposed = true;
       events.dispose();
-      document.removeEventListener("visibilitychange", visibility);
     };
   }, []);
 
