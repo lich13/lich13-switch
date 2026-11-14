@@ -421,7 +421,7 @@ export function SettingsForm({
           <span>系统提醒</span>
           <input
             type="checkbox"
-            checked={prefs.systemNotifications ?? true}
+            checked={prefs.systemNotifications}
             onChange={(e) =>
               setPrefs({ ...prefs, systemNotifications: e.target.checked })
             }

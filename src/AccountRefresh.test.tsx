@@ -68,10 +68,22 @@ beforeEach(() => {
     currentState: "saved",
     preferences: {
       codexHome: "/fixture/codex",
+      claudeHome: "/fixture/claude",
+      grokHome: "/fixture/grok",
+      dshHome: "/fixture/dsh",
       cliPath: "",
       theme: "dark",
+      quotaRefreshSeconds: 60,
+      systemNotifications: true,
     },
+    authSync: null,
     error: null,
+    officialMode: {
+      enabled: false,
+      state: "disabled",
+      accountId: null,
+      error: null,
+    },
   };
   mocks.command.mockImplementation(
     async (name: string, args: Record<string, unknown> = {}) => {

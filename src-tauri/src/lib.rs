@@ -761,11 +761,10 @@ fn delete_account(
 }
 #[tauri::command]
 fn read_config(
-    client_id: Option<gateway::ClientId>,
+    client_id: gateway::ClientId,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<configuration::Document> {
-    let client = client_id.unwrap_or_default();
-    r.gateway(client).read_config(&r.home(client)?)
+    r.gateway(client_id).read_config(&r.home(client_id)?)
 }
 #[tauri::command]
 fn read_previous_config(
@@ -775,8 +774,8 @@ fn read_previous_config(
     r.gateway(client_id).previous_config()
 }
 #[tauri::command]
-fn validate_config(client_id: Option<gateway::ClientId>, text: String) -> Result<()> {
-    configuration::validate(client_id.unwrap_or_default(), &text)
+fn validate_config(client_id: gateway::ClientId, text: String) -> Result<()> {
+    configuration::validate(client_id, &text)
 }
 #[tauri::command]
 async fn save_config(
@@ -784,23 +783,22 @@ async fn save_config(
     r: tauri::State<'_, Arc<Runtime>>,
     text: String,
     expected_revision: String,
-    client_id: Option<gateway::ClientId>,
+    client_id: gateway::ClientId,
 ) -> Result<configuration::Document> {
     let _official_guard = r.official_tx.lock().await;
-    let client = client_id.unwrap_or_default();
-    let home = r.home(client)?;
-    if client == gateway::ClientId::Codex {
+    let home = r.home(client_id)?;
+    if client_id == gateway::ClientId::Codex {
         official::guard_save(&r.data, &home, &text)?;
-    } else if client == gateway::ClientId::Claude {
+    } else if client_id == gateway::ClientId::Claude {
         claude_profile::guard_save(&r.data, &home, &claude_profile::user_home()?, &text)?;
     }
     let doc = r
-        .gateway(client)
+        .gateway(client_id)
         .save_config(&home, &text, &expected_revision)
-        .map_err(|e| r.config_failure(client, e))?;
+        .map_err(|e| r.config_failure(client_id, e))?;
     let _ = app.emit(
         "config-state",
-        serde_json::json!({"clientId":client,"revision":doc.revision,"guarded":doc.guarded}),
+        serde_json::json!({"clientId":client_id,"revision":doc.revision,"guarded":doc.guarded}),
     );
     refresh(&app, &r)?;
     Ok(doc)
@@ -1122,18 +1120,18 @@ fn cancel_gateway_wait(
 }
 #[tauri::command]
 fn get_gateway_models(
-    client_id: Option<gateway::ClientId>,
+    client_id: gateway::ClientId,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::model_list::View> {
-    r.gateway(client_id.unwrap_or_default()).gateway_models()
+    r.gateway(client_id).gateway_models()
 }
 #[tauri::command]
 async fn refresh_gateway_models(
-    client_id: Option<gateway::ClientId>,
+    client_id: gateway::ClientId,
     provider_ids: Option<Vec<String>>,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::model_list::View> {
-    r.gateway(client_id.unwrap_or_default())
+    r.gateway(client_id)
         .refresh_gateway_models(provider_ids)
         .await
 }
@@ -1150,13 +1148,13 @@ fn search_models_dev(
 }
 #[tauri::command]
 fn edit_model_list(
-    client_id: Option<gateway::ClientId>,
+    client_id: gateway::ClientId,
     op: gateway::model_list::Operation,
     id: String,
     source: Option<String>,
     r: tauri::State<'_, Arc<Runtime>>,
 ) -> Result<gateway::model_list::View> {
-    r.gateway(client_id.unwrap_or_default())
+    r.gateway(client_id)
         .edit_model_list(op, &id, source.as_deref())
 }
 #[tauri::command]

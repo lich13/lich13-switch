@@ -73,7 +73,7 @@ type GatewayProps = {
   focusProvider?: {
     id: string;
     sequence: number;
-    clientId?: ClientId;
+    clientId: ClientId;
     action?: ProviderAction;
   } | null;
 };
@@ -90,7 +90,7 @@ export default function Gateway(props: GatewayProps) {
   useEffect(() => {
     if (props.focusProvider)
       // App has already confirmed discarding drafts for explicit navigation.
-      select(props.focusProvider.clientId ?? "codex");
+      select(props.focusProvider.clientId);
   }, [props.focusProvider?.sequence]);
   return (
     <GatewayContent
@@ -99,7 +99,7 @@ export default function Gateway(props: GatewayProps) {
       clientId={clientId}
       focusProvider={
         props.focusProvider &&
-        (props.focusProvider.clientId ?? "codex") === clientId
+        props.focusProvider.clientId === clientId
           ? props.focusProvider
           : null
       }
@@ -181,7 +181,7 @@ function GatewayContent({
         if (
           !disposed &&
           request === sequence &&
-          (value.clientId ?? "codex") === clientId
+          value.clientId === clientId
         )
           setState(value);
       } catch (e) {
@@ -194,7 +194,7 @@ function GatewayContent({
       else sequence++;
     });
     events.watch("gateway-state", (s) => {
-      if ((s.clientId ?? "codex") === clientId) {
+      if (s.clientId === clientId) {
         sequence++;
         setState(s);
       }

@@ -258,7 +258,7 @@ describe("gateway controls", () => {
     const { rerender } = render(
       <Gateway
         notify={() => {}}
-        focusProvider={{ id: providerId, sequence: 9 }}
+        focusProvider={{ id: providerId, clientId: "codex", sequence: 9 }}
         onFocusHandled={handled}
       />,
     );
@@ -294,7 +294,7 @@ describe("gateway controls", () => {
     const { rerender } = render(
       <Gateway
         notify={() => {}}
-        focusProvider={{ id: providerId, sequence: 1 }}
+        focusProvider={{ id: providerId, clientId: "codex", sequence: 1 }}
       />,
     );
     expect(
@@ -309,7 +309,7 @@ describe("gateway controls", () => {
     rerender(
       <Gateway
         notify={() => {}}
-        focusProvider={{ id: providerId, sequence: 2 }}
+        focusProvider={{ id: providerId, clientId: "codex", sequence: 2 }}
       />,
     );
     expect(

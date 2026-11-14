@@ -106,16 +106,6 @@ it("keeps transport and model drafts through a conflict and retries with the ref
   );
 });
 
-it("keeps older handoff fields compatible without exposing provider settings controls", async () => {
-  const p = props();
-  delete p.provider.handoffAfterCompaction;
-  delete p.provider.takeNewThreads;
-  render(<ProviderSettings {...p} runtime={p.provider} />);
-
-  expect(screen.queryByRole("checkbox", { name: "压缩后接管" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "新线程接管" })).not.toBeInTheDocument();
-});
-
 it("does not expose either handoff control for Claude", async () => {
   const p = props();
   render(<ProviderSettings {...p} clientId="claude" />);

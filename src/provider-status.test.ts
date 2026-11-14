@@ -370,7 +370,11 @@ it("shows original-provider capacity waiting only for an explicit owner retry", 
 
   const newThread = providerRuntimeStatus(
     p,
-    state({ capacityRetries: [{ providerId: p.id, retryIn: 9 }] }),
+    state({
+      capacityRetries: [
+        { providerId: p.id, retryIn: 9, existingOwner: false },
+      ],
+    }),
   );
   expect(newThread).not.toContain("原供应商等待");
   expect(newThread).toBe("");

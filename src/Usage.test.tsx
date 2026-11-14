@@ -19,6 +19,7 @@ import type {
   UsageSettings,
   UsageState,
 } from "./usage-types";
+import type { ViewState } from "./types";
 
 const mock = vi.hoisted(() => ({
   command: vi.fn(),
@@ -191,11 +192,23 @@ beforeEach(() => {
             currentState: "missing",
             preferences: {
               codexHome: "/fixture/codex",
+              claudeHome: "/fixture/claude",
+              grokHome: "/fixture/grok",
+              dshHome: "/fixture/dsh",
               cliPath: "",
               theme: "dark",
+              quotaRefreshSeconds: 60,
+              systemNotifications: true,
             },
+            authSync: null,
             error: null,
-          };
+            officialMode: {
+              enabled: false,
+              state: "disabled",
+              accountId: null,
+              error: null,
+            },
+          } satisfies ViewState;
         case "get_login":
           return {
             phase: "idle",

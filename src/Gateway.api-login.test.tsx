@@ -46,7 +46,7 @@ beforeEach(() => {
           id?: string;
           searchOnly?: boolean;
         };
-        if (edit.op === "connection") {
+        if (edit.op === "connection" && edit.mode) {
           current.connectionMode = edit.mode;
           current.revision = `saved-${current.clientId}`;
         }

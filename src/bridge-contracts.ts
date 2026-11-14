@@ -563,11 +563,11 @@ export type CommandMap = {
     { id: string } & Revision,
     AntigravityAuthState
   >;
-  read_config: Call<{ clientId?: ClientId }, ConfigDocument>;
+  read_config: Call<Client, ConfigDocument>;
   read_previous_config: Call<Client, string>;
-  validate_config: Call<{ clientId?: ClientId; text: string }, void>;
+  validate_config: Call<Client & { text: string }, void>;
   save_config: Call<
-    { clientId?: ClientId; text: string } & Revision,
+    Client & { text: string } & Revision,
     ConfigDocument
   >;
   set_preferences: Call<{ preferences: Preferences }, ViewState>;

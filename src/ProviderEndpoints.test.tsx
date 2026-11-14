@@ -17,8 +17,8 @@ function fixtureProvider(overrides: Partial<Provider> = {}): Provider {
     name: "Fixture Provider",
     baseUrl: "https://primary.fixture.invalid/v1",
     extraBaseUrls: ["https://secondary.fixture.invalid/v1"],
-    endpointMeasurements: undefined,
-    preferredBaseUrl: undefined,
+    endpointMeasurements: [],
+    preferredBaseUrl: "https://primary.fixture.invalid/v1",
     ...overrides,
   };
 }

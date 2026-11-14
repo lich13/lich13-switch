@@ -171,7 +171,7 @@ export default function ProviderControls({
             className="provider-takeover"
             aria-label={`${provider.name} 压缩后接管`}
             title="压缩后接管"
-            aria-pressed={Boolean(provider.handoffAfterCompaction)}
+            aria-pressed={provider.handoffAfterCompaction}
             disabled={disabled || saving}
             onClick={() => void togglePolicy("handoffAfterCompaction")}
           >
@@ -183,7 +183,7 @@ export default function ProviderControls({
             className="provider-takeover"
             aria-label={`${provider.name} 新线程接管`}
             title="新线程接管"
-            aria-pressed={Boolean(provider.takeNewThreads)}
+            aria-pressed={provider.takeNewThreads}
             disabled={disabled || saving}
             onClick={() => void togglePolicy("takeNewThreads")}
           >

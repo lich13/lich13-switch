@@ -4,14 +4,36 @@ import type {
   DshFileView,
   DshFileKey,
 } from "./bridge-contracts";
-import type { GatewayState, GatewaySettings, ProviderQuota } from "./types";
+import type {
+  GatewayState,
+  GatewaySettings,
+  Health,
+  Provider,
+  ProviderQuota,
+} from "./types";
 import { densePreview } from "./preview-fixtures";
-const healthy = {
-  state: "closed" as const,
+const healthy: Health = {
+  state: "closed",
   failures: 0,
   requests: 0,
   retryIn: 0,
+  cooldownReason: null,
+  protectedSingleProvider: false,
+  probeInFlight: false,
+  available: true,
 };
+/** The fields of a provider row that start out empty. */
+const idle = {
+  extraBaseUrls: [],
+  endpointMeasurements: [],
+  modelHealth: [],
+  hasQuotaAccessToken: false,
+  quotaChecking: false,
+  quotaCheck: null,
+  rpmWaitReason: null,
+  dshModels: null,
+  searchOnly: false,
+} satisfies Partial<Provider>;
 export const gatewayDemo: GatewayState = {
   clientId: "codex",
   revision: "preview-gateway",
@@ -38,6 +60,7 @@ export const gatewayDemo: GatewayState = {
     successThreshold: 2,
     cooldownSeconds: 60,
     rateLimitSeconds: 5,
+    hardFailureCooldownSeconds: 300,
     capacityRetrySeconds: 60,
     websocketRetrySeconds: 300,
     firstByteSeconds: 300,
@@ -50,9 +73,11 @@ export const gatewayDemo: GatewayState = {
   },
   providers: [
     {
+      ...structuredClone(idle),
       id: "primary",
       name: "api.example.com",
       baseUrl: "https://api.example.com/v1",
+      preferredBaseUrl: "https://api.example.com/v1",
       queued: true,
       health: { ...healthy },
       quotaVersion: "preview-quota",
@@ -68,9 +93,11 @@ export const gatewayDemo: GatewayState = {
       takeNewThreads: false,
     },
     {
+      ...structuredClone(idle),
       id: "backup",
       name: "备用工作空间 · 长名称供应商的列表与键盘操作验证",
       baseUrl: "https://backup.example.com/api/v1",
+      preferredBaseUrl: "https://backup.example.com/api/v1",
       queued: true,
       health: { ...healthy },
       quotaVersion: "preview-quota",
@@ -86,9 +113,25 @@ export const gatewayDemo: GatewayState = {
       takeNewThreads: false,
     },
   ],
+  grokManaged: false,
+  dshProfile: null,
+  current: {
+    kind: "provider",
+    id: "primary",
+    by: "urlToken",
+    model: null,
+    modelSource: null,
+    warning: null,
+  },
+  configWarning: null,
+  connectionMode: "bearer",
   activeConnections: 0,
   waitingRequests: 0,
+  pendingRequests: [],
   capacityRetries: [],
+  handoffWaiting: [],
+  websocketRetries: [],
+  transientRetries: [],
   error: null,
   recoveryPending: false,
 };
@@ -188,7 +231,7 @@ function syncListener(port = gatewayDemo.settings.port, changed = false) {
   ];
   const revision = changed
     ? crypto.randomUUID()
-    : gatewayDemo.listener!.revision;
+    : gatewayDemo.listener.revision;
   const runningClients = states
     .filter((state) => state.running)
     .map((state) => state.clientId);
@@ -225,11 +268,11 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
           : gatewayDemo;
   if (name === "cancel_gateway_wait") {
     const found =
-      s.pendingRequests?.some((r) => r.requestId === args.requestId) ?? false;
-    s.pendingRequests = s.pendingRequests?.filter(
+      s.pendingRequests.some((r) => r.requestId === args.requestId);
+    s.pendingRequests = s.pendingRequests.filter(
       (r) => r.requestId !== args.requestId,
     );
-    s.waitingRequests = s.pendingRequests?.length ?? 0;
+    s.waitingRequests = s.pendingRequests.length;
     return found;
   }
   if (["get_models_dev", "update_models_dev"].includes(name)) return modelIndex;
@@ -453,7 +496,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
   if (name === "probe_provider_endpoints") {
     const p = s.providers.find((p) => p.id === args.providerId);
     if (!p) throw new Error("供应商不存在");
-    p.endpointMeasurements = [p.baseUrl, ...(p.extraBaseUrls ?? [])].map(
+    p.endpointMeasurements = [p.baseUrl, ...p.extraBaseUrls].map(
       (baseUrl, i) => ({
         baseUrl,
         latencyMs: i ? 48 : 96,
@@ -462,7 +505,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         checkedAt: Date.now(),
       }),
     );
-    p.preferredBaseUrl = p.extraBaseUrls?.[0] ?? p.baseUrl;
+    p.preferredBaseUrl = p.extraBaseUrls[0] ?? p.baseUrl;
     return structuredClone(s);
   }
   if (name === "start_gateway") {
@@ -644,11 +687,11 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
       p.preferredBaseUrl = p.baseUrl;
     }
     if (e.op === "swapEndpoint" && p) {
-      const index = p.extraBaseUrls?.indexOf(String(e.baseUrl)) ?? -1;
+      const index = p.extraBaseUrls.indexOf(String(e.baseUrl));
       if (index < 0) throw new Error("辅助端点已变化，请刷新后重试");
       const previous = p.baseUrl;
-      p.baseUrl = p.extraBaseUrls![index];
-      p.extraBaseUrls![index] = previous;
+      p.baseUrl = p.extraBaseUrls[index];
+      p.extraBaseUrls[index] = previous;
       p.endpointMeasurements = [];
       p.preferredBaseUrl = p.baseUrl;
     }
@@ -666,9 +709,11 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
         if (e.searchOnly !== undefined) p.searchOnly = Boolean(e.searchOnly);
       } else
         s.providers.push({
+          ...structuredClone(idle),
           id: crypto.randomUUID(),
           name: new URL(String(e.baseUrl)).hostname,
           baseUrl: String(e.baseUrl),
+          preferredBaseUrl: String(e.baseUrl),
           queued: true,
           health: { ...healthy },
           quotaVersion: crypto.randomUUID(),
@@ -704,7 +749,7 @@ export function gatewayPreview(name: string, args: Record<string, unknown>) {
     if (e.op === "settings") {
       const settings = e.settings as GatewaySettings;
       if (settings.port !== s.settings.port) {
-        if (gatewayDemo.listener!.runningClients.length)
+        if (gatewayDemo.listener.runningClients.length)
           throw new Error("请先停用全部客户端网关，再修改共享端口");
         syncListener(settings.port, true);
       }

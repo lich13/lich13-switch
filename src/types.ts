@@ -1,13 +1,13 @@
 export type ClientId = "codex" | "claude" | "grok" | "dsh";
 export type Preferences = {
   codexHome: string;
-  claudeHome?: string;
-  grokHome?: string;
-  dshHome?: string;
+  claudeHome: string;
+  grokHome: string;
+  dshHome: string;
   cliPath: string;
   theme: "system" | "dark" | "light";
-  quotaRefreshSeconds?: number;
-  systemNotifications?: boolean;
+  quotaRefreshSeconds: number;
+  systemNotifications: boolean;
 };
 export type Account = {
   id: string;
@@ -29,14 +29,14 @@ export type ViewState = {
   configRevision: string;
   currentState: "saved" | "unsaved" | "missing" | "invalid" | "gateway";
   preferences: Preferences;
-  authSync?: {
+  authSync: {
     state: string;
     accountId: string | null;
     message: string;
     at: number;
   } | null;
   error: string | null;
-  officialMode?: OfficialMode;
+  officialMode: OfficialMode;
 };
 export type OfficialMode = {
   enabled: boolean;
@@ -80,18 +80,18 @@ export const errorOf = (e: unknown): AppError =>
       };
 
 export type GatewaySettings = {
-  customFailureRules?: import("./failure-policy-types").FailureRule[];
+  customFailureRules: import("./failure-policy-types").FailureRule[];
   port: number;
   maxRetries: number;
   failureThreshold: number;
-  transientFailureThreshold?: number;
+  transientFailureThreshold: number;
   successThreshold: number;
   cooldownSeconds: number;
   rateLimitSeconds: number;
-  hardFailureCooldownSeconds?: number;
+  hardFailureCooldownSeconds: number;
   capacityRetrySeconds: number;
   websocketRetrySeconds: number;
-  endpointProbeSeconds?: number;
+  endpointProbeSeconds: number;
   firstByteSeconds: number;
   idleSeconds: number;
   retryBudgetSeconds: number;
@@ -104,10 +104,10 @@ export type Health = {
   failures: number;
   requests: number;
   retryIn: number;
-  cooldownReason?: string | null;
-  protectedSingleProvider?: boolean;
-  probeInFlight?: boolean;
-  available?: boolean;
+  cooldownReason: string | null;
+  protectedSingleProvider: boolean;
+  probeInFlight: boolean;
+  available: boolean;
   cause?: {
     eventId: string;
     code: string;
@@ -128,9 +128,9 @@ export type Provider = {
   id: string;
   name: string;
   baseUrl: string;
-  extraBaseUrls?: string[];
-  preferredBaseUrl?: string;
-  endpointMeasurements?: {
+  extraBaseUrls: string[];
+  preferredBaseUrl: string;
+  endpointMeasurements: {
     baseUrl: string;
     latencyMs: number | null;
     status: number | null;
@@ -139,24 +139,24 @@ export type Provider = {
   }[];
   queued: boolean;
   health: Health;
-  modelHealth?: { model: string; health: Health }[];
+  modelHealth: { model: string; health: Health }[];
   quotaVersion: string;
-  hasQuotaAccessToken?: boolean;
+  hasQuotaAccessToken: boolean;
   quota: ProviderQuota | null;
-  quotaChecking?: boolean;
-  quotaCheck?: import("./limit-labels").QuotaCheck | null;
+  quotaChecking: boolean;
+  quotaCheck: import("./limit-labels").QuotaCheck | null;
   maxConcurrency: number;
   maxRpm: number;
   activeRequests: number;
   rpmUsed: number;
   rpmRetryIn: number;
   rpmLimited: boolean;
-  rpmWaitReason?: string | null;
+  rpmWaitReason: string | null;
   allowedModels: string[] | null;
-  dshModels?: Record<string, string | null> | null;
-  handoffAfterCompaction?: boolean;
-  takeNewThreads?: boolean;
-  searchOnly?: boolean;
+  dshModels: Record<string, string | null> | null;
+  handoffAfterCompaction: boolean;
+  takeNewThreads: boolean;
+  searchOnly: boolean;
 };
 export type GatewayListener = {
   port: number;
@@ -191,9 +191,9 @@ export type CurrentConnection = {
 };
 export type DshProfileCurrent = { profile: string; current: CurrentConnection };
 export type GatewayState = {
-  listener?: GatewayListener;
-  grokManaged?: boolean;
-  dshProfile?: {
+  listener: GatewayListener;
+  grokManaged: boolean;
+  dshProfile: {
     profile: string;
     protocol: GrokProtocol;
     model: string | null;
@@ -208,15 +208,15 @@ export type GatewayState = {
   lastSuccessful: string | null;
   configRevision: string | null;
   configProvider: string | null;
-  current?: CurrentConnection;
+  current: CurrentConnection;
   configError: string | null;
-  configWarning?: string | null;
-  connectionMode?: "bearer" | "apiKey";
+  configWarning: string | null;
+  connectionMode: "bearer" | "apiKey";
   providers: Provider[];
   settings: GatewaySettings;
   activeConnections: number;
   waitingRequests: number;
-  pendingRequests?: {
+  pendingRequests: {
     requestId: string;
     providerId: string | null;
     model: string | null;
@@ -228,9 +228,9 @@ export type GatewayState = {
   capacityRetries: {
     providerId: string;
     retryIn: number;
-    existingOwner?: boolean;
+    existingOwner: boolean;
   }[];
-  handoffWaiting?: {
+  handoffWaiting: {
     providerId: string;
     state:
       | "awaiting_compaction"
@@ -238,8 +238,8 @@ export type GatewayState = {
       | "capacity_full"
       | "claim_in_flight";
   }[];
-  websocketRetries?: { providerId: string; retryIn: number }[];
-  transientRetries?: { providerId: string; retryIn: number }[];
+  websocketRetries: { providerId: string; retryIn: number }[];
+  transientRetries: { providerId: string; retryIn: number }[];
   error: string | null;
   recoveryPending: boolean;
 };

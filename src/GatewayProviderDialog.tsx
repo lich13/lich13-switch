@@ -17,7 +17,7 @@ export default function GatewayDialog({
   onDirtyChange,
 }: {
   clientId: ClientId;
-  connectionMode?: "bearer" | "apiKey";
+  connectionMode: "bearer" | "apiKey";
   dialog: { kind: "provider"; item?: Provider };
   close: () => void;
   revision: string;

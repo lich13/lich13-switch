@@ -94,7 +94,7 @@ function QuickContent({
       setAccounts(next);
     });
     watch("gateway-state", (s) => {
-      if ((s.clientId ?? "codex") === clientId) {
+      if (s.clientId === clientId) {
         gatewaySequence++;
         setGateway(s);
       }

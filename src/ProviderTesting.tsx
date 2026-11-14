@@ -170,7 +170,7 @@ export default function ProviderTesting({
     tab === "detection" ? (detection?.endpoint ?? provider.baseUrl) : endpoint;
   const models = catalog?.endpoint === catalogEndpoint ? catalog.value : null;
   const endpoints = [
-    ...new Set([provider.baseUrl, ...(provider.extraBaseUrls ?? [])]),
+    ...new Set([provider.baseUrl, ...provider.extraBaseUrls]),
   ];
   const endpointAvailable = endpoints.includes(endpoint);
   const modelAvailable = !!models?.models.some((m) => m.id === model);

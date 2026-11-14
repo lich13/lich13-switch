@@ -107,7 +107,7 @@ export default function App() {
   } | null>(null);
   const [focusProvider, setFocusProvider] = useState<{
     id: string;
-    clientId?: ClientId;
+    clientId: ClientId;
     action?: ProviderAction;
     sequence: number;
   } | null>(null);
@@ -522,8 +522,8 @@ export default function App() {
                 }}
               />
             )}
-            {state?.officialMode?.state === "conflict" ||
-            state?.officialMode?.state === "unavailable" ? (
+            {state?.officialMode.state === "conflict" ||
+            state?.officialMode.state === "unavailable" ? (
               <div className="banner error" role="alert">
                 <AlertTriangle size={16} />
                 <span>{state.officialMode.error}</span>
@@ -538,7 +538,7 @@ export default function App() {
                   </button>
                 )}
               </div>
-            ) : state?.officialMode?.enabled ? (
+            ) : state?.officialMode.enabled ? (
               <div className="banner">
                 <Shield size={16} />
                 <span>官方账号已启用</span>
@@ -636,7 +636,7 @@ export default function App() {
                         </button>
                       )}
                       {a.kind === "chatgpt" &&
-                        (state?.officialMode?.enabled &&
+                        (state?.officialMode.enabled &&
                         state.officialMode.accountId === a.id ? (
                           <button
                             className="text-button"
@@ -649,7 +649,7 @@ export default function App() {
                           <button
                             className="text-button"
                             disabled={
-                              busy || Boolean(state?.officialMode?.enabled)
+                              busy || Boolean(state?.officialMode.enabled)
                             }
                             onClick={() => useOfficial(a)}
                           >
@@ -727,8 +727,8 @@ export default function App() {
               <ConfigEditor
                 revision={state.configRevision}
                 home={state.preferences.codexHome}
-                claudeHome={state.preferences.claudeHome ?? "~/.claude"}
-                grokHome={state.preferences.grokHome ?? "~/.grok"}
+                claudeHome={state.preferences.claudeHome}
+                grokHome={state.preferences.grokHome}
                 theme={theme}
                 onDirty={setDirty}
                 onMessage={notify}

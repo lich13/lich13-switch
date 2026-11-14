@@ -13,8 +13,8 @@ export default function ProviderEndpoints({ provider, runtime, clientId, revisio
   update: (state: GatewayState) => void; close: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const [urls, setUrls] = useState(provider.extraBaseUrls ?? []);
-  const [saved, setSaved] = useState(JSON.stringify(provider.extraBaseUrls ?? []));
+  const [urls, setUrls] = useState(provider.extraBaseUrls);
+  const [saved, setSaved] = useState(JSON.stringify(provider.extraBaseUrls));
   const [busy, setBusy] = useState(false);
   const [probing, setProbing] = useState(false);
   const [error, setError] = useState("");
@@ -28,7 +28,7 @@ export default function ProviderEndpoints({ provider, runtime, clientId, revisio
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   useEffect(() => {
     if (!dirty && !busy && !error) {
-      const values = runtime.extraBaseUrls ?? [];
+      const values = runtime.extraBaseUrls;
       setUrls(values); setSaved(JSON.stringify(values)); baseline.current = revision;
     }
   }, [JSON.stringify(runtime.extraBaseUrls), runtime.baseUrl, revision, dirty, busy, error]);
@@ -55,7 +55,7 @@ export default function ProviderEndpoints({ provider, runtime, clientId, revisio
     finally { if (mounted.current) setProbing(false); }
   };
   const result = (url: string) => {
-    const row = runtime.endpointMeasurements?.find((v) => v.baseUrl.replace(/\/$/, "") === url.replace(/\/$/, ""));
+    const row = runtime.endpointMeasurements.find((v) => v.baseUrl.replace(/\/$/, "") === url.replace(/\/$/, ""));
     if (!row) return <span className="endpoint-result">—</span>;
     const errors: Record<string, string> = { PROBE_TIMEOUT: "测速超时", CONNECT_TIMEOUT: "连接超时", TLS_HANDSHAKE_FAILED: "TLS 失败", GATEWAY_LOOP: "网关回环", CONNECTION_FAILED: "连接失败" };
     return <span className="endpoint-result" title={`${row.status ? `HTTP ${row.status}` : row.error ?? ""} · ${new Date(row.checkedAt).toLocaleTimeString()}`}>
@@ -85,7 +85,7 @@ export default function ProviderEndpoints({ provider, runtime, clientId, revisio
         <input type="url" required aria-label={`辅助 base_url ${index + 1}`} placeholder="https://api.example.invalid/v1" value={url} disabled={busy} onChange={(e) => setUrls(urls.map((v, i) => i === index ? e.target.value : v))} />
         <div className="endpoint-row-actions">{result(url)}<button type="button" className="icon-button compact" aria-label={`辅助端点 ${index + 1} 设为主端点`} title="与主端点互换" disabled={busy || dirty} onClick={() => void submit({ op: "swapEndpoint", id: provider.id, baseUrl: url }, false)}><ArrowUpDown size={15} /></button><button type="button" className="icon-button compact" aria-label={`删除辅助端点 ${index + 1}`} title="删除" disabled={busy} onClick={() => setUrls(urls.filter((_, i) => i !== index))}><Trash2 size={15} /></button></div>
       </div>)}</div>
-      {runtime.preferredBaseUrl && runtime.endpointMeasurements?.length ? <div className="endpoint-preferred"><span>新连接优选</span><span title={runtime.preferredBaseUrl}>{runtime.preferredBaseUrl}</span></div> : null}
+      {runtime.endpointMeasurements.length ? <div className="endpoint-preferred"><span>新连接优选</span><span title={runtime.preferredBaseUrl}>{runtime.preferredBaseUrl}</span></div> : null}
       {error && <div className="form-error" role="alert">{error}</div>}
       {notice && <div role="status">{notice}</div>}
       <div className="dialog-actions"><button type="button" className="secondary" disabled={busy} onClick={() => void leave()}>取消</button><button className="primary" disabled={busy}>{busy ? "保存中…" : baseline.current === null ? "重试" : "保存"}</button></div>

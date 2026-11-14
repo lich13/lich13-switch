@@ -1,12 +1,12 @@
 import { limitLabel, rpmWaitLabel } from "./limit-labels";
 import type { Provider, GatewayState } from "./types";
 function pendingHealth(h: Provider["health"]) {
-  return h.available === false || h.state !== "closed" || h.probeInFlight;
+  return !h.available || h.state !== "closed" || h.probeInFlight;
 }
 export function providerFault(p: Provider) {
   return (
     p.health.cause ??
-    p.modelHealth?.find((m) => pendingHealth(m.health))?.health.cause
+    p.modelHealth.find((m) => pendingHealth(m.health))?.health.cause
   );
 }
 export function providerRuntimeStatus(
@@ -15,19 +15,19 @@ export function providerRuntimeStatus(
 ): string {
   const fault = providerFault(p);
   const limit = limitLabel(fault);
-  const capacity = state.capacityRetries?.find(
+  const capacity = state.capacityRetries.find(
     (w) => w.providerId === p.id && w.existingOwner,
   );
   if (capacity)
     return `${limit || "临时限流"} · 原供应商等待${capacity.retryIn}秒${p.quotaChecking ? " · 正在核验额度" : ""}`;
   if (
     p.health.state !== "closed" ||
-    p.modelHealth?.some((m) => m.health.state !== "closed")
+    p.modelHealth.some((m) => m.health.state !== "closed")
   )
     return providerStatus(p);
-  const reconnect = state.websocketRetries?.find((w) => w.providerId === p.id);
+  const reconnect = state.websocketRetries.find((w) => w.providerId === p.id);
   if (reconnect) return `WS 断开 · 重连${reconnect.retryIn}秒`;
-  const retry = state.transientRetries?.find((w) => w.providerId === p.id);
+  const retry = state.transientRetries.find((w) => w.providerId === p.id);
   if (retry)
     return `${causeText(p) || "上游波动"} · 原线路重试${retry.retryIn}秒`;
   return providerStatus(p);
@@ -36,7 +36,7 @@ export function providerHandoffStatus(
   p: Provider,
   state: GatewayState,
 ): string {
-  const waiting = state.handoffWaiting?.find((w) => w.providerId === p.id);
+  const waiting = state.handoffWaiting.find((w) => w.providerId === p.id);
   return waiting
     ? {
         awaiting_compaction: "待压缩后接管",
@@ -79,8 +79,8 @@ function causeText(p: Provider): string {
 export function providerStatus(p: Provider): string {
   const h = p.health;
   const reason = causeText(p);
-  if (h.available !== false && h.state === "closed" && !h.cooldownReason) {
-    const model = p.modelHealth?.find((m) => pendingHealth(m.health));
+  if (h.available && h.state === "closed" && !h.cooldownReason) {
+    const model = p.modelHealth.find((m) => pendingHealth(m.health));
     if (model) {
       const label = model.model.replace(/^gpt-[\d.]+-/, "");
       const scoped = { ...p, health: model.health, modelHealth: [] };

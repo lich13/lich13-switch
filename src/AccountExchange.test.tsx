@@ -76,8 +76,24 @@ const savedState: ViewState = {
   authRevision: "fixture-auth-revision",
   configRevision: "fixture-config-revision",
   currentState: "missing",
-  preferences: { codexHome: "/fixture/codex", cliPath: "", theme: "system" },
+  preferences: {
+    codexHome: "/fixture/codex",
+    claudeHome: "/fixture/claude",
+    grokHome: "/fixture/grok",
+    dshHome: "/fixture/dsh",
+    cliPath: "",
+    theme: "system",
+    quotaRefreshSeconds: 60,
+    systemNotifications: true,
+  },
+  authSync: null,
   error: null,
+  officialMode: {
+    enabled: false,
+    state: "disabled",
+    accountId: null,
+    error: null,
+  },
 };
 
 async function defaultCommand(name: string) {

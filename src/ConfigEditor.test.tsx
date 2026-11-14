@@ -76,6 +76,7 @@ function mount() {
       revision="codex-only"
       home="/codex"
       claudeHome="/claude"
+      grokHome="/grok"
       theme="dark"
       onDirty={vi.fn()}
       onMessage={vi.fn()}

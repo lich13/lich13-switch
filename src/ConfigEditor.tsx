@@ -33,7 +33,7 @@ type Props = {
   revision: string;
   home: string;
   claudeHome: string;
-  grokHome?: string;
+  grokHome: string;
   theme: "light" | "dark";
   onDirty: (value: boolean) => void;
   onMessage: (s: string) => void;
@@ -52,7 +52,7 @@ export default function ConfigEditor(props: Props) {
     clientId === "claude"
       ? props.claudeHome
       : clientId === "grok"
-        ? (props.grokHome ?? "~/.grok")
+        ? props.grokHome
         : props.home;
   if (clientId === "dsh")
     return (

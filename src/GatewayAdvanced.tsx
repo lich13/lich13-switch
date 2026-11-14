@@ -25,7 +25,7 @@ export default function Advanced({
   clientId: ClientId;
   onDirtyChange?: (dirty: boolean) => void;
   settings: GatewaySettings;
-  listener?: GatewayListener;
+  listener: GatewayListener;
   revision: string;
   busy: boolean;
   save: (s: GatewaySettings, revision: EditRevision) => Promise<void>;
@@ -107,8 +107,7 @@ export default function Advanced({
             disabled={
               busy ||
               (key === "port" &&
-                (!!listener?.runningClients.length ||
-                  !!listener?.antigravityActive))
+                (!!listener.runningClients.length || listener.antigravityActive))
             }
             required
             min={
@@ -128,9 +127,7 @@ export default function Advanced({
                         : undefined
             }
             step={1}
-            value={
-              draft[key] ?? (key === "transientFailureThreshold" ? 6 : 300)
-            }
+            value={draft[key]}
             onInvalid={(e) => {
               let section = e.currentTarget.closest("details");
               while (section) {
@@ -169,7 +166,7 @@ export default function Advanced({
         <summary>故障策略</summary>
         <FailureRules
           clientId={clientId}
-          rules={settings.customFailureRules ?? []}
+          rules={settings.customFailureRules}
           revision={revision}
         />
         {groups.map((group) => (
@@ -194,7 +191,7 @@ export default function Advanced({
           e.preventDefault();
           setError("");
           void save(
-            { ...draft, customFailureRules: settings.customFailureRules ?? [] },
+            { ...draft, customFailureRules: settings.customFailureRules },
             baseRevision.current,
           )
             .then(() => {

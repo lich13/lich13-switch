@@ -68,8 +68,24 @@ beforeEach(() => {
     authRevision: "auth-1",
     configRevision: "cfg-1",
     currentState: "saved",
-    preferences: { codexHome: "/test/.codex", cliPath: "", theme: "dark" },
+    preferences: {
+      codexHome: "/test/.codex",
+      claudeHome: "/test/.claude",
+      grokHome: "/test/.grok",
+      dshHome: "/test/.dsh",
+      cliPath: "",
+      theme: "dark",
+      quotaRefreshSeconds: 60,
+      systemNotifications: true,
+    },
+    authSync: null,
     error: null,
+    officialMode: {
+      enabled: false,
+      state: "disabled",
+      accountId: null,
+      error: null,
+    },
   };
   doc = {
     clientId: "codex",

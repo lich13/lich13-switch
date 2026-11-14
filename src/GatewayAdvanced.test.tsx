@@ -73,6 +73,7 @@ describe("gateway advanced settings", () => {
     const props = {
       clientId: "codex" as const,
       settings: codexState.settings,
+      listener: codexState.listener,
       revision: "original",
       busy: false,
       save,

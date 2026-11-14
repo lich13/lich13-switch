@@ -68,6 +68,7 @@ export const demo: ViewState = {
   preferences: {
     claudeHome: "~/.claude",
     grokHome: "~/.grok",
+    dshHome: "~/.dsh",
     codexHome: "~/.codex",
     cliPath: "",
     theme:
@@ -77,6 +78,7 @@ export const demo: ViewState = {
     quotaRefreshSeconds: 60,
     systemNotifications: true,
   },
+  authSync: null,
   error: null,
   officialMode: {
     enabled: false,

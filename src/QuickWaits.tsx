@@ -29,13 +29,13 @@ export default function QuickWaits({
   const elapsed = (phase: string) =>
     phase === "frozen" ? 0 : Math.max(0, Math.floor((now - receivedAt) / 1000));
   useEffect(() => {
-    if (!visible || !gateway.pendingRequests?.some((r) => r.phase !== "frozen"))
+    if (!visible || !gateway.pendingRequests.some((r) => r.phase !== "frozen"))
       return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [visible, gateway.pendingRequests]);
-  const requests = (gateway.pendingRequests ?? []).filter(
+  const requests = gateway.pendingRequests.filter(
     (r) => r.elapsedSeconds + elapsed(r.phase) >= 60,
   );
   if (!requests.length) return null;
