@@ -1,6 +1,6 @@
 [package]
 name = "vela"
-version = "0.26.39"
+version = "0.27.0"
 description = "Independent Codex, Claude Code and Grok Build providers and local gateways"
 edition = "2021"
 rust-version = "1.85"
