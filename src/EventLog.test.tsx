@@ -41,6 +41,8 @@ const record: EventRecord = {
   action: "trying_next",
   level: "warning",
   status: 404,
+  origin: "upstream",
+  category: "ordinary_error",
   errorCode: "MODEL_UNAVAILABLE",
   attempt: 1,
 };
@@ -201,7 +203,7 @@ describe("event log", () => {
     }
   });
 
-  it("renders category labels, classifies legacy rows, and keeps five columns", async () => {
+  it("renders category labels and keeps five columns", async () => {
     const categorized = (
       id: string,
       category: EventRecord["category"],
@@ -219,6 +221,7 @@ describe("event log", () => {
         action: "returned",
         level: "error",
         status: 502,
+        origin: "gateway",
         details: { healthScope: "provider" },
       }),
       categorized("status-category", "status", {
@@ -226,8 +229,9 @@ describe("event log", () => {
         action: "routed",
         level: "info",
         status: null,
+        origin: "gateway",
       }),
-      { ...record, id: "legacy-category" },
+      categorized("model-category", "ordinary_error"),
     ];
 
     render(<EventLog />);
@@ -261,6 +265,7 @@ describe("event log", () => {
           action: "returned",
           level: "error",
           status: 502,
+          origin: "gateway",
           errorCode: "CIRCUIT_OPEN",
           category: "circuit_error",
           details: {
@@ -435,6 +440,7 @@ it("separates origins, resets pagination, and hides policy actions for internal 
     id: "internal",
     reason: "circuit_open",
     origin: "gateway",
+    category: "circuit_error",
     details: { upstreamCode: "overloaded_error", errorBasis: "service_error" },
   };
   const agyError: EventRecord = {

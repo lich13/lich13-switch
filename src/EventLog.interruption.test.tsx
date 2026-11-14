@@ -33,6 +33,8 @@ const resetRecord: EventRecord = {
   action: "not_retried",
   level: "warning",
   status: 200,
+  origin: "gateway",
+  category: "ordinary_error",
   attempt: null,
   details: {
     healthScope: "request",
@@ -134,6 +136,7 @@ it("renders an explicit cancellation as a status record", async () => {
       id: "fixture-explicit-cancel",
       action: "returned",
       level: "info",
+      category: "status",
       details: {
         healthScope: "request",
         localCode: "CANCELLED",
@@ -180,6 +183,8 @@ it("keeps legacy interruption records readable when delivery details are absent"
       action: "returned",
       level: "warning",
       status: 200,
+      origin: "gateway",
+      category: "ordinary_error",
       attempt: null,
     },
   ];

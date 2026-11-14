@@ -43,23 +43,13 @@ export const reasons = {
   request_interrupted: "请求交付提前结束",
 } as const;
 
-export const errorCodes: Record<keyof typeof reasons, string> = {
-  model_unavailable: "MODEL_UNAVAILABLE",
-  authentication: "AUTHENTICATION_FAILED",
-  upstream_service: "UPSTREAM_SERVICE_ERROR",
-  network: "NETWORK_ERROR",
-  rate_limit: "RATE_LIMITED",
-  capacity: "CAPACITY_LIMITED",
+/** Events the summary names by what happened; their records may carry a narrower code. */
+const eventCodes: Partial<Record<keyof typeof reasons, string>> = {
   failover_exhausted: "FAILOVER_EXHAUSTED",
   failover: "FAILOVER",
   circuit_open: "CIRCUIT_OPEN",
   thread_handoff: "THREAD_HANDOFF",
   thread_routing: "THREAD_ROUTING",
-  config_conflict: "CONFIG_CONFLICT",
-  startup_recovery: "STARTUP_RECOVERY_FAILED",
-  account_sync: "ACCOUNT_SYNC_ERROR",
-  protocol_error: "PROTOCOL_ERROR",
-  request_interrupted: "REQUEST_INTERRUPTED",
 };
 
 const actions = {
@@ -83,7 +73,7 @@ export type EventOrigin = "upstream" | "gateway" | "antigravity";
 
 export type EventRecord = {
   id: string;
-  origin?: EventOrigin;
+  origin: EventOrigin;
   firstAt: number;
   lastAt: number;
   count: number;
@@ -91,10 +81,10 @@ export type EventRecord = {
   providerId: string | null;
   model: string | null;
   reason: keyof typeof reasons;
-  errorCode?: string;
+  errorCode: string;
   action: keyof typeof actions;
   level: "warning" | "error" | "info";
-  category?: keyof typeof categories;
+  category: keyof typeof categories;
   status: number | null;
   attempt: number | null;
   details?: {
@@ -205,10 +195,6 @@ function statusTone(status: number | null) {
   return "other";
 }
 
-function normalizedCode(record: EventRecord) {
-  return record.errorCode || errorCodes[record.reason] || "UNKNOWN_ERROR";
-}
-
 const phases: Record<string, string> = {
   admission: "准入",
   connect: "建立连接",
@@ -241,47 +227,11 @@ function reasonText(r: EventRecord) {
     if (r.details?.healthScope === "model") return "模型熔断";
     return r.details?.healthScope === "provider" ? "供应商熔断" : "熔断";
   }
-  if (eventOrigin(r) === "upstream" || r.details?.quotaCheck) {
+  if (r.origin === "upstream" || r.details?.quotaCheck) {
     const limit = limitLabel(r.details);
     if (limit) return limit;
   }
   return reasons[r.reason];
-}
-export function eventOrigin(r: EventRecord): EventOrigin {
-  if (r.origin) return r.origin;
-  if (r.clientId === "antigravity") return "antigravity";
-  const response = [
-    "model_unavailable",
-    "authentication",
-    "upstream_service",
-    "rate_limit",
-    "capacity",
-    "protocol_error",
-  ].includes(r.reason);
-  return response &&
-    !(r.level === "info" && r.details?.quotaCheck) &&
-    (r.details?.rawError ||
-      r.details?.upstreamCode ||
-      r.details?.upstreamType ||
-      (r.status != null && r.status >= 400) ||
-      (r.status != null && r.details?.errorBasis))
-    ? "upstream"
-    : "gateway";
-}
-function category(r: EventRecord): keyof typeof categories {
-  if (r.category) return r.category;
-  if (r.details?.quotaCheck && r.level === "info") return "status";
-  // Older API responses have no classification. Only an actual open event is
-  // sufficient evidence here; a counted failure alone never is.
-  if (r.reason === "circuit_open") return "circuit_error";
-  if (
-    ["request_interrupted", "thread_routing"].includes(r.reason) &&
-    r.level === "info"
-  )
-    return "status";
-  return ["failover", "thread_handoff"].includes(r.reason)
-    ? "status"
-    : "ordinary_error";
 }
 function circuitCause(r: EventRecord) {
   return (
@@ -315,25 +265,14 @@ function circuitTrigger(r: EventRecord) {
   }
 }
 function primaryCode(r: EventRecord) {
-  if (eventOrigin(r) === "gateway") {
-    if (
-      [
-        "circuit_open",
-        "thread_routing",
-        "thread_handoff",
-        "failover",
-        "failover_exhausted",
-      ].includes(r.reason)
-    )
-      return errorCodes[r.reason] || normalizedCode(r);
-    return r.details?.localCode || normalizedCode(r);
-  }
+  if (r.origin === "gateway")
+    return eventCodes[r.reason] || r.details?.localCode || r.errorCode;
   return (
     r.details?.upstreamCode ??
     r.details?.upstreamReason ??
     r.details?.upstreamType ??
     r.details?.localCode ??
-    normalizedCode(r)
+    r.errorCode
   );
 }
 function summaryMessage(r: EventRecord) {
@@ -343,7 +282,7 @@ function summaryMessage(r: EventRecord) {
     return [reasonText(r), routingOutcome(r.details.routing.outcome)]
       .filter(Boolean)
       .join(" · ");
-  if (eventOrigin(r) === "gateway") return reasonText(r);
+  if (r.origin === "gateway") return reasonText(r);
   return [
     r.details?.message || reasonText(r),
     r.details?.upstreamReason !== primaryCode(r)
@@ -452,7 +391,7 @@ export default function EventLog({
     void command("get_app_event", { id: current.id })
       .then((record) => {
         if (record && request === detailSequence.current) {
-          setOrigin(eventOrigin(record));
+          setOrigin(record.origin);
           setSelected(record);
         }
       })
@@ -796,7 +735,7 @@ export default function EventLog({
           </thead>
           <tbody>
             {data.items.map((r) => {
-              const cat = category(r);
+              const cat = r.category;
               return (
                 <tr key={r.id} data-category={cat}>
                   <td>
@@ -967,7 +906,7 @@ function EventDetail({
     };
   }, []);
 
-  const eventCategory = category(r);
+  const eventCategory = r.category;
   return (
     <dialog
       ref={ref}
@@ -1010,7 +949,7 @@ function EventDetail({
           </button>
         </header>
         <div className="event-rule-actions">
-          {eventOrigin(r) === "upstream" &&
+          {r.origin === "upstream" &&
             r.clientId &&
             (r.details?.upstreamCode ||
               r.details?.message ||
@@ -1065,7 +1004,7 @@ function EventDetail({
         )}
         <dl>
           {[
-            ["类别", categories[category(r)]],
+            ["类别", categories[r.category]],
             ["HTTP 状态", wireStatus(r)],
             [
               "影响范围",
@@ -1103,7 +1042,7 @@ function EventDetail({
                   ["检查时间", time(r.details.quotaCheck.checkedAt)],
                 ]
               : []),
-            ["网关诊断码", r.details?.localCode ?? normalizedCode(r)],
+            ["网关诊断码", r.details?.localCode ?? r.errorCode],
             ["上游错误类型", r.details?.upstreamType ?? "未提供"],
             ["错误摘要", r.details?.message ?? reasonText(r)],
             ["参数", r.details?.parameter ?? "未提供"],

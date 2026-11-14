@@ -81,6 +81,8 @@ const baseEvent: EventRecord = {
   action: "returned",
   level: "info",
   status: null,
+  origin: "gateway",
+  category: "status",
   errorCode: "THREAD_ROUTING",
   attempt: 2,
 };

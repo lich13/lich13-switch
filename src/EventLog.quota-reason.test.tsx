@@ -20,6 +20,8 @@ const baseRecord: EventRecord = {
   action: "retrying_same",
   level: "warning",
   status: 429,
+  origin: "upstream",
+  category: "ordinary_error",
   errorCode: "RATE_LIMITED",
   attempt: 1,
 };

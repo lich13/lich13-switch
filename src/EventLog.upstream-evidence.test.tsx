@@ -20,6 +20,8 @@ const baseRecord: EventRecord = {
   action: "returned",
   level: "error",
   status: 502,
+  origin: "upstream",
+  category: "ordinary_error",
   errorCode: "UPSTREAM_SERVICE_ERROR",
   attempt: 1,
 };
@@ -51,6 +53,7 @@ function circuitRecord({
     status,
     errorCode: "CIRCUIT_OPEN",
     category: "circuit_error",
+    origin: "gateway",
     details: {
       healthScope: "provider",
       waitSeconds,
@@ -97,6 +100,7 @@ it("normalizes a numeric upstream code in the summary and keeps local code as a 
       id: "fixture-local-code",
       reason: "network",
       status: null,
+      origin: "gateway",
       details: { localCode: "CONNECTION_FAILED", message: null },
     },
   ];
@@ -114,6 +118,7 @@ it("keeps HTTP status and WebSocket close code as separate detail values", async
       reason: "circuit_open",
       errorCode: "CIRCUIT_OPEN",
       category: "circuit_error",
+      origin: "gateway",
       details: {
         healthScope: "provider",
         upstreamCode: "overloaded_error",

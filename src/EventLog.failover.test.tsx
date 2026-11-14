@@ -21,6 +21,8 @@ const baseRecord: EventRecord = {
   action: "returned",
   level: "error",
   status: 502,
+  origin: "gateway",
+  category: "ordinary_error",
   attempt: 1,
 };
 
@@ -110,6 +112,7 @@ it("uses the existing fallback labels for unknown diagnostic enum values", async
       action: "returned",
       level: "warning",
       status: 429,
+      origin: "upstream",
       details: {
         errorBasis: "future_basis",
         rpmWaitReason: "future_wait",

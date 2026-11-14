@@ -1,4 +1,4 @@
-import { eventOrigin, type EventRecord } from "./EventLog";
+import type { EventRecord } from "./EventLog";
 import { usageCommands, usagePreview } from "./usage-preview";
 import {
   disableClamshellOnFreeze,
@@ -495,25 +495,23 @@ export async function run(
             ([key, v]) =>
               !v ||
               key === "page" ||
-              (key === "origin"
-                ? eventOrigin(r) === v
-                : key === "statusGroup"
-                  ? v === "no_status"
-                    ? r.status == null
-                    : r.status != null &&
-                      Math.floor(r.status / 100) ===
-                        (
-                          {
-                            success: 2,
-                            client_error: 4,
-                            server_error: 5,
-                          } as Record<string, number>
-                        )[String(v)]
-                  : key === "from"
-                    ? r.lastAt >= Number(v)
-                    : key === "to"
-                      ? r.firstAt <= Number(v)
-                      : r[key as keyof typeof r] === v),
+              (key === "statusGroup"
+                ? v === "no_status"
+                  ? r.status == null
+                  : r.status != null &&
+                    Math.floor(r.status / 100) ===
+                      (
+                        {
+                          success: 2,
+                          client_error: 4,
+                          server_error: 5,
+                        } as Record<string, number>
+                      )[String(v)]
+                : key === "from"
+                  ? r.lastAt >= Number(v)
+                  : key === "to"
+                    ? r.firstAt <= Number(v)
+                    : r[key as keyof typeof r] === v),
           ),
       );
       const page = Math.max(
@@ -521,9 +519,7 @@ export async function run(
         Math.min(Number(filter.page) || 1, Math.ceil(rows.length / 50) || 1),
       );
       return {
-        items: rows
-          .slice((page - 1) * 50, page * 50)
-          .map((r) => ({ ...r, origin: eventOrigin(r) })),
+        items: rows.slice((page - 1) * 50, page * 50),
         total: rows.length,
         page,
         error: null,
@@ -531,7 +527,7 @@ export async function run(
     }
     case "get_app_event": {
       const r = demoEvents.find((r) => r.id === args.id);
-      return r ? { ...r, origin: eventOrigin(r) } : null;
+      return r ?? null;
     }
     case "clear_app_events":
       demoEvents = [];
@@ -777,6 +773,9 @@ let demoEvents: EventRecord[] = [
     action: "trying_next",
     level: "warning",
     status: 404,
+    errorCode: "MODEL_UNAVAILABLE",
+    origin: "upstream",
+    category: "ordinary_error",
     attempt: 1,
     details: {
       upstreamCode: densePreview
@@ -801,6 +800,9 @@ let demoEvents: EventRecord[] = [
     action: "stopped",
     level: "error",
     status: null,
+    errorCode: "CONFIG_CONFLICT",
+    origin: "gateway",
+    category: "ordinary_error",
     attempt: null,
   },
   {
@@ -815,6 +817,9 @@ let demoEvents: EventRecord[] = [
     action: "reconnecting",
     level: "warning",
     status: 101,
+    errorCode: "NETWORK_ERROR",
+    origin: "gateway",
+    category: "ordinary_error",
     attempt: 1,
     details: {
       phase: "ws_receive",
@@ -836,6 +841,9 @@ let demoEvents: EventRecord[] = [
     action: "stopped",
     level: "error",
     status: 503,
+    errorCode: "CIRCUIT_OPEN",
+    origin: "gateway",
+    category: "circuit_error",
     attempt: 4,
     details: {
       upstreamCode: "service_unavailable",

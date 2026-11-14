@@ -24,6 +24,8 @@ const baseRecord: EventRecord = {
   action: "not_retried",
   level: "info",
   status: 200,
+  origin: "gateway",
+  category: "status",
   attempt: null,
   details: {
     healthScope: "request",
@@ -67,6 +69,8 @@ it("loads and copies the complete error, and opens policy by event ID without th
     ...structuredClone(baseRecord),
     reason: "capacity",
     level: "warning",
+    origin: "upstream",
+    category: "ordinary_error",
     details: {
       message: "short preview",
       errorBasis: "capacity",
@@ -213,6 +217,8 @@ it("keeps legacy interruption records readable without delivery details", async 
       action: "returned",
       level: "warning",
       status: 200,
+      origin: "gateway",
+      category: "ordinary_error",
       attempt: null,
     },
   ];
@@ -303,6 +309,8 @@ it("shows actual failover separately from the rejected supplier cooldown", async
       reason: "upstream_service",
       action: "trying_next",
       status: 429,
+      origin: "upstream",
+      category: "ordinary_error",
       details: {
         errorBasis: "billing",
         healthScope: "provider",
