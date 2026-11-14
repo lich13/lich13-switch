@@ -89,8 +89,8 @@ fn build_power() {
         .lines()
         .find_map(|l| l.strip_prefix("CDHash="))
         .expect("helper CDHash");
-    println!("cargo:rustc-env=GPT_POWER_HELPER={}", helper.display());
-    println!("cargo:rustc-env=GPT_POWER_HASH={hash}");
+    println!("cargo:rustc-env=VELA_POWER_HELPER={}", helper.display());
+    println!("cargo:rustc-env=VELA_POWER_HASH={hash}");
     let mut args = common.to_vec();
     args.extend([
         "-c",
@@ -103,12 +103,12 @@ fn build_power() {
         "ar",
         &[
             "rcs",
-            out.join("libgpt_power.a").to_str().unwrap(),
+            out.join("libvela_power.a").to_str().unwrap(),
             object.to_str().unwrap(),
         ],
     );
     println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=gpt_power");
+    println!("cargo:rustc-link-lib=static=vela_power");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=Security");
     // Expose a safe, standalone simulator for the native helper logic to cargo tests.
@@ -129,5 +129,5 @@ fn build_power() {
         ]);
         run("xcrun", &args);
     }
-    println!("cargo:rustc-env=GPT_POWER_TEST={}", test.display());
+    println!("cargo:rustc-env=VELA_POWER_TEST={}", test.display());
 }

@@ -3,7 +3,7 @@
 #import <xpc/xpc.h>
 
 // Public XPC peer requirements (macOS 12+) bind both ends to approved code.
-char *gs_power_request(const char *json, const char *requirement, uint64_t timeout_ms) {
+char *vela_power_request(const char *json, const char *requirement, uint64_t timeout_ms) {
     @autoreleasepool {
         dispatch_queue_t queue = dispatch_queue_create("com.lich13.vela.power-client", DISPATCH_QUEUE_SERIAL);
         xpc_connection_t connection = xpc_connection_create_mach_service("com.lich13.vela.power-helper", queue, XPC_CONNECTION_MACH_SERVICE_PRIVILEGED);
@@ -29,7 +29,7 @@ char *gs_power_request(const char *json, const char *requirement, uint64_t timeo
         return answer;
     }
 }
-char *gs_power_identity(void) {
+char *vela_power_identity(void) {
     @autoreleasepool {
         SecCodeRef code = NULL;
         CFDictionaryRef info = NULL;
@@ -45,4 +45,4 @@ char *gs_power_identity(void) {
         return result;
     }
 }
-void gs_power_free(char *value) { free(value); }
+void vela_power_free(char *value) { free(value); }

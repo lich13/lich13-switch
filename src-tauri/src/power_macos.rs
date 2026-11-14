@@ -10,15 +10,15 @@ use std::{
 };
 const APP: &str = "/Applications/Vela.app/Contents/MacOS/vela";
 const HELPER: &str = "/Library/PrivilegedHelperTools/com.lich13.vela.power-helper";
-const IMAGE: &[u8] = include_bytes!(env!("GPT_POWER_HELPER"));
+const IMAGE: &[u8] = include_bytes!(env!("VELA_POWER_HELPER"));
 unsafe extern "C" {
-    fn gs_power_request(
+    fn vela_power_request(
         json: *const c_char,
         requirement: *const c_char,
         timeout_ms: u64,
     ) -> *mut c_char;
-    fn gs_power_identity() -> *mut c_char;
-    fn gs_power_free(value: *mut c_char);
+    fn vela_power_identity() -> *mut c_char;
+    fn vela_power_free(value: *mut c_char);
 }
 fn take(value: *mut c_char) -> Option<String> {
     if value.is_null() {
@@ -28,7 +28,7 @@ fn take(value: *mut c_char) -> Option<String> {
         .to_string_lossy()
         .into_owned();
     unsafe {
-        gs_power_free(value);
+        vela_power_free(value);
     }
     Some(string)
 }
@@ -50,11 +50,11 @@ fn request_with_timeout(value: Value, timeout_ms: u64) -> Result<Value> {
     let input = CString::new(value.to_string()).unwrap();
     let requirement = CString::new(format!(
         "identifier \"com.lich13.vela.power-helper\" and cdhash H\"{}\"",
-        env!("GPT_POWER_HASH")
+        env!("VELA_POWER_HASH")
     ))
     .unwrap();
     let response =
-        take(unsafe { gs_power_request(input.as_ptr(), requirement.as_ptr(), timeout_ms) })
+        take(unsafe { vela_power_request(input.as_ptr(), requirement.as_ptr(), timeout_ms) })
             .ok_or_else(|| {
                 AppError::new(
                     code::POWER_HELPER,
@@ -172,7 +172,7 @@ pub fn ensure() -> Result<()> {
             "隔离程序不注册系统电源助手",
         ));
     }
-    let hash = take(unsafe { gs_power_identity() })
+    let hash = take(unsafe { vela_power_identity() })
         .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or_else(|| AppError::new(code::POWER_AUTH, "无法校验当前应用签名"))?;
     let folder = storage::private_tempdir(&std::env::temp_dir(), ".tmp")?;
@@ -293,7 +293,7 @@ mod tests {
     }
     #[test]
     fn native_helper_transactions_are_simulated() {
-        let output = std::process::Command::new(env!("GPT_POWER_TEST"))
+        let output = std::process::Command::new(env!("VELA_POWER_TEST"))
             .output()
             .unwrap();
         assert!(
